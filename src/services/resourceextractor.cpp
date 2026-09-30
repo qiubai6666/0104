@@ -1,4 +1,5 @@
 #include "resourceextractor.h"
+#include "version.h"
 #include <QFile>
 #include <QDir>
 #include <QStandardPaths>
@@ -9,7 +10,7 @@ QString ResourceExtractor::getResourcePath()
 {
     // 直接使用AppData/Local/qiubai目录
     QString appDataPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
-    return appDataPath + "/qiubai";
+    return appDataPath + "/" + RESOURCE_FOLDER;
 }
 
 bool ResourceExtractor::extractFile(const QString &resourcePath, const QString &outputPath)
@@ -19,18 +20,18 @@ bool ResourceExtractor::extractFile(const QString &resourcePath, const QString &
         qDebug() << "无法打开资源文件:" << resourcePath;
         return false;
     }
-    
+
     QFile outputFile(outputPath);
     if (!outputFile.open(QIODevice::WriteOnly)) {
         qDebug() << "无法创建输出文件:" << outputPath;
         resourceFile.close();
         return false;
     }
-    
+
     outputFile.write(resourceFile.readAll());
     outputFile.close();
     resourceFile.close();
-    
+
     return true;
 }
 
@@ -38,7 +39,7 @@ bool ResourceExtractor::extractResources()
 {
     QString targetPath = getResourcePath();
     QDir targetDir(targetPath);
-    
+
     // 如果目录已存在，先删除
     if (targetDir.exists()) {
         qDebug() << "资源目录已存在，删除旧目录:" << targetPath;
@@ -46,37 +47,37 @@ bool ResourceExtractor::extractResources()
             qDebug() << "警告：无法完全删除旧目录，尝试继续...";
         }
     }
-    
+
     // 创建目录
     QDir dir;
     if (!dir.mkpath(targetPath)) {
         qDebug() << "无法创建目录:" << targetPath;
         return false;
     }
-    
+
     qDebug() << "开始提取资源到:" << targetPath;
-    
+
     // 遍历所有qiubai资源
     QDirIterator it(":/qiubai", QDirIterator::Subdirectories);
     int successCount = 0;
     int totalCount = 0;
-    
+
     while (it.hasNext()) {
         QString resourcePath = it.next();
         QFileInfo fileInfo(resourcePath);
-        
+
         if (fileInfo.isFile()) {
             totalCount++;
             QString fileName = fileInfo.fileName();
             QString outputPath;
-            
+
             // Neil.jpg 单独提取到 AppData/Local 目录
             if (fileName == "Neil.jpg") {
                 outputPath = getNeilImagePath();
             } else {
                 outputPath = targetPath + "/" + fileName;
             }
-            
+
             if (extractFile(resourcePath, outputPath)) {
                 successCount++;
                 qDebug() << "提取成功:" << fileName;
@@ -85,7 +86,7 @@ bool ResourceExtractor::extractResources()
             }
         }
     }
-    
+
     qDebug() << "资源提取完成:" << successCount << "/" << totalCount;
     return successCount > 0;
 }

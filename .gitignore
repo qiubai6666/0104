@@ -8,7 +8,7 @@
 build/
 debug/
 release/
-FloatingWindowApp/
+OrangeToolsApp/
 
 # qmake 生成的文件
 Makefile
@@ -55,3 +55,6 @@ $RECYCLE.BIN/
 # 打包输出
 package_*/
 *.zip
+
+# 下载发布包及校验文件
+dist/

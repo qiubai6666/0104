@@ -21,7 +21,7 @@ class ConfigWindow : public QWidget
 public:
     explicit ConfigWindow(QWidget *parent = nullptr);
     ~ConfigWindow();
-    
+
     void setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight);
 
 private slots:
@@ -32,6 +32,14 @@ private slots:
     void onDownloadTimeout();  // 超时处理
 
 private:
+    // download_config.txt 的一行数据，只在读取文件时解析分隔符。
+    struct DownloadConfig {
+        QString fileType;  // exe 或 zip
+        QString fileName;
+        QString url;
+    };
+    enum { DownloadOptionCount = 6 };
+
     void setupUI();
     void openNDM();
     void openWebLink();
@@ -43,12 +51,12 @@ private:
     void openExecutable(const QString &exePath);
     QString findFileRecursively(const QString &dirPath, const QString &fileName);
     void onExtractFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    
+
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;
     QNetworkAccessManager *networkManager;
     QNetworkAccessManager *fileDownloadManager;
-    QMap<int, QString> configData;  // id -> 文件类型|文件名|URL
+    QMap<int, DownloadConfig> configData;  // 配置编号 -> 下载描述
     QMap<QNetworkReply*, int> downloadingFiles;  // reply -> id
     QMap<int, QString> originalButtonTexts;  // id -> 原始按钮文本
     QMap<QNetworkReply*, QByteArray> downloadBuffers;  // reply -> 下载缓冲区

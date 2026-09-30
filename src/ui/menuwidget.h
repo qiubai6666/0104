@@ -2,16 +2,16 @@
 #define MENUWIDGET_H
 
 #include <QWidget>
-#include <QPushButton>
-#include <QVBoxLayout>
 #include <QVector>
 #include <QProcess>
-#include <QTimer>
-#include "deviceinfowindow.h"
-#include "repairwindow.h"
-#include "payloadwindow.h"
-#include "devicecheckwindow.h"
-#include "configwindow.h"
+
+class QPushButton;
+class QVBoxLayout;
+class DeviceInfoWindow;
+class RepairWindow;
+class PayloadWindow;
+class DeviceCheckWindow;
+class ConfigWindow;
 
 class MenuWidget : public QWidget
 {
@@ -28,12 +28,19 @@ private slots:
     void onCleanupProcessFinished();
 
 private:
+    // 与 setupUI() 中按钮顺序对应，避免在业务代码中直接使用数字索引。
+    enum MenuAction {
+        ScreenCast, RepairTools, Payload, ExtractImg, DeviceCheck,
+        Configuration, ContactAuthor, Exit, Minimize
+    };
+
     void setupUI();
     void updatePosition();
     void extractImg();
     void cleanupAndExit();
-    QString getLatestImgFile();
-    
+    void openAuthorImage();
+    void minimizeWindows();
+
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;
     DeviceInfoWindow *deviceInfoWindow;
@@ -41,11 +48,10 @@ private:
     PayloadWindow *payloadWindow;
     DeviceCheckWindow *deviceCheckWindow;
     ConfigWindow *configWindow;
-    
+
     QProcess *imgProcess;
     QString latestImgFile;
     QString imgOutputPath;
-    int cleanupStep;
 };
 
 #endif // MENUWIDGET_H

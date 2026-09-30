@@ -1,16 +1,47 @@
 #include "uihelper.h"
+#include <QPushButton>
+#include <QVBoxLayout>
 #include <QScreen>
 #include <QGuiApplication>
+
+namespace {
+// 两种消息框采用相同的显示顺序，先显示再按实际大小居中。
+void centerMessageBox(QMessageBox &messageBox)
+{
+    messageBox.show();
+    const QRect screenGeometry = QGuiApplication::primaryScreen()->geometry();
+    const int x = (screenGeometry.width() - messageBox.width()) / 2;
+    const int y = (screenGeometry.height() - messageBox.height()) / 2;
+    messageBox.move(x, y);
+}
+}
+
+QVector<QPushButton *> UIHelper::createMenuButtons(QWidget *parent,
+                                                 QVBoxLayout *layout,
+                                                 const QStringList &texts)
+{
+    QVector<QPushButton *> buttons;
+    for (int index = 0; index < texts.size(); ++index) {
+        QPushButton *button = new QPushButton(texts[index], parent);
+        button->setFixedHeight(MenuButtonHeight);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setMinimumWidth(120);
+        button->setStyleSheet(getButtonStyle(index, texts.size()));
+        layout->addWidget(button);
+        buttons.append(button);
+    }
+    return buttons;
+}
 
 QString UIHelper::getButtonStyle(int index, int total)
 {
     bool isFirst = (index == 0);
     bool isLast = (index == total - 1);
-    
+
     QString bgColor = isLast ? "rgba(176, 205, 216, 245)" : "rgba(195, 219, 228, 245)";
     QString hoverColor = isLast ? "rgba(162, 195, 207, 250)" : "rgba(180, 210, 221, 250)";
     QString pressColor = isLast ? "rgba(146, 183, 197, 255)" : "rgba(162, 197, 211, 255)";
-    
+
     QString border;
     if (isFirst) {
         border = "border-top-left-radius: 10px; border-top-right-radius: 10px;";
@@ -20,7 +51,7 @@ QString UIHelper::getButtonStyle(int index, int total)
     } else {
         border = "border-top: 1px solid rgba(255, 255, 255, 130);";
     }
-    
+
     return QString(
         "QPushButton {"
         "   background-color: %1;"
@@ -65,21 +96,16 @@ QString UIHelper::getStandardButtonStyle()
     );
 }
 
-void UIHelper::showCenteredMessageBox(QMessageBox::Icon icon, 
-                                     const QString &title, 
+void UIHelper::showCenteredMessageBox(QMessageBox::Icon icon,
+                                     const QString &title,
                                      const QString &text,
                                      QWidget *parent)
 {
     QMessageBox msgBox(icon, title, text, QMessageBox::Ok, parent);
     msgBox.setWindowFlags(Qt::Dialog | Qt::WindowStaysOnTopHint);
-    
-    // 显示后再居中
-    msgBox.show();
-    QRect screenGeometry = QGuiApplication::primaryScreen()->geometry();
-    int x = (screenGeometry.width() - msgBox.width()) / 2;
-    int y = (screenGeometry.height() - msgBox.height()) / 2;
-    msgBox.move(x, y);
-    
+
+    centerMessageBox(msgBox);
+
     msgBox.exec();
 }
 
@@ -87,16 +113,11 @@ QMessageBox::StandardButton UIHelper::showCenteredQuestion(const QString &title,
                                                           const QString &text,
                                                           QWidget *parent)
 {
-    QMessageBox msgBox(QMessageBox::Question, title, text, 
+    QMessageBox msgBox(QMessageBox::Question, title, text,
                       QMessageBox::Yes | QMessageBox::No, parent);
     msgBox.setWindowFlags(Qt::Dialog | Qt::WindowStaysOnTopHint);
-    
-    // 显示后再居中
-    msgBox.show();
-    QRect screenGeometry = QGuiApplication::primaryScreen()->geometry();
-    int x = (screenGeometry.width() - msgBox.width()) / 2;
-    int y = (screenGeometry.height() - msgBox.height()) / 2;
-    msgBox.move(x, y);
-    
+
+    centerMessageBox(msgBox);
+
     return static_cast<QMessageBox::StandardButton>(msgBox.exec());
 }

@@ -17,7 +17,7 @@ class RepairWindow : public QWidget
 public:
     explicit RepairWindow(QWidget *parent = nullptr);
     ~RepairWindow();
-    
+
     void setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight);
 
 private slots:
@@ -31,6 +31,11 @@ private slots:
     void onRootDetectFinished();
 
 private:
+    enum RepairAction { UsbFix, TmpFix, InstallApk, InstallModule };
+    enum class ApkInstallStep { Push, InstallWithSuC, InstallWithSuS, DeleteTemporaryFile };
+    enum class ModuleInstallStep { Push, Install, DeleteTemporaryFile };
+    enum class RootManager { Magisk, APatch, KernelSU };
+
     void setupUI();
     void executeUsbFix();
     void fixTmpFolder();
@@ -38,26 +43,26 @@ private:
     void installModule();
     void startModuleInstall();
     void setButtonsEnabled(bool enabled);
-    
+
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;
     QProcess *repairProcess;
     int tmpFixStep;
-    
+
     // APK安装相关
     QStringList apkFilesToInstall;
     int currentApkIndex;
     int successCount;
     int failCount;
-    int apkInstallStep;  // 0=push, 1=install(-c), 2=install(-s), 3=delete
-    
+    ApkInstallStep apkInstallStep;
+
     // 模块安装相关
     QStringList moduleFilesToInstall;
     int currentModuleIndex;
     int moduleSuccessCount;
     int moduleFailCount;
-    int moduleInstallStep;  // 0=push, 1=install, 2=delete
-    int rootManagerType;    // 0=Magisk, 1=APatch, 2=KernelSU
+    ModuleInstallStep moduleInstallStep;
+    RootManager rootManagerType;
 };
 
 #endif // REPAIRWINDOW_H
