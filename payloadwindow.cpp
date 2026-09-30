@@ -6,6 +6,55 @@
 #include <QGuiApplication>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QPainter>
+#include <QPainterPath>
+#include <QStyleOptionButton>
+#include <QStyle>
+
+namespace {
+// 自绘勾选框，统一高 DPI 下的外观，同时保留 QCheckBox 的键盘和点击行为。
+class PayloadCheckBox : public QCheckBox
+{
+public:
+    explicit PayloadCheckBox(const QString &text, QWidget *parent)
+        : QCheckBox(text, parent)
+    {
+        setCursor(Qt::PointingHandCursor);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QStyleOptionButton option;
+        initStyleOption(&option);
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRect indicator = style()->subElementRect(QStyle::SE_CheckBoxIndicator, &option, this);
+        const bool checked = option.state & QStyle::State_On;
+        const bool hovered = option.state & QStyle::State_MouseOver;
+        const QColor fill = checked ? QColor(hovered ? "#578FA6" : "#649EB3")
+                                    : QColor(hovered ? "#F3F7FB" : "#FFFFFF");
+        const QColor border = hasFocus() ? QColor("#83AECA")
+                                        : QColor(checked ? "#5C93A8" : "#CBD9E6");
+        painter.setPen(QPen(border, hasFocus() ? 1.5 : 1.0));
+        painter.setBrush(fill);
+        painter.drawRoundedRect(QRectF(indicator).adjusted(0.75, 0.75, -0.75, -0.75), 4, 4);
+        if (checked) {
+            const qreal x = indicator.x(), y = indicator.y();
+            QPainterPath check;
+            check.moveTo(x + 4.5, y + 9);
+            check.lineTo(x + 7.5, y + 12);
+            check.lineTo(x + 13.5, y + 5.5);
+            painter.setPen(QPen(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPath(check);
+        }
+        QStyleOptionButton labelOption = option;
+        labelOption.rect = style()->subElementRect(QStyle::SE_CheckBoxContents, &option, this);
+        style()->drawControl(QStyle::CE_CheckBoxLabel, &labelOption, &painter, this);
+    }
+};
+} // namespace
 
 PayloadWindow::PayloadWindow(QWidget *parent)
     : QDialog(parent)
@@ -39,24 +88,27 @@ void PayloadWindow::setupUI()
     container->setGeometry(rect());
     container->setStyleSheet(R"(
         QWidget#payloadSurface {
-            background-color: rgba(211, 230, 237, 250);
-            border: 1px solid rgba(255, 255, 255, 180);
-            border-radius: 10px;
+            background-color: #FFFFFF;
+            border: 1px solid #D6E2EE;
+            border-radius: 12px;
         }
     )");
     
     QVBoxLayout *mainLayout = new QVBoxLayout(container);
     mainLayout->setContentsMargins(20, 16, 20, 16);
-    mainLayout->setSpacing(10);
+    mainLayout->setSpacing(8);
     
     // 标题
-    QLabel *titleLabel = new QLabel("📦 Payload 分区提取", container);
+    QLabel *titleLabel = new QLabel("Payload 分区提取", container);
     titleLabel->setStyleSheet(R"(
         QLabel {
             font-size: 16px;
             font-weight: bold;
             color: #2c3e50;
-            background: transparent;
+            background: #F3F7FC;
+            border: 1px solid #E7EEF6;
+            border-radius: 8px;
+            padding: 4px 0;
         }
     )");
     titleLabel->setAlignment(Qt::AlignCenter);
@@ -73,15 +125,15 @@ void PayloadWindow::setupUI()
     urlEdit->setStyleSheet(R"(
         QLineEdit {
             padding: 6px 10px;
-            border: 1px solid rgba(100, 160, 180, 90);
+            border: 1px solid #D0DEEB;
             border-radius: 6px;
             font-size: 12px;
-            background-color: rgba(255, 255, 255, 150);
+            background-color: #F7FAFD;
             color: #2c3e50;
         }
         QLineEdit:focus {
-            border: 1px solid rgba(100, 160, 180, 210);
-            background-color: rgba(255, 255, 255, 200);
+            border: 1px solid #83AECA;
+            background-color: #FFFFFF;
         }
     )");
     mainLayout->addWidget(urlEdit);
@@ -94,7 +146,7 @@ void PayloadWindow::setupUI()
     QHBoxLayout *checkBoxLayout = new QHBoxLayout();
     checkBoxLayout->setSpacing(15);  // 保留原有复选框横向位置
     
-    bootCheckBox = new QCheckBox("boot", container);
+    bootCheckBox = new PayloadCheckBox("boot", container);
     bootCheckBox->setStyleSheet(R"(
         QCheckBox {
             color: #2c3e50;
@@ -108,7 +160,7 @@ void PayloadWindow::setupUI()
     )");
     bootCheckBox->setChecked(true);
     
-    initBootCheckBox = new QCheckBox("init_boot", container);
+    initBootCheckBox = new PayloadCheckBox("init_boot", container);
     initBootCheckBox->setStyleSheet(R"(
         QCheckBox {
             color: #2c3e50;
@@ -144,18 +196,21 @@ void PayloadWindow::setupUI()
     cancelButton->setStyleSheet(R"(
         QPushButton {
             padding: 6px 20px;
-            background-color: rgba(160, 190, 200, 200);
+            background-color: #F3F7FB;
             color: #2c3e50;
-            border: 1px solid rgba(100, 160, 180, 90);
+            border: 1px solid #D0DEEB;
             border-radius: 6px;
             font-size: 13px;
             font-weight: bold;
         }
         QPushButton:hover {
-            background-color: rgba(140, 170, 180, 220);
+            background-color: #EAF2F9;
         }
         QPushButton:pressed {
-            background-color: rgba(120, 150, 160, 240);
+            background-color: #DEEAF5;
+        }
+        QPushButton:focus {
+            border-color: #83AECA;
         }
     )");
     
@@ -165,18 +220,26 @@ void PayloadWindow::setupUI()
     extractButton->setStyleSheet(R"(
         QPushButton {
             padding: 6px 20px;
-            background-color: rgba(100, 160, 180, 220);
+            background-color: #649EB3;
             color: white;
-            border: 1px solid rgba(100, 160, 180, 90);
+            border: 1px solid #D0DEEB;
             border-radius: 6px;
             font-size: 13px;
             font-weight: bold;
         }
         QPushButton:hover {
-            background-color: rgba(80, 140, 160, 240);
+            background-color: #578FA6;
         }
         QPushButton:pressed {
-            background-color: rgba(60, 120, 140, 250);
+            background-color: #477F96;
+        }
+        QPushButton:focus {
+            border-color: #3F7894;
+        }
+        QPushButton:disabled {
+            background-color: #A8C3D0;
+            border-color: #A8C3D0;
+            color: white;
         }
     )");
     

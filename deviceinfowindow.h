@@ -67,6 +67,7 @@ private:
     QStringList transferFailedFiles;
     
     void setupUI();
+    void applyPresentation(bool connected);
     void startScrcpy();
     void showNoDeviceMessage();
     void showDeviceInfo();

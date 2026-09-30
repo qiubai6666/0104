@@ -15,6 +15,135 @@
 #include <QFile>
 #include <QWindow>
 #include <QMoveEvent>
+#include <QHBoxLayout>
+#include <QPainter>
+#include <QPainterPath>
+#include <QStyle>
+#include <cmath>
+
+namespace {
+enum class InfoIcon { Phone, Tag, System, Storage, Lock, Connection, Settings, Alert, Authorization };
+
+// 使用矢量线性图标，避免系统 Emoji 字体缺失时显示方框。
+class DeviceInfoIcon : public QWidget
+{
+public:
+    explicit DeviceInfoIcon(bool primary, QWidget *parent)
+        : QWidget(parent), m_primary(primary), m_icon(InfoIcon::Phone), m_color("#4A90E2")
+    {
+        setFixedSize(primary ? 32 : 18, primary ? 32 : 18);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+
+    void setAppearance(InfoIcon icon, const QColor &color)
+    {
+        m_icon = icon;
+        m_color = color;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        if (m_primary) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor("#E7F0FA"));
+            painter.drawRoundedRect(QRectF(rect()), 9, 9);
+            painter.translate(5, 5);
+            painter.scale(22.0 / 24.0, 22.0 / 24.0);
+        } else {
+            painter.scale(width() / 24.0, height() / 24.0);
+        }
+        painter.setPen(QPen(m_color, 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        QPainterPath path;
+        switch (m_icon) {
+        case InfoIcon::Phone:
+        case InfoIcon::Connection:
+            painter.drawRoundedRect(QRectF(6, 2, 12, 20), 2.5, 2.5);
+            painter.drawLine(QPointF(10, 18.5), QPointF(14, 18.5));
+            if (m_icon == InfoIcon::Connection) {
+                painter.drawLine(QPointF(9, 9), QPointF(15, 13));
+                painter.drawLine(QPointF(15, 9), QPointF(9, 13));
+            }
+            break;
+        case InfoIcon::Tag:
+            path.moveTo(3, 4); path.lineTo(12, 4); path.lineTo(21, 13);
+            path.lineTo(13, 21); path.lineTo(3, 11); path.closeSubpath();
+            painter.drawPath(path);
+            painter.drawEllipse(QRectF(6, 7, 2, 2));
+            break;
+        case InfoIcon::System:
+            painter.drawRoundedRect(QRectF(3, 4, 18, 13), 2, 2);
+            painter.drawLine(QPointF(12, 17), QPointF(12, 21));
+            painter.drawLine(QPointF(8, 21), QPointF(16, 21));
+            break;
+        case InfoIcon::Storage:
+            painter.drawRoundedRect(QRectF(3, 5, 18, 14), 2, 2);
+            painter.drawLine(QPointF(3, 11), QPointF(21, 11));
+            painter.drawPoint(QPointF(17, 15));
+            break;
+        case InfoIcon::Lock:
+            path.moveTo(8, 10); path.lineTo(8, 7);
+            path.cubicTo(8, 1, 16, 1, 16, 7); path.lineTo(16, 10);
+            painter.drawPath(path);
+            painter.drawRoundedRect(QRectF(5, 10, 14, 11), 2, 2);
+            painter.drawLine(QPointF(12, 14), QPointF(12, 17));
+            break;
+        case InfoIcon::Settings:
+            painter.drawEllipse(QRectF(8, 8, 8, 8));
+            for (int i = 0; i < 8; ++i) {
+                const double angle = i * 3.141592653589793 / 4;
+                painter.drawLine(QPointF(12 + 7 * std::cos(angle), 12 + 7 * std::sin(angle)),
+                                 QPointF(12 + 10 * std::cos(angle), 12 + 10 * std::sin(angle)));
+            }
+            break;
+        case InfoIcon::Alert:
+            path.moveTo(13, 2); path.lineTo(5, 13); path.lineTo(11, 13);
+            path.lineTo(10, 22); path.lineTo(19, 10); path.lineTo(13, 10);
+            path.closeSubpath(); painter.drawPath(path);
+            break;
+        case InfoIcon::Authorization:
+            path.moveTo(5, 4); path.lineTo(19, 4); path.quadTo(21, 4, 21, 6);
+            path.lineTo(21, 15); path.quadTo(21, 17, 19, 17);
+            path.lineTo(9, 17); path.lineTo(4, 21); path.lineTo(4, 17);
+            path.quadTo(3, 17, 3, 15); path.lineTo(3, 6);
+            path.quadTo(3, 4, 5, 4); painter.drawPath(path);
+            painter.drawLine(QPointF(8, 10), QPointF(11, 13));
+            painter.drawLine(QPointF(11, 13), QPointF(16, 8));
+            break;
+        }
+    }
+
+private:
+    bool m_primary;
+    InfoIcon m_icon;
+    QColor m_color;
+};
+
+class DeviceInfoRow : public QWidget
+{
+public:
+    DeviceInfoRow(const QString &name, QLabel *&label, bool primary, QWidget *parent)
+        : QWidget(parent)
+    {
+        setObjectName(name);
+        setAttribute(Qt::WA_StyledBackground);
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(12, primary ? 5 : 4, 12, primary ? 5 : 4);
+        layout->setSpacing(10);
+        icon = new DeviceInfoIcon(primary, this);
+        label = new QLabel(this);
+        label->setObjectName(name + "Text");
+        label->setTextFormat(Qt::PlainText);
+        layout->addWidget(icon, 0, Qt::AlignVCenter);
+        layout->addWidget(label, 1);
+    }
+    DeviceInfoIcon *icon;
+};
+} // namespace
 
 DeviceInfoWindow::DeviceInfoWindow(QWidget *parent)
     : QWidget(parent)
@@ -98,63 +227,109 @@ DeviceInfoWindow::~DeviceInfoWindow()
 
 void DeviceInfoWindow::setupUI()
 {
-    setFixedSize(360, 328);
+    // 已连接和未连接始终保持同样的紧凑尺寸。
+    setFixedSize(360, 212);
     setCursor(Qt::SizeAllCursor);
-    
-    // 创建主背景容器（避免直接给窗口设置背景导致DPI问题）
+
     QWidget *bgContainer = new QWidget(this);
     bgContainer->setObjectName("deviceInfoSurface");
     bgContainer->setGeometry(rect());
     bgContainer->setStyleSheet(
         "QWidget#deviceInfoSurface {"
-        "   background-color: rgba(191, 218, 234, 240);"
-        "   border: 1px solid rgba(255, 255, 255, 180);"
-        "   border-radius: 10px;"
+        " background-color: #FFFFFF;"
+        " border: 1px solid #D6E2EE;"
+        " border-radius: 12px;"
         "}"
     );
-    
+
     mainLayout = new QVBoxLayout(bgContainer);
     mainLayout->setContentsMargins(10, 10, 10, 10);
-    mainLayout->setSpacing(5);
-    
-    // 创建一个容器Widget作为卡片的背景层
+    mainLayout->setSpacing(0);
+
     cardContainer = new QWidget(bgContainer);
     cardContainer->setObjectName("deviceInfoCard");
-    cardContainer->setStyleSheet(
-        "QWidget#deviceInfoCard {"
-        "   background-color: rgba(255, 255, 255, 100);"  // 半透明白色背景
-        "   border-radius: 8px;"
-        "}"
-    );
-    
-    // 在容器内创建垂直布局
-    QVBoxLayout *cardLayout = new QVBoxLayout(cardContainer);
+    // 状态样式集中定义；切换设备状态时只更新内容、图标和模式。
+    cardContainer->setStyleSheet(R"(
+        QWidget#deviceInfoCard { background: transparent; border: none; }
+        QWidget#deviceInfoCard QLabel {
+            background: transparent; border: none; padding: 0;
+            color: #4A90E2; font-size: 13px;
+        }
+        QWidget#deviceModelRow {
+            background: #F3F7FC; border: 1px solid #E7EEF6; border-radius: 8px;
+        }
+        QWidget#deviceInfoCard QLabel#deviceModelRowText {
+            font-size: 14px; font-weight: bold;
+        }
+        QWidget#deviceInfoCard[mode="connected"] QWidget#deviceCodenameRow,
+        QWidget#deviceInfoCard[mode="connected"] QWidget#deviceVersionRow,
+        QWidget#deviceInfoCard[mode="connected"] QWidget#deviceSlotRow {
+            border: none; border-bottom: 1px solid #EDF2F7;
+        }
+        QWidget#deviceInfoCard[mode="disconnected"] QLabel {
+            font-size: 12px;
+        }
+        QWidget#deviceInfoCard[mode="disconnected"] QLabel#deviceModelRowText {
+            color: #5B7C99; font-size: 14px; font-weight: bold;
+        }
+        QWidget#deviceInfoCard[mode="disconnected"] QWidget#deviceVersionRow {
+            background: #FFF7EB; border: 1px solid #F5E7D2; border-radius: 7px;
+        }
+        QWidget#deviceInfoCard[mode="disconnected"] QLabel#deviceVersionRowText {
+            color: #D97706; font-weight: bold;
+        }
+        QWidget#deviceInfoCard[mode="disconnected"] QWidget#deviceSlotRow {
+            border: none; border-top: 1px solid #EDF2F7;
+        }
+        QWidget#deviceInfoCard[mode="disconnected"] QLabel#deviceSlotRowText {
+            color: #5B7C99; font-weight: bold;
+        }
+    )");
+
+    auto *cardLayout = new QVBoxLayout(cardContainer);
     cardLayout->setContentsMargins(0, 0, 0, 0);
-    cardLayout->setSpacing(5);
-    
-    // 创建信息标签
-    modelLabel = new QLabel(cardContainer);
-    codenameLabel = new QLabel(cardContainer);
-    versionLabel = new QLabel(cardContainer);
-    slotLabel = new QLabel(cardContainer);
-    unlockLabel = new QLabel(cardContainer);
-    
-    cardLayout->addWidget(modelLabel);
-    cardLayout->addWidget(codenameLabel);
-    cardLayout->addWidget(versionLabel);
-    cardLayout->addWidget(slotLabel);
-    cardLayout->addWidget(unlockLabel);
-    
-    // 将容器添加到主布局
+    cardLayout->setSpacing(4);
+    cardLayout->addWidget(new DeviceInfoRow("deviceModelRow", modelLabel, true, cardContainer));
+    cardLayout->addWidget(new DeviceInfoRow("deviceCodenameRow", codenameLabel, false, cardContainer));
+    cardLayout->addWidget(new DeviceInfoRow("deviceVersionRow", versionLabel, false, cardContainer));
+    cardLayout->addWidget(new DeviceInfoRow("deviceSlotRow", slotLabel, false, cardContainer));
+    cardLayout->addWidget(new DeviceInfoRow("deviceUnlockRow", unlockLabel, false, cardContainer));
     mainLayout->addWidget(cardContainer);
-    
-    // 显示在屏幕左上角（留出一点边距）
+    showNoDeviceMessage();
+
     QScreen *screen = QGuiApplication::primaryScreen();
     QRect screenGeometry = screen->geometry();
-    int margin = 10;  // 距离屏幕边缘10像素
+    const int margin = 10;
     move(screenGeometry.left() + margin, screenGeometry.top() + margin);
 }
 
+void DeviceInfoWindow::applyPresentation(bool connected)
+{
+    cardContainer->setProperty("mode", connected ? "connected" : "disconnected");
+    const InfoIcon connectedIcons[] = {InfoIcon::Phone, InfoIcon::Tag, InfoIcon::System,
+                                       InfoIcon::Storage, InfoIcon::Lock};
+    const InfoIcon disconnectedIcons[] = {InfoIcon::Connection, InfoIcon::Settings, InfoIcon::Alert,
+                                          InfoIcon::Authorization, InfoIcon::Lock};
+    QLabel *labels[] = {modelLabel, codenameLabel, versionLabel, slotLabel, unlockLabel};
+    for (int i = 0; i < 5; ++i) {
+        auto *row = static_cast<DeviceInfoRow *>(labels[i]->parentWidget());
+        const QColor color = !connected && i == 2 ? QColor("#D97706")
+            : (!connected && (i == 0 || i == 3) ? QColor("#5B7C99") : QColor("#4A90E2"));
+        row->icon->setAppearance(connected ? connectedIcons[i] : disconnectedIcons[i], color);
+        row->setVisible(connected || i != 4);
+        labels[i]->show();
+        row->style()->unpolish(row);
+        row->style()->polish(row);
+        labels[i]->style()->unpolish(labels[i]);
+        labels[i]->style()->polish(labels[i]);
+        labels[i]->updateGeometry();
+        row->layout()->invalidate();
+        row->updateGeometry();
+        row->update();
+    }
+    cardContainer->layout()->invalidate();
+    cardContainer->update();
+}
 void DeviceInfoWindow::startScrcpy()
 {
     // 使用绝对路径确保调用qiubai文件夹中的scrcpy
@@ -273,11 +448,11 @@ void DeviceInfoWindow::onVersionQueryFinished()
 void DeviceInfoWindow::updateDeviceLabels(const QString &model, const QString &codename, 
                                        const QString &version, const QString &slot, const QString &unlock)
 {
-    modelLabel->setText("📱 手机型号: " + model);
-    codenameLabel->setText("🔖 手机代号: " + codename);
-    versionLabel->setText("🤖 系统版本: Android " + version);
-    slotLabel->setText("💾 活动分区: " + slot);
-    unlockLabel->setText("🔓 解锁状态: " + unlock);
+    modelLabel->setText("手机型号: " + model);
+    codenameLabel->setText("手机代号: " + codename);
+    versionLabel->setText("系统版本: Android " + version);
+    slotLabel->setText("活动分区: " + slot);
+    unlockLabel->setText("解锁状态: " + unlock);
 }
 
 void DeviceInfoWindow::onScrcpyFinished(int, QProcess::ExitStatus)
@@ -295,131 +470,39 @@ void DeviceInfoWindow::onScrcpyFinished(int, QProcess::ExitStatus)
 
 void DeviceInfoWindow::showNoDeviceMessage()
 {
-    // 第一个卡片：警告信息
-    modelLabel->setText("⚠ 未检测到设备\n请使用数据线连接手机或平板");
-    modelLabel->setAlignment(Qt::AlignCenter);
+    modelLabel->setText("未检测到设备\n请用数据线连接手机或平板");
+    modelLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     modelLabel->setWordWrap(true);
-    modelLabel->setStyleSheet(
-        "QLabel {"
-        "   background-color: white;"
-        "   color: #5B7C99;"
-        "   font-size: 14px;"
-        "   font-weight: bold;"
-        "   padding: 12px 16px;"
-        "   border-radius: 8px;"
-        "}"
-    );
-    
-    // 第二个卡片：开发者模式和USB调试
     codenameLabel->setText(
-        "📱 开启开发者模式\n"
-        "设置 → 关于手机 → 版本信息 → 版本号\n"
-        "连续点击直到提示进入开发者模式\n\n"
-        "⚙ 开启USB调试\n"
-        "设置 → 搜索开发者选项 → 进入开发者选项\n"
-        "打开USB调试开关"
+        "开启开发者模式和USB调试\n"
+        "设置 → 关于手机 → 连续点击版本号\n"
+        "开发者选项 → 开启USB调试"
     );
+    codenameLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     codenameLabel->setWordWrap(true);
-    codenameLabel->setStyleSheet(
-        "QLabel {"
-        "   background-color: white;"
-        "   color: #4A90E2;"
-        "   font-size: 12px;"
-        "   padding: 12px 15px;"
-        "   border-radius: 8px;"
-        "   line-height: 1.5;"
-        "}"
-    );
-    
-    // 第三个卡片：小米特别提示
-    versionLabel->setText(
-        "⚡ 小米/红米设备特别提示\n"
-        "还需开启：USB安装 和 USB调试(安全设置)"
-    );
+    versionLabel->setText("小米/红米：还需开启\nUSB安装、USB调试（安全设置）");
+    versionLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     versionLabel->setWordWrap(true);
-    versionLabel->setStyleSheet(
-        "QLabel {"
-        "   background-color: rgba(255, 220, 160, 255);"
-        "   color: #D97706;"
-        "   font-size: 12px;"
-        "   font-weight: bold;"
-        "   padding: 10px 14px;"
-        "   border-radius: 8px;"
-        "}"
-    );
-    
-    // 第四个卡片：USB授权提示
-    slotLabel->setText("💡 请注意手机上的USB调试授权弹窗");
-    slotLabel->setAlignment(Qt::AlignCenter);
-    slotLabel->setStyleSheet(
-        "QLabel {"
-        "   background-color: rgba(200, 220, 240, 255);"
-        "   color: #5B7C99;"
-        "   font-size: 12px;"
-        "   font-weight: bold;"
-        "   padding: 8px 12px;"
-        "   border-radius: 8px;"
-        "}"
-    );
-    
-    // 隐藏最后一个标签
-    unlockLabel->hide();
+    slotLabel->setText("请在手机上允许USB调试授权");
+    slotLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    slotLabel->setWordWrap(false);
+    applyPresentation(false);
 }
 
 void DeviceInfoWindow::showDeviceInfo()
 {
-    // 显示所有标签
-    modelLabel->show();
-    codenameLabel->show();
-    versionLabel->show();
-    slotLabel->show();
-    unlockLabel->show();
-    
-    // 重置标签样式为设备信息样式
-    QString labelStyle = 
-        "QLabel {"
-        "   background-color: white;"
-        "   color: #4A90E2;"
-        "   font-size: 13px;"
-        "   padding: 8px 15px;"
-        "   border-radius: 8px;"
-        "}";
-    
     modelLabel->setText("手机型号: 获取中...");
-    modelLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    modelLabel->setWordWrap(false);
-    modelLabel->setStyleSheet(
-        "QLabel {"
-        "   background-color: white;"
-        "   color: #4A90E2;"
-        "   font-size: 14px;"
-        "   font-weight: bold;"
-        "   padding: 8px 15px;"
-        "   border-radius: 8px;"
-        "}"
-    );
-    
     codenameLabel->setText("手机代号: 获取中...");
-    codenameLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    codenameLabel->setWordWrap(false);
-    codenameLabel->setStyleSheet(labelStyle);
-    
     versionLabel->setText("系统版本: 获取中...");
-    versionLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    versionLabel->setWordWrap(false);
-    versionLabel->setStyleSheet(labelStyle);
-    
     slotLabel->setText("活动分区: 获取中...");
-    slotLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    slotLabel->setWordWrap(false);
-    slotLabel->setStyleSheet(labelStyle);
-    
     unlockLabel->setText("解锁状态: 获取中...");
-    unlockLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    unlockLabel->setWordWrap(false);
-    unlockLabel->setStyleSheet(labelStyle);
+    QLabel *labels[] = {modelLabel, codenameLabel, versionLabel, slotLabel, unlockLabel};
+    for (QLabel *label : labels) {
+        label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        label->setWordWrap(false);
+    }
+    applyPresentation(true);
 }
-
 void DeviceInfoWindow::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton) {
