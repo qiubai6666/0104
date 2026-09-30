@@ -1,0 +1,57 @@
+# Qt Creator
+.qtcreator/
+*.user
+*.user.*
+*.autosave
+
+# 编译输出
+build/
+debug/
+release/
+FloatingWindowApp/
+
+# qmake 生成的文件
+Makefile
+Makefile.*
+.qmake.stash
+*.pro.user
+*.pro.user.*
+
+# 编译生成的文件
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# MOC 生成的文件
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+*~
+
+# Windows 特定
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS 特定
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 日志文件
+*.log
+
+# 打包输出
+package_*/
+*.zip

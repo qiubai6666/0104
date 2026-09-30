@@ -1,0 +1,30 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+<qresource prefix="/qiubai">
+    <file>qiubai/adb.exe</file>
+    <file>qiubai/AdbWinApi.dll</file>
+    <file>qiubai/AdbWinUsbApi.dll</file>
+    <file>qiubai/avcodec-61.dll</file>
+    <file>qiubai/avformat-61.dll</file>
+    <file>qiubai/avutil-59.dll</file>
+    <file>qiubai/CMD.bat</file>
+    <file>qiubai/cmd.exe</file>
+    <file>qiubai/ECHOC.exe</file>
+    <file>qiubai/fastboot.exe</file>
+    <file>qiubai/icon.png</file>
+    <file>qiubai/imei.txt</file>
+    <file>qiubai/libusb-1.0.dll</file>
+    <file>qiubai/NDM.exe</file>
+    <file>qiubai/Neil.jpg</file>
+    <file>qiubai/open_a_terminal_here.bat</file>
+    <file>qiubai/payload.exe</file>
+    <file>qiubai/scrcpy-console.bat</file>
+    <file>qiubai/scrcpy-noconsole.vbs</file>
+    <file>qiubai/scrcpy-server</file>
+    <file>qiubai/scrcpy.exe</file>
+    <file>qiubai/SDL2.dll</file>
+    <file>qiubai/swresample-5.dll</file>
+    <file>qiubai/usb.sh</file>
+    <file>qiubai/app_icon.ico</file>
+</qresource>
+</RCC>
