@@ -14,7 +14,7 @@
 ## ✨ 特性
 
 - 🚀 **高性能** - ADB Server 预启动，首次投屏速度提升 5-6 倍
-- 📦 **单文件分发** - 所有资源嵌入 exe，无需安装
+- 📦 **免安装运行包** - 工具资源内嵌 exe，Qt 运行库及插件随程序目录一起分发
 - 🎨 **现代化 UI** - 无边框设计，视觉美观
 - 🔧 **智能管理** - 自动资源提取和进程清理
 - 🛡️ **稳定可靠** - 完善的错误处理机制
@@ -49,6 +49,22 @@ make
 # 或使用 Qt Creator
 # 直接打开 FloatingWindow.pro 并点击运行
 ```
+
+### 发布可直接运行的版本
+
+编译后的 `FloatingWindow.exe` 仍依赖 Qt DLL、MinGW 运行库和 Windows 平台插件。不能只复制一个 exe；否则会出现找不到 `Qt6Gui.dll` 等启动错误。
+
+在项目目录执行：
+
+```powershell
+# 默认读取 build/release-check/release/FloatingWindow.exe，自动从构建 Makefile 找到对应 Qt kit
+.\deploy.ps1
+
+# 使用其他构建目录时，显式指定与编译版本匹配的 Qt kit
+.\deploy.ps1 -ExecutablePath '.\release\FloatingWindow.exe' -QtBinPath 'D:\Qt\6.11.2\mingw_64\bin'
+```
+
+脚本会调用 Qt 的 `windeployqt`，将 exe、Qt DLL、编译器运行库以及 `platforms`、`imageformats`、`tls` 等插件部署到 `FloatingWindowApp` 文件夹。双击该文件夹内的 `FloatingWindow.exe` 启动；移动或发送程序时，请复制或压缩**整个文件夹**。不要从第三方 DLL 网站下载文件，也不要将这些 DLL 复制到 Windows 系统目录。
 
 ### 首次运行
 

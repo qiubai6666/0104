@@ -77,21 +77,23 @@ DeviceCheckWindow::~DeviceCheckWindow()
 
 void DeviceCheckWindow::setupUI()
 {
-    setFixedSize(320, 405);  // 与主菜单高度一致（9个按钮 × 45px）
+    setFixedSize(320, 384);  // 收紧控件留白，保留完整的设备信息区域
     
     // 创建主容器
     QWidget *container = new QWidget(this);
-    container->setGeometry(0, 0, 320, 405);
+    container->setObjectName("deviceCheckSurface");
+    container->setGeometry(rect());
     container->setStyleSheet(
-        "QWidget {"
-        "   background-color: rgba(240, 248, 255, 180);"  // 淡蓝色背景(透明)
-        "   border-radius: 15px;"
+        "QWidget#deviceCheckSurface {"
+        "   background-color: rgba(235, 244, 249, 248);"
+        "   border: 1px solid rgba(255, 255, 255, 180);"
+        "   border-radius: 10px;"
         "}"
     );
     
     mainLayout = new QVBoxLayout(container);
-    mainLayout->setSpacing(10);  // 减少间距
-    mainLayout->setContentsMargins(15, 15, 15, 15);  // 减少边距
+    mainLayout->setSpacing(6);
+    mainLayout->setContentsMargins(15, 12, 15, 12);
     
     // 标题
     QLabel *titleLabel = new QLabel("📱 设备检测", container);
@@ -109,15 +111,16 @@ void DeviceCheckWindow::setupUI()
     
     // 状态卡片
     QWidget *statusCard = new QWidget(container);
+    statusCard->setObjectName("deviceStatusCard");
     statusCard->setStyleSheet(
-        "QWidget {"
-        "   background-color: rgba(255, 255, 255, 180);"
-        "   border-radius: 10px;"
+        "QWidget#deviceStatusCard {"
+        "   background-color: rgba(255, 255, 255, 210);"
+        "   border-radius: 8px;"
         "}"
     );
     QVBoxLayout *statusLayout = new QVBoxLayout(statusCard);
-    statusLayout->setSpacing(5);  // 减少间距
-    statusLayout->setContentsMargins(10, 10, 10, 10);  // 减少边距
+    statusLayout->setSpacing(4);
+    statusLayout->setContentsMargins(10, 8, 10, 8);
     
     statusLabel = new QLabel("检测中...", statusCard);
     statusLabel->setAlignment(Qt::AlignCenter);
@@ -168,7 +171,7 @@ void DeviceCheckWindow::setupUI()
     rebootComboBox->addItem("⚡ 重启到Fastboot");
     rebootComboBox->addItem("🔧 重启到Fastbootd");
     rebootComboBox->addItem("🔌 重启到EDL");
-    rebootComboBox->setMinimumHeight(40);
+    rebootComboBox->setMinimumHeight(36);
     rebootComboBox->setEnabled(false);
     rebootComboBox->setStyleSheet(
         "QComboBox {"
@@ -176,7 +179,7 @@ void DeviceCheckWindow::setupUI()
         "   color: #2c3e50;"
         "   border: 1px solid rgba(100, 160, 180, 150);"
         "   border-radius: 8px;"
-        "   padding: 8px 10px;"
+        "   padding: 6px 10px;"
         "   font-size: 13px;"
         "}"
         "QComboBox:hover {"
@@ -208,7 +211,7 @@ void DeviceCheckWindow::setupUI()
     
     // 执行按钮
     executeButton = new QPushButton("执行重启", container);
-    executeButton->setMinimumHeight(45);
+    executeButton->setMinimumHeight(36);
     executeButton->setCursor(Qt::PointingHandCursor);
     executeButton->setEnabled(false);
     executeButton->setStyleSheet(UIHelper::getStandardButtonStyle());
@@ -217,7 +220,7 @@ void DeviceCheckWindow::setupUI()
     
     // 打开CMD按钮
     QPushButton *cmdButton = new QPushButton("💻 打开CMD", container);
-    cmdButton->setMinimumHeight(45);
+    cmdButton->setMinimumHeight(36);
     cmdButton->setCursor(Qt::PointingHandCursor);
     cmdButton->setStyleSheet(
         "QPushButton {"
@@ -227,7 +230,7 @@ void DeviceCheckWindow::setupUI()
         "   border-radius: 8px;"
         "   font-size: 13px;"
         "   font-weight: bold;"
-        "   padding: 10px;"
+        "   padding: 6px 10px;"
         "}"
         "QPushButton:hover {"
         "   background-color: rgba(100, 100, 100, 200);"
@@ -246,7 +249,7 @@ void DeviceCheckWindow::setupUI()
     flashLayout->setContentsMargins(0, 0, 0, 0);
     
     QPushButton *bootButton = new QPushButton("📦 刷入Boot", flashWidget);
-    bootButton->setMinimumHeight(45);
+    bootButton->setMinimumHeight(36);
     bootButton->setCursor(Qt::PointingHandCursor);
     bootButton->setStyleSheet(
         "QPushButton {"
@@ -268,7 +271,7 @@ void DeviceCheckWindow::setupUI()
     flashLayout->addWidget(bootButton);
     
     QPushButton *initBootButton = new QPushButton("📦 刷入Init_Boot", flashWidget);
-    initBootButton->setMinimumHeight(45);
+    initBootButton->setMinimumHeight(36);
     initBootButton->setCursor(Qt::PointingHandCursor);
     initBootButton->setStyleSheet(
         "QPushButton {"

@@ -8,7 +8,6 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QMessageBox>
-#include <QGraphicsDropShadowEffect>
 #include <QTimer>
 #include <QPoint>
 
@@ -21,7 +20,7 @@ public:
         : QDialog(parent)
     {
         setWindowTitle("密码验证");
-        setFixedSize(300, 200);
+        setFixedSize(300, 164);
         
         // 无边框窗口，启用透明背景
         setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
@@ -29,18 +28,20 @@ public:
         
         // 创建主容器（用于圆角背景）- 浅蓝色风格
         QWidget *container = new QWidget(this);
-        container->setGeometry(0, 0, 300, 200);
+        container->setObjectName("passwordSurface");
+        container->setGeometry(rect());
         container->setStyleSheet(R"(
-            QWidget {
-                background-color: rgba(180, 210, 220, 240);
-                border-radius: 12px;
+            QWidget#passwordSurface {
+                background-color: rgba(211, 230, 237, 250);
+                border: 1px solid rgba(255, 255, 255, 180);
+                border-radius: 10px;
             }
         )");
         
         // 创建布局
         QVBoxLayout *mainLayout = new QVBoxLayout(container);
-        mainLayout->setContentsMargins(20, 15, 20, 15);
-        mainLayout->setSpacing(10);
+        mainLayout->setContentsMargins(20, 12, 20, 12);
+        mainLayout->setSpacing(8);
         
         // 标题标签
         QLabel *titleLabel = new QLabel("🔒 密码验证", container);
@@ -55,7 +56,7 @@ public:
         titleLabel->setAlignment(Qt::AlignCenter);
         mainLayout->addWidget(titleLabel);
         
-        mainLayout->addSpacing(5);
+        mainLayout->addSpacing(4);
         
         // 密码输入框
         passwordEdit = new QLineEdit(container);
@@ -63,15 +64,15 @@ public:
         passwordEdit->setPlaceholderText("请输入密码");
         passwordEdit->setStyleSheet(R"(
             QLineEdit {
-                padding: 8px 12px;
-                border: 1px solid rgba(255, 255, 255, 100);
+                padding: 6px 12px;
+                border: 1px solid rgba(100, 160, 180, 90);
                 border-radius: 6px;
                 font-size: 12px;
                 background-color: rgba(255, 255, 255, 150);
                 color: #2c3e50;
             }
             QLineEdit:focus {
-                border: 1px solid rgba(255, 255, 255, 200);
+                border: 1px solid rgba(100, 160, 180, 210);
                 background-color: rgba(255, 255, 255, 200);
             }
         )");
@@ -89,7 +90,7 @@ public:
                 padding: 6px 18px;
                 background-color: rgba(160, 190, 200, 200);
                 color: #2c3e50;
-                border: 1px solid rgba(255, 255, 255, 100);
+                border: 1px solid rgba(100, 160, 180, 90);
                 border-radius: 6px;
                 font-size: 12px;
                 font-weight: bold;
@@ -110,7 +111,7 @@ public:
                 padding: 6px 18px;
                 background-color: rgba(100, 160, 180, 220);
                 color: white;
-                border: 1px solid rgba(255, 255, 255, 100);
+                border: 1px solid rgba(100, 160, 180, 90);
                 border-radius: 6px;
                 font-size: 12px;
                 font-weight: bold;
@@ -135,7 +136,7 @@ public:
                 color: #f44336;
                 font-size: 11px;
                 background: transparent;
-                padding: 3px;
+                padding: 2px 3px;
             }
         )");
         errorLabel->setAlignment(Qt::AlignCenter);
@@ -152,12 +153,6 @@ public:
         // 设置焦点
         passwordEdit->setFocus();
         
-        // 添加阴影效果
-        QGraphicsDropShadowEffect *shadow = new QGraphicsDropShadowEffect(this);
-        shadow->setBlurRadius(20);
-        shadow->setColor(QColor(0, 0, 0, 60));
-        shadow->setOffset(0, 5);
-        container->setGraphicsEffect(shadow);
     }
     
 

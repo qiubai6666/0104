@@ -7,18 +7,18 @@ QString UIHelper::getButtonStyle(int index, int total)
     bool isFirst = (index == 0);
     bool isLast = (index == total - 1);
     
-    QString bgColor = isLast ? "rgba(160, 200, 210, 230)" : "rgba(180, 210, 220, 230)";
-    QString hoverColor = isLast ? "rgba(140, 180, 190, 240)" : "rgba(160, 190, 200, 240)";
-    QString pressColor = isLast ? "rgba(120, 160, 170, 250)" : "rgba(140, 170, 180, 250)";
+    QString bgColor = isLast ? "rgba(176, 205, 216, 245)" : "rgba(195, 219, 228, 245)";
+    QString hoverColor = isLast ? "rgba(162, 195, 207, 250)" : "rgba(180, 210, 221, 250)";
+    QString pressColor = isLast ? "rgba(146, 183, 197, 255)" : "rgba(162, 197, 211, 255)";
     
     QString border;
     if (isFirst) {
-        border = "border-top-left-radius: 12px; border-top-right-radius: 12px;";
+        border = "border-top-left-radius: 10px; border-top-right-radius: 10px;";
     } else if (isLast) {
-        border = "border-top: 1px solid rgba(255, 255, 255, 100); "
-                 "border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;";
+        border = "border-top: 1px solid rgba(255, 255, 255, 130); "
+                 "border-bottom-left-radius: 10px; border-bottom-right-radius: 10px;";
     } else {
-        border = "border-top: 1px solid rgba(255, 255, 255, 100);";
+        border = "border-top: 1px solid rgba(255, 255, 255, 130);";
     }
     
     return QString(
@@ -29,7 +29,7 @@ QString UIHelper::getButtonStyle(int index, int total)
         "   %2"
         "   font-size: 13px;"
         "   font-weight: bold;"
-        "   padding: 8px;"
+        "   padding: 6px 8px;"
         "}"
         "QPushButton:hover {"
         "   background-color: %3;"
@@ -44,13 +44,13 @@ QString UIHelper::getStandardButtonStyle()
 {
     return QString(
         "QPushButton {"
-        "   background-color: rgba(100, 160, 180, 200);"
+        "   background-color: rgba(100, 160, 180, 230);"
         "   color: white;"
         "   border: none;"
         "   border-radius: 8px;"
         "   font-size: 13px;"
         "   font-weight: bold;"
-        "   padding: 10px;"
+        "   padding: 6px 10px;"
         "}"
         "QPushButton:hover {"
         "   background-color: rgba(80, 140, 160, 220);"

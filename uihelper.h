@@ -8,6 +8,9 @@
 class UIHelper
 {
 public:
+    // 统一菜单密度，不改变文字样式和横向布局。
+    enum { MenuButtonHeight = 40 };
+
     // 获取按钮样式（用于菜单窗口）
     static QString getButtonStyle(int index, int total);
     

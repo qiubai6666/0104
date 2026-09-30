@@ -95,8 +95,8 @@ void MenuWidget::setupUI()
     
     for (int i = 0; i < buttonTexts.size(); ++i) {
         QPushButton *btn = new QPushButton(buttonTexts[i], this);
-        btn->setMinimumHeight(45);
-        btn->setMaximumHeight(45);
+        btn->setFixedHeight(UIHelper::MenuButtonHeight);
+        btn->setCursor(Qt::PointingHandCursor);
         btn->setMinimumWidth(120);
         btn->setStyleSheet(UIHelper::getButtonStyle(i, buttonTexts.size()));
         
@@ -107,8 +107,8 @@ void MenuWidget::setupUI()
     
     setStyleSheet(
         "MenuWidget {"
-        "   background-color: rgba(180, 210, 220, 240);"
-        "   border-radius: 12px;"
+        "   background-color: rgba(195, 219, 228, 245);"
+        "   border-radius: 10px;"
         "}"
     );
 }

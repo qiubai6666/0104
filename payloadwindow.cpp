@@ -11,7 +11,7 @@ PayloadWindow::PayloadWindow(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Payload 提取");
-    setFixedSize(450, 280);
+    setFixedSize(450, 252);
     
     // 无边框窗口，启用透明背景
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
@@ -35,17 +35,19 @@ void PayloadWindow::setupUI()
 {
     // 创建主容器
     QWidget *container = new QWidget(this);
-    container->setGeometry(0, 0, 450, 280);
+    container->setObjectName("payloadSurface");
+    container->setGeometry(rect());
     container->setStyleSheet(R"(
-        QWidget {
-            background-color: rgba(180, 210, 220, 240);
-            border-radius: 12px;
+        QWidget#payloadSurface {
+            background-color: rgba(211, 230, 237, 250);
+            border: 1px solid rgba(255, 255, 255, 180);
+            border-radius: 10px;
         }
     )");
     
     QVBoxLayout *mainLayout = new QVBoxLayout(container);
-    mainLayout->setContentsMargins(20, 20, 20, 20);
-    mainLayout->setSpacing(15);
+    mainLayout->setContentsMargins(20, 16, 20, 16);
+    mainLayout->setSpacing(10);
     
     // 标题
     QLabel *titleLabel = new QLabel("📦 Payload 分区提取", container);
@@ -67,18 +69,18 @@ void PayloadWindow::setupUI()
     
     urlEdit = new QLineEdit(container);
     urlEdit->setPlaceholderText("粘贴链接或路径");
-    urlEdit->setMinimumHeight(40);
+    urlEdit->setMinimumHeight(36);
     urlEdit->setStyleSheet(R"(
         QLineEdit {
-            padding: 8px 10px;
-            border: 1px solid rgba(255, 255, 255, 100);
+            padding: 6px 10px;
+            border: 1px solid rgba(100, 160, 180, 90);
             border-radius: 6px;
             font-size: 12px;
             background-color: rgba(255, 255, 255, 150);
             color: #2c3e50;
         }
         QLineEdit:focus {
-            border: 1px solid rgba(255, 255, 255, 200);
+            border: 1px solid rgba(100, 160, 180, 210);
             background-color: rgba(255, 255, 255, 200);
         }
     )");
@@ -90,6 +92,7 @@ void PayloadWindow::setupUI()
     mainLayout->addWidget(partLabel);
     
     QHBoxLayout *checkBoxLayout = new QHBoxLayout();
+    checkBoxLayout->setSpacing(15);  // 保留原有复选框横向位置
     
     bootCheckBox = new QCheckBox("boot", container);
     bootCheckBox->setStyleSheet(R"(
@@ -140,10 +143,10 @@ void PayloadWindow::setupUI()
     cancelButton->setCursor(Qt::PointingHandCursor);
     cancelButton->setStyleSheet(R"(
         QPushButton {
-            padding: 8px 20px;
+            padding: 6px 20px;
             background-color: rgba(160, 190, 200, 200);
             color: #2c3e50;
-            border: 1px solid rgba(255, 255, 255, 100);
+            border: 1px solid rgba(100, 160, 180, 90);
             border-radius: 6px;
             font-size: 13px;
             font-weight: bold;
@@ -161,10 +164,10 @@ void PayloadWindow::setupUI()
     extractButton->setCursor(Qt::PointingHandCursor);
     extractButton->setStyleSheet(R"(
         QPushButton {
-            padding: 8px 20px;
+            padding: 6px 20px;
             background-color: rgba(100, 160, 180, 220);
             color: white;
-            border: 1px solid rgba(255, 255, 255, 100);
+            border: 1px solid rgba(100, 160, 180, 90);
             border-radius: 6px;
             font-size: 13px;
             font-weight: bold;

@@ -98,16 +98,18 @@ DeviceInfoWindow::~DeviceInfoWindow()
 
 void DeviceInfoWindow::setupUI()
 {
-    setFixedSize(360, 360);
+    setFixedSize(360, 328);
     setCursor(Qt::SizeAllCursor);
     
     // 创建主背景容器（避免直接给窗口设置背景导致DPI问题）
     QWidget *bgContainer = new QWidget(this);
-    bgContainer->setGeometry(0, 0, 360, 360);
+    bgContainer->setObjectName("deviceInfoSurface");
+    bgContainer->setGeometry(rect());
     bgContainer->setStyleSheet(
-        "QWidget {"
-        "   background-color: rgba(169, 204, 227, 180);"
-        "   border-radius: 15px;"
+        "QWidget#deviceInfoSurface {"
+        "   background-color: rgba(191, 218, 234, 240);"
+        "   border: 1px solid rgba(255, 255, 255, 180);"
+        "   border-radius: 10px;"
         "}"
     );
     
@@ -117,10 +119,11 @@ void DeviceInfoWindow::setupUI()
     
     // 创建一个容器Widget作为卡片的背景层
     cardContainer = new QWidget(bgContainer);
+    cardContainer->setObjectName("deviceInfoCard");
     cardContainer->setStyleSheet(
-        "QWidget {"
+        "QWidget#deviceInfoCard {"
         "   background-color: rgba(255, 255, 255, 100);"  // 半透明白色背景
-        "   border-radius: 15px;"
+        "   border-radius: 8px;"
         "}"
     );
     
@@ -302,8 +305,8 @@ void DeviceInfoWindow::showNoDeviceMessage()
         "   color: #5B7C99;"
         "   font-size: 14px;"
         "   font-weight: bold;"
-        "   padding: 16px;"
-        "   border-radius: 12px;"
+        "   padding: 12px 16px;"
+        "   border-radius: 8px;"
         "}"
     );
     
@@ -322,8 +325,8 @@ void DeviceInfoWindow::showNoDeviceMessage()
         "   background-color: white;"
         "   color: #4A90E2;"
         "   font-size: 12px;"
-        "   padding: 15px;"
-        "   border-radius: 12px;"
+        "   padding: 12px 15px;"
+        "   border-radius: 8px;"
         "   line-height: 1.5;"
         "}"
     );
@@ -340,8 +343,8 @@ void DeviceInfoWindow::showNoDeviceMessage()
         "   color: #D97706;"
         "   font-size: 12px;"
         "   font-weight: bold;"
-        "   padding: 14px;"
-        "   border-radius: 12px;"
+        "   padding: 10px 14px;"
+        "   border-radius: 8px;"
         "}"
     );
     
@@ -354,8 +357,8 @@ void DeviceInfoWindow::showNoDeviceMessage()
         "   color: #5B7C99;"
         "   font-size: 12px;"
         "   font-weight: bold;"
-        "   padding: 12px;"
-        "   border-radius: 12px;"
+        "   padding: 8px 12px;"
+        "   border-radius: 8px;"
         "}"
     );
     
@@ -378,8 +381,8 @@ void DeviceInfoWindow::showDeviceInfo()
         "   background-color: white;"
         "   color: #4A90E2;"
         "   font-size: 13px;"
-        "   padding: 12px 15px;"
-        "   border-radius: 10px;"
+        "   padding: 8px 15px;"
+        "   border-radius: 8px;"
         "}";
     
     modelLabel->setText("手机型号: 获取中...");
@@ -391,8 +394,8 @@ void DeviceInfoWindow::showDeviceInfo()
         "   color: #4A90E2;"
         "   font-size: 14px;"
         "   font-weight: bold;"
-        "   padding: 12px 15px;"
-        "   border-radius: 10px;"
+        "   padding: 8px 15px;"
+        "   border-radius: 8px;"
         "}"
     );
     
