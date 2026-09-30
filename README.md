@@ -178,9 +178,22 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 - Windows；Qt 6 的桌面开发组件；与该 Qt kit 匹配的编译器。
 - 本机验证环境：**Qt 6.11.2 / MinGW 13.1 64-bit**。
 - 先确认 `resources.qrc` 中每个文件都存在。
-- `.gitignore` 忽略 exe/DLL，所以全新 Git 克隆**不会自动带齐工具二进制**。需要自行准备可信、配套的工具包放入 `qiubai/`；各工具的许可证应单独遵守（见工具包及 `qiubai/LICENSE.txt`）。
+- `qiubai/` 中的工具 exe/DLL 是编译输入，通过 `.gitignore` 的目录白名单纳入 Git；提交并推送完整项目后，正常克隆会带齐现有工具。`build/`、`OrangeToolsApp/`、`dist/` 中的构建产物和发布包仍然忽略。替换工具包时应使用可信、配套的文件，并保留和遵守各工具随附的许可证。
 
 当前资源清单匹配本地工具包中的 `SDL3.dll`、`avcodec-62.dll`、`avformat-62.dll`、`avutil-60.dll`、`swresample-6.dll`。不要混用其他版本的 DLL；替换工具包时同时更新资源清单和完整性检查中的关键文件名。
+
+### 工具资源与 Git 推送
+
+`resources.qrc` 当前需要 23 项工具资源。仅提交资源清单不会上传其中引用的文件；工具 exe/DLL 也必须纳入提交。之前全局 `*.exe`、`*.dll` 规则误将这些输入文件排除，已针对 `/qiubai/*.exe` 和 `/qiubai/*.dll` 添加例外，不放开其他目录。
+
+修改或更换工具文件后，将对应的 `qiubai/` 文件与资源清单变更一起提交，再推送。可用以下只读命令核对：
+
+```powershell
+git ls-files -- qiubai
+git status --short --untracked-files=all -- qiubai
+```
+
+正常情况下，现有工具 exe/DLL 都应出现在已跟踪文件清单中，而不是被忽略；新增文件仍需 `git add` 后提交。Git 推送的是提交记录，不会自动上传未提交文件。不要用全项目强制添加来绕过忽略规则，也不要把构建目录或下载发布包混进源码提交。
 
 ### 用 Qt Creator
 
@@ -420,7 +433,7 @@ try {
 
 **不要删除** `src/`、`tests/`、工程/资源/部署配置、`.git/`、许可证、`qiubai/` 中的工具及 DLL，或部署包必需的 Qt 运行库和插件。`OrangeToolsApp/` 保留为现有可运行包，但不会随源码修改自动更新；如需最新版本，请先按第 4 节重新编译和部署。
 
-下面是手动清理命令，仅在项目根目录执行。它会删除 `build/` 内的编译程序和测试报告；需要保留这些产物时先另行保存。不存在的目标会跳过。执行前先确认清理清单，不要使用 `git clean -fdx`，因为工具 exe/DLL 也被当前 Git 忽略规则匹配。
+下面是手动清理命令，仅在项目根目录执行。它会删除 `build/` 内的编译程序和测试报告；需要保留这些产物时先另行保存。不存在的目标会跳过。执行前先确认清理清单，不要使用 `git clean -fdx`，它会连同忽略的发布包、构建输出及其他未跟踪文件一起删除。
 
 ```powershell
 $projectRoot = (Resolve-Path -LiteralPath '.').Path

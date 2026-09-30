@@ -27,6 +27,10 @@ Makefile.*
 *.a
 *.lib
 
+# qiubai 的工具二进制是编译输入，必须随源码提交；其他构建产物继续忽略
+!/qiubai/*.exe
+!/qiubai/*.dll
+
 # MOC 生成的文件
 moc_*.cpp
 moc_*.h
