@@ -3,7 +3,7 @@ CONFIG += c++11 testcase console
 CONFIG -= app_bundle
 TARGET = ReadabilityTests
 
-# 校验与主程序相同的压缩资源，不执行任何工具。
+# 校验与主程序相同的内嵌资源和构建配置，不执行任何工具。
 include($$PWD/../resources.pri)
 
 INCLUDEPATH += $$PWD/../src/app $$PWD/../src/ui

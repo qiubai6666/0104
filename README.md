@@ -14,7 +14,7 @@
 ├── compress-release.ps1        # 只压缩未签名主程序/MinGW 运行库，并解压校验
 ├── package-release.ps1         # 高压缩率 7z 下载包、完整性和逐文件 SHA-256 校验
 ├── resources.qrc               # 需要编进 exe 的工具资源清单
-├── resources.pri               # 主程序/测试共用的资源清单及 zlib 压缩参数
+├── resources.pri               # 主程序/测试共用资源配置；默认不压缩，可选 zlib
 ├── app.rc / app.manifest        # Windows 图标、权限和兼容性配置
 ├── LICENSE                     # 本项目的 MIT 许可证
 ├── src/
@@ -195,6 +195,14 @@ git status --short --untracked-files=all -- qiubai
 
 正常情况下，现有工具 exe/DLL 都应出现在已跟踪文件清单中，而不是被忽略；新增文件仍需 `git add` 后提交。Git 推送的是提交记录，不会自动上传未提交文件。不要用全项目强制添加来绕过忽略规则，也不要把构建目录或下载发布包混进源码提交。
 
+### 默认构建策略：优先最小下载包
+
+默认采用本轮实测下载最小的方案 B：**RCC 不压缩内嵌资源、部署不使用 UPX、发布时由外层 7z 统一压缩**。普通 Release 构建不再需要额外的 `CONFIG+=uncompressed_resources` 参数；`deploy.ps1` 的 `-UseUpx` 仍是显式选择，默认不要添加。qmake 编译本身不会自动生成 7z，仍需依次构建、部署，再调用 `package-release.ps1`。
+
+若优先缩小解压后的 exe，可在主程序和测试的 qmake 命令中都加上 **`CONFIG+=compressed_resources`**，恢复 zlib 级别 9 / 阈值 0。旧的 `CONFIG+=uncompressed_resources` 命令继续兼容，表示默认不压资源方式；它与 `compressed_resources` 同时指定时 qmake 会报错，避免配置含糊。
+
+已有发布目录和下载包不会自动重制。配置切换请使用全新的独立构建目录，并重新运行 qmake；`resources.pri` 自身的修改也会触发 RCC 数据重新生成，避免沿用旧资源缓存。默认方案会增大解压后的 exe 和运行目录，换取更小的下载包，实测数据见下方。
+
 ### 用 Qt Creator
 
 打开根目录 `OrangeTools.pro`，选择匹配的 Qt kit，使用独立构建目录进行 Release 构建。
@@ -236,7 +244,7 @@ try {
 
 ### 发布包体积、依赖精简与 UPX
 
-以下为发布目录的文件大小合计（**MiB = 1,048,576 字节**，不含构建中间文件；不是运行时内存占用）：
+以下为之前 zlib / UPX 发布方案的历史测量值，不代表现在默认构建的大小（**MiB = 1,048,576 字节**，不含构建中间文件；不是运行时内存占用）。现在默认采用下载优化方案，解压体积更大，下载更小，见下方对比：
 
 | 阶段 | 完整发布目录 |
 | --- | ---: |
@@ -267,7 +275,7 @@ try {
 .\deploy.ps1 -IncludeOptionalDependencies -IncludeSoftwareOpenGL
 ```
 
-`resources.pri` 继续让主程序和测试共用 zlib 级别 9、阈值 0 的资源配置；读取资源时解压，启动提取流程不变。未测量编译、启动耗时或 UPX 的运行时内存影响。
+`resources.pri` 默认让主程序和测试共用不压缩资源配置，由外层 7z 压缩下载包；启动提取流程和工具内容不变。可用 `CONFIG+=compressed_resources` 恢复 zlib 级别 9 / 阈值 0，但不作为默认下载方案。未测量编译、启动耗时或 UPX 的运行时内存影响。
 
 #### 使用 UPX，以及恢复未加壳版本
 
@@ -311,7 +319,87 @@ $upx = 'C:\Users\Administrator\.codex\tools\upx-5.2.1\upx-5.2.1-win64\upx.exe'
 
 脚本使用 7z 最高压缩级别、固实压缩、64 MiB 字典和 2 个压缩线程。本机产物实际使用 LZMA2 / LZMA / BCJ2。压缩后执行完整性检查，再直接读取每个文件解压后的字节流，与源文件的 SHA-256 比对；不生成解压测试副本，不启动主程序，也不操作设备。最后生成同名 `.7z.sha256` 校验文件。
 
-**发给别人的是 `dist/OrangeTools-Portable.7z`**，可同时提供校验文件。接收者应使用支持 7z 的软件完整解压，再打开 `OrangeToolsApp/Orange Tools.exe`；不要在压缩包内部直接运行，不要只解压一个 exe。解压后的占用仍是 56.36 MiB，功能和原发布目录一致。源码或工具包有更新时，先重新编译、部署，再打包；打包不会自动编译。
+现有 `dist/OrangeTools-Portable.7z` 及其校验文件继续保留；**优先下载体积时，推荐下方实测选出的 DownloadOptimized 包**。接收者应使用支持 7z 的软件完整解压，再打开 `OrangeToolsApp/Orange Tools.exe`；不要在压缩包内部直接运行，不要只解压一个 exe。原包解压后的占用仍是 56.36 MiB，功能和原发布目录一致。源码或工具包有更新时，先重新编译、部署，再打包；打包不会自动编译。
+
+#### 完整离线包的进一步优化（2026-10-01 实测）
+
+本轮只改变构建和压缩方式：不删除功能、工具或必需依赖，不改为联网下载。现有 `OrangeToolsApp/`、`dist/OrangeTools-Portable.7z` 及其校验文件保持原样。三种候选分别在独立构建和部署目录生成，包内顶层目录统一为 `OrangeToolsApp`。
+
+| 方案 | 下载：字节 / MiB | 解压后文件总大小：字节 / MiB |
+| --- | ---: | ---: |
+| 原包基准：zlib 资源 + UPX | 33,781,514 / 32.22 MiB | 59,093,802 / 56.36 MiB |
+| A：zlib 资源，不使用 UPX | 33,499,058 / 31.95 MiB | 60,545,322 / 57.74 MiB |
+| **B：不压资源，不使用 UPX（选用）** | 29,443,815 / 28.08 MiB | 77,874,986 / 74.27 MiB |
+| C：不压资源，主程序及未签名运行库使用 UPX | 30,434,051 / 29.02 MiB | 55,744,810 / 53.16 MiB |
+
+最终选择 **B**，并已设为默认：RCC 使用 `--no-compress`，主程序和运行库均不使用 UPX，由外层 7z 统一压缩。普通 qmake 构建无需额外资源配置参数；旧的 `CONFIG+=uncompressed_resources` 保留兼容。下载比原包减少 **4,337,699 字节 / 4.14 MiB / 12.84%**。这是本机实测结果，不承诺未来版本得到同样大小；候选 C 虽然解压更小，但下载比 B 大 990,236 字节，因此不选用。大小相同时优先无 UPX；只有严格小于原包才生成新的优化交付包。
+
+**代价：**解压后文件总大小从 56.36 MiB 增至 **74.27 MiB**（不含文件系统分配开销）；其中未加壳主 exe 为 41,594,368 字节 / 39.67 MiB。没有测量启动时间和运行内存，不宣称运行性能提升。
+
+**推荐下载交付物：**
+
+- `dist/OrangeTools-Portable-DownloadOptimized.7z`
+- `dist/OrangeTools-Portable-DownloadOptimized.7z.sha256`
+
+优化包 SHA-256：`03E3A5DC2C98A87D3148B2C45B56C83FF06EC2F66F692C342DC5C8AA3BF25D66`。完整解压后运行 `OrangeToolsApp/Orange Tools.exe`；原发布目录和原包没有被替换。所有候选都使用原有参数 `-t7z -mx=9 -ms=on -md=64m -mfb=273 -mmt=2 -mtc=off -mta=off -spd -bsp0 -sccUTF-8`，本机 7-Zip 26.02 实际使用 LZMA2 / LZMA / BCJ2。
+
+**验证范围：**
+
+- A/B/C 均在隔离 Qt 开发环境的各自发布目录运行回归测试，均为 **11 passed / 0 failed**；23 项内嵌资源的大小和 SHA-256 与原始工具一致。主程序与测试生成的 RCC 资源源码在各自配置下逐字节相同。
+- 每个候选均通过 Windows 平台插件、隐藏 Widgets 绘制、PNG 解码、Schannel TLS 1.2 能力检查；12 个 PE、121 项静态 DLL 导入未发现缺失。C 的加壳模块检查对应未加壳原版，不把 UPX 壳导入表当成完整依赖表。
+- 每个候选的 8 个 Qt DLL/插件签名均为 Valid，且 SHA-256 与原发布文件一致；没有强压签名 DLL，也没有改动原始工具文件。C 的 4 个未签名加壳文件另经 UPX 测试、解压及 PE 代码/数据/资源段哈希验证。
+- 三个候选包均通过完整性及逐文件解压字节流 SHA-256 检查。最终交付包再次执行完整性检查、实际解压并比对全部 **13 个文件**的 SHA-256，解压目录加载检查也通过；没有混入测试程序、Qt6Test.dll、源码或构建中间文件。
+- 未启动主程序，未连接手机，未执行刷写或真实网络功能；TLS 检查没有进行 HTTPS 握手。原发布目录、原下载包及校验文件、原始工具的哈希均未改变。
+
+**复现选用方案：**本机使用 Qt 6.11.2 / MinGW 13.1 64-bit；其他机器请替换工具路径。默认 qmake 构建已关闭资源内部压缩，无需额外 CONFIG 参数；只有显式加入 `CONFIG+=compressed_resources` 才恢复 zlib 级别 9 / 阈值 0，主程序和测试共用 `resources.pri`。以下命令创建全新的独立目录，不覆盖旧包，不启动主程序：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$project = (Get-Location).Path  # 在项目根目录执行
+$qtBin = 'D:\QT\6.11.2\mingw_64\bin'
+$compilerBin = 'D:\QT\Tools\mingw1310_64\bin'
+$sevenZip = 'D:\Program Files\7-Zip\7z.exe'
+$work = Join-Path $project ('build\download-optimized-' + [guid]::NewGuid().ToString('N'))
+# 本机已经交付优化包；复现另存新名称，仍然拒绝覆盖已有输出
+$archive = Join-Path $project 'dist\OrangeTools-Portable-DownloadOptimized-Rebuilt.7z'
+$oldPath = $env:PATH
+try {
+    $env:PATH = "$qtBin;$compilerBin;$oldPath"
+    $projects = @(
+        @{ Name='app'; File='OrangeTools.pro' },
+        @{ Name='tests'; File='tests\readabilitytests.pro' },
+        @{ Name='smoke'; File='tests\deploymentsmoke.pro' }
+    )
+    foreach ($item in $projects) {
+        $build = Join-Path $work $item.Name
+        New-Item -ItemType Directory -Path $build | Out-Null
+        Push-Location -LiteralPath $build
+        try {
+            & "$qtBin\qmake.exe" (Join-Path $project $item.File) 'CONFIG+=release' 'CONFIG-=debug'
+            if ($LASTEXITCODE -ne 0) { throw 'qmake failed' }
+            & "$compilerBin\mingw32-make.exe" -j2
+            if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+        } finally { Pop-Location }
+    }
+    $release = Join-Path $work 'deploy\OrangeToolsApp'
+    # 不加 -UseUpx；不改动已有 OrangeToolsApp 或原下载包
+    & (Join-Path $project 'deploy.ps1') -ExecutablePath (Join-Path $work 'app\release\Orange Tools.exe') -QtBinPath $qtBin -OutputDirectory $release
+    # 开发环境资源回归；显式写日志，避免 Windows 控制台不显示 Qt Test 输出
+    $testLog = Join-Path $work 'regression.txt'
+    & (Join-Path $work 'tests\release\ReadabilityTests.exe') -platform offscreen -o "$testLog,txt"
+    if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    Get-Content -LiteralPath $testLog
+    # 此检查隔离开发环境，从新发布目录加载插件；不启动主程序
+    & (Join-Path $project 'tests\check-deployment.ps1') -OutputDirectory $release -SmokeExecutable (Join-Path $work 'smoke\release\DeploymentSmoke.exe')
+    & (Join-Path $project 'package-release.ps1') -ReleaseDirectory $release -ArchivePath $archive -SevenZipPath $sevenZip
+} finally { $env:PATH = $oldPath }
+```
+
+对比其他候选时，A 的主程序/测试 qmake 命令均增加 `CONFIG+=compressed_resources`，部署不加 UPX；C 使用默认不压资源配置，部署增加第 4 节所示 `-UseUpx -UpxPath $upx`。每个候选使用不同的工作目录和压缩包名称，包内均保持 `OrangeToolsApp`，打包参数不变。复现命令中的回归使用开发环境；本轮验收还把对应测试程序和 Qt6Test.dll 临时放到每个候选目录，在隔离环境下测试，打包前已移除。
+
+收尾已核实本轮实验材料的归属、项目内路径及链接风险；自动删除被环境执行策略拦截，未绕过限制，实验目录 `build/download-opt-20261001-92ffa206/` 暂保留（191 个临时文件，1,294,259,130 字节，约 1.21 GiB）。其中包含实验包、部署/解压验证副本、构建材料和验证日志，不参与正式发布。正式交付仍只有上列优化包及校验文件、本次配置和文档修改；已有构建目录和历史验证材料均未删除。
+
+将方案 B 设为默认后，已重新通过独立 Release 主程序/测试构建、11 项回归、23 项资源大小及 SHA-256 校验、Windows/PNG/Schannel 加载和 8 个 Qt 文件签名检查；默认资源数据与之前选定的 B 方案一致，部署目录无测试残留。仅针对本次新建验证目录的收尾删除也被环境执行策略拦截，未绕过；`build/default-download-20261001-b47a124b/` 暂保留（95 个验证文件，661,979,324 字节，约 631.31 MiB），不参与发布，现有包没有重制。
 
 ### 双击提示缺少 Qt6Gui.dll 等运行库
 
@@ -327,7 +415,7 @@ $upx = 'C:\Users\Administrator\.codex\tools\upx-5.2.1\upx-5.2.1-win64\upx.exe'
 
 ## 5. 回归测试
 
-`tests/readabilitytests.cpp` 验证 Orange Tools 应用名、公共菜单按钮的顺序/布局/样式、密码框外观、默认密码、空密码、错误后重试及三次错误退出；另逐项读取资源清单，将内嵌资源的长度和 SHA-256 与原始文件比对，确认压缩后内容不变。主程序和测试使用同一份 `resources.pri`。测试仅在内存中读取/解压资源，不提取到运行目录、不启动主程序、不调用设备工具、不访问网络。
+`tests/readabilitytests.cpp` 验证 Orange Tools 应用名、公共菜单按钮的顺序/布局/样式、密码框外观、默认密码、空密码、错误后重试及三次错误退出；另逐项读取资源清单，将内嵌资源的长度和 SHA-256 与原始文件比对，确认不同资源配置下内容保持一致。主程序和测试使用同一份 `resources.pri`，默认均不压缩内嵌资源。测试仅在内存中读取/解压资源，不提取到运行目录、不启动主程序、不调用设备工具、不访问网络。
 
 在第 4 节设置好 `$qtBin`、`$compilerBin` 和 PATH 后执行：
 
