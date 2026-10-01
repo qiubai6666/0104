@@ -1,3 +1,4 @@
+#include "processmanager.h"
 #include "payloadwindow.h"
 #include "resourceextractor.h"
 #include <QCoreApplication>
@@ -304,7 +305,7 @@ void PayloadWindow::onExtractClicked()
     }
     
     // 执行 payload.exe
-    QProcess *process = new QProcess(this);
+    QProcess *process = ProcessManager::createProcess(this);
     process->setWorkingDirectory(ResourceExtractor::getResourcePath());
     
     QStringList args;

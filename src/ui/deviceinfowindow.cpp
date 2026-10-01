@@ -1,3 +1,4 @@
+#include "processmanager.h"
 #include "deviceinfowindow.h"
 #include "resourceextractor.h"
 #include "uihelper.h"
@@ -173,7 +174,7 @@ DeviceInfoWindow::DeviceInfoWindow(QWidget *parent)
     setupUI();
     
     // 创建 scrcpy 进程对象
-    scrcpyProcess = new QProcess(this);
+    scrcpyProcess = ProcessManager::createProcess(this);
     
     // 监听scrcpy进程结束信号
     connect(scrcpyProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -389,7 +390,7 @@ void DeviceInfoWindow::onDeviceInfoUpdated(const QString &info)
         }
         queryProcess->deleteLater();
     }
-    queryProcess = new QProcess(this);
+    queryProcess = ProcessManager::createProcess(this);
     queryProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
     
     QString adbPath = ResourceExtractor::getAdbPath();
@@ -416,7 +417,7 @@ void DeviceInfoWindow::onModelQueryFinished()
     
     // 删除旧进程，创建新进程获取版本
     queryProcess->deleteLater();
-    queryProcess = new QProcess(this);
+    queryProcess = ProcessManager::createProcess(this);
     queryProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
     
     QString adbPath = ResourceExtractor::getAdbPath();
@@ -606,7 +607,7 @@ void DeviceInfoWindow::transferFiles(const QStringList &filePaths)
         }
         transferProcess->deleteLater();
     }
-    transferProcess = new QProcess(this);
+    transferProcess = ProcessManager::createProcess(this);
     transferProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
     
     connect(transferProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),

@@ -1,3 +1,4 @@
+#include "processmanager.h"
 #include "repairwindow.h"
 #include "resourceextractor.h"
 #include "devicemanager.h"
@@ -138,7 +139,7 @@ void RepairWindow::executeUsbFix()
     if (repairProcess) {
         repairProcess->deleteLater();
     }
-    repairProcess = new QProcess(this);
+    repairProcess = ProcessManager::createProcess(this);
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     // 第1步：推送 usb.sh 到手机
@@ -203,7 +204,7 @@ void RepairWindow::fixTmpFolder()
     if (repairProcess) {
         repairProcess->deleteLater();
     }
-    repairProcess = new QProcess(this);
+    repairProcess = ProcessManager::createProcess(this);
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     tmpFixStep = 0;
@@ -353,7 +354,7 @@ void RepairWindow::installApk()
     if (repairProcess) {
         repairProcess->deleteLater();
     }
-    repairProcess = new QProcess(this);
+    repairProcess = ProcessManager::createProcess(this);
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -534,7 +535,7 @@ void RepairWindow::installModule()
     if (repairProcess) {
         repairProcess->deleteLater();
     }
-    repairProcess = new QProcess(this);
+    repairProcess = ProcessManager::createProcess(this);
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),

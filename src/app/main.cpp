@@ -4,6 +4,7 @@
 #include "menuwidget.h"
 #include "passworddialog.h"
 #include "processmanager.h"
+#include "devicemanager.h"
 #include "resourceextractor.h"
 #include "integritychecker.h"
 #include "version.h"
@@ -38,8 +39,11 @@ int main(int argc, char *argv[])
         qDebug() << "资源提取失败，程序可能无法正常工作";
     }
 
-    // 清空之前的PID记录
-    ProcessManager::clearPIDFile();
+    // 覆盖正常退出方式；仅清理当前应用持有的进程对象。
+    QObject::connect(&application, &QCoreApplication::aboutToQuit, &application, []() {
+        DeviceManager::instance()->stopMonitoring();
+        ProcessManager::stopAllProcesses();
+    });
 
     // 密码验证
     PasswordDialog passwordDialog;

@@ -225,7 +225,7 @@ void MenuWidget::extractImg()
     if (imgProcess) {
         imgProcess->deleteLater();
     }
-    imgProcess = new QProcess(this);
+    imgProcess = ProcessManager::createProcess(this);
     imgProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     QString adbPath = ResourceExtractor::getAdbPath();
@@ -292,14 +292,11 @@ void MenuWidget::cleanupAndExit()
 {
     qDebug() << "开始清理并退出...";
 
-    // 1. 结束所有记录的子进程
-    ProcessManager::killAllRecordedProcesses();
+    // 先停止轮询，再仅结束本程序持有的进程；共享 ADB Server 保持运行。
+    DeviceManager::instance()->stopMonitoring();
+    ProcessManager::stopAllProcesses();
 
-    // 2. 强制结束 adb.exe 和 fastboot.exe
-    ProcessManager::killProcessByName("adb.exe");
-    ProcessManager::killProcessByName("fastboot.exe");
-
-    // 3. 使用定时器等待进程释放文件
+    // 使用定时器等待进程释放文件
     QTimer::singleShot(500, this, &MenuWidget::onCleanupProcessFinished);
 }
 

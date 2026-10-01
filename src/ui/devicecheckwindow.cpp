@@ -347,7 +347,7 @@ void DeviceCheckWindow::onRebootButtonClicked()
         currentProcess->deleteLater();
     }
     
-    currentProcess = new QProcess(this);
+    currentProcess = ProcessManager::createProcess(this);
     currentProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
     
     DeviceManager::DeviceMode currentMode = DeviceManager::instance()->currentMode();
@@ -402,16 +402,14 @@ void DeviceCheckWindow::onOpenCmdClicked()
         return;
     }
     
-    // 使用Shell执行（允许UAC提示）
-    qint64 pid = 0;
-    bool success = QProcess::startDetached("cmd.exe", 
-                           QStringList() << "/c" << "start" << "CMD.bat",
-                           qiubaiPath,
-                           &pid);
-    
-    if (success && pid > 0) {
-        ProcessManager::recordProcess(pid, "cmd.exe");
-        qDebug() << "CMD已启动，PID:" << pid;
+    // 直接持有运行批处理的 CMD，不使用 start 创建无法持有的中间进程。
+    QProcess *process = ProcessManager::startProcess("cmd.exe",
+                           QStringList() << "/d" << "/c" << "CMD.bat", qiubaiPath, true);
+
+    if (process) {
+        qDebug() << "CMD已启动，PID:" << process->processId();
+    } else {
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "无法打开 CMD！", this);
     }
 }
 
@@ -483,7 +481,7 @@ void DeviceCheckWindow::flashPartition(const QString &partition)
             currentProcess->deleteLater();
         }
         
-        currentProcess = new QProcess(this);
+        currentProcess = ProcessManager::createProcess(this);
         currentProcess->setWorkingDirectory(qiubaiPath);
         
         connect(currentProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -572,7 +570,7 @@ void DeviceCheckWindow::performFlash(const QString &partition, const QString &im
         currentProcess->deleteLater();
     }
     
-    currentProcess = new QProcess(this);
+    currentProcess = ProcessManager::createProcess(this);
     currentProcess->setWorkingDirectory(qiubaiPath);
     
     connect(currentProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -593,7 +591,7 @@ void DeviceCheckWindow::performFlash(const QString &partition, const QString &im
             
             // 重启到系统
             QString fastbootPath = ResourceExtractor::getResourcePath() + "/fastboot.exe";
-            QProcess *rebootProcess = new QProcess(this);
+            QProcess *rebootProcess = ProcessManager::createProcess(this);
             rebootProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
             
             connect(rebootProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),

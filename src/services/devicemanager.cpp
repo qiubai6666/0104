@@ -1,3 +1,4 @@
+#include "processmanager.h"
 #include "devicemanager.h"
 #include "resourceextractor.h"
 #include "version.h"
@@ -27,9 +28,9 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_checkTimer, &QTimer::timeout, this, &DeviceManager::checkDeviceStatus);
 
     // 创建进程对象
-    m_adbCheckProcess = new QProcess(this);
-    m_fastbootCheckProcess = new QProcess(this);
-    m_infoProcess = new QProcess(this);
+    m_adbCheckProcess = ProcessManager::createProcess(this);
+    m_fastbootCheckProcess = ProcessManager::createProcess(this);
+    m_infoProcess = ProcessManager::createProcess(this);
     m_infoProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     qDebug() << "DeviceManager 单例已创建";

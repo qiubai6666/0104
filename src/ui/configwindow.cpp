@@ -171,13 +171,10 @@ void ConfigWindow::openNDM()
         return;
     }
 
-    // 使用Shell执行（允许UAC提示）
-    qint64 pid = 0;
-    bool success = QProcess::startDetached(ndmPath, QStringList(), qiubaiPath, &pid);
+    QProcess *process = ProcessManager::startProcess(ndmPath, QStringList(), qiubaiPath);
 
-    if (success && pid > 0) {
-        ProcessManager::recordProcess(pid, "NDM.exe");
-        qDebug() << "NDM已启动，PID:" << pid;
+    if (process) {
+        qDebug() << "NDM已启动，PID:" << process->processId();
     } else {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "无法启动 NDM.exe！", this);
     }
@@ -503,7 +500,7 @@ void ConfigWindow::extractZipAndOpen(const QString &zipPath, const QString &exeN
     if (extractProcess) {
         extractProcess->deleteLater();
     }
-    extractProcess = new QProcess(this);
+    extractProcess = ProcessManager::createProcess(this);
 
     connect(extractProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &ConfigWindow::onExtractFinished);
@@ -576,13 +573,10 @@ void ConfigWindow::openExecutable(const QString &exePath)
     // 显示启动提示（非阻塞）
     qDebug() << "正在启动程序:" << exePath;
 
-    // 使用Shell执行（允许UAC提示）
-    qint64 pid = 0;
-    bool success = QProcess::startDetached(exePath, QStringList(), workingDir, &pid);
+    QProcess *process = ProcessManager::startProcess(exePath, QStringList(), workingDir);
 
-    if (success && pid > 0) {
-        ProcessManager::recordProcess(pid, fileName);
-        qDebug() << "程序已启动，PID:" << pid << "名称:" << fileName;
+    if (process) {
+        qDebug() << "程序已启动，PID:" << process->processId() << "名称:" << fileName;
     } else {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
             QString("无法启动程序：%1").arg(fileName), this);

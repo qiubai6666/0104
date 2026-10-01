@@ -1,214 +1,101 @@
 #include "processmanager.h"
-#include "resourceextractor.h"
-#include <QProcess>
+
+#include <QCoreApplication>
 #include <QDebug>
-#include <QDir>
-#include <QTextStream>
-#include <QFile>
-#include <QThread>
-#include <QFileInfo>
-#include <QSet>
+#include <QList>
+#include <QPointer>
+#include <algorithm>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
-#include <tlhelp32.h>
 #endif
 
-QString ProcessManager::getPIDFilePath()
+namespace {
+QList<QPointer<QProcess>> &ownedProcesses()
 {
-    QString qiubaiPath = ResourceExtractor::getResourcePath();
-    return qiubaiPath + "/PID.txt";
+    static QList<QPointer<QProcess>> processes;
+    return processes;
 }
 
-void ProcessManager::recordPID(qint64 pid)
+void discardDestroyedProcesses()
 {
-    QString pidFile = getPIDFilePath();
-    
-    QFile file(pidFile);
-    if (file.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << pid << "\n";
-        file.close();
-        qDebug() << "记录进程PID:" << pid;
-    } else {
-        qDebug() << "无法打开PID文件进行写入:" << pidFile;
-    }
+    auto &processes = ownedProcesses();
+    processes.erase(std::remove_if(processes.begin(), processes.end(),
+                                   [](const QPointer<QProcess> &process) { return process.isNull(); }),
+                    processes.end());
+}
 }
 
-void ProcessManager::recordProcess(qint64 pid, const QString &processName)
+QProcess *ProcessManager::createProcess(QObject *parent, bool newConsole)
 {
-    QString pidFile = getPIDFilePath();
-    
-    QFile file(pidFile);
-    if (file.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << pid << "|" << processName << "\n";
-        file.close();
-        qDebug() << "记录进程 PID:" << pid << "进程名:" << processName;
-    } else {
-        qDebug() << "无法打开PID文件进行写入:" << pidFile;
-    }
-}
-
-void ProcessManager::killAllRecordedProcesses()
-{
-    QString pidFile = getPIDFilePath();
-    
-    QFile file(pidFile);
-    if (!file.exists()) {
-        qDebug() << "PID文件不存在:" << pidFile;
-        return;
-    }
-    
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        qDebug() << "无法打开PID文件进行读取:" << pidFile;
-        return;
-    }
-    
-    QTextStream in(&file);
-    QList<qint64> pids;
-    QStringList processNames;
-    
-    while (!in.atEnd()) {
-        QString line = in.readLine().trimmed();
-        if (!line.isEmpty()) {
-            // 支持两种格式：纯PID 或 PID|进程名
-            if (line.contains('|')) {
-                QStringList parts = line.split('|');
-                if (parts.size() >= 2) {
-                    bool ok;
-                    qint64 pid = parts[0].toLongLong(&ok);
-                    if (ok && pid > 0) {
-                        pids.append(pid);
-                        processNames.append(parts[1]);
-                    }
-                }
-            } else {
-                bool ok;
-                qint64 pid = line.toLongLong(&ok);
-                if (ok && pid > 0) {
-                    pids.append(pid);
-                    processNames.append("");
-                }
-            }
-        }
-    }
-    
-    file.close();
-    
-    qDebug() << "读取到" << pids.size() << "个进程";
-    
-    if (pids.isEmpty()) {
-        qDebug() << "没有需要结束的进程";
-        return;
-    }
-    
-    qDebug() << "开始结束进程...";
-    
+    discardDestroyedProcesses();
+    QProcess *process = new QProcess(parent);
 #ifdef Q_OS_WIN
-    // 使用Windows API结束进程
-    for (qint64 pid : pids) {
-        HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid));
-        if (hProcess != NULL) {
-            if (TerminateProcess(hProcess, 0)) {
-                qDebug() << "成功结束进程 PID:" << pid;
-            } else {
-                qDebug() << "结束进程失败 PID:" << pid;
-            }
-            CloseHandle(hProcess);
-        } else {
-            qDebug() << "无法打开进程 PID:" << pid;
-        }
+    if (newConsole) {
+        // 让 CMD 本身成为受管进程，并使用新控制台的标准输入/输出。
+        process->setProcessChannelMode(QProcess::ForwardedChannels);
+        process->setInputChannelMode(QProcess::ForwardedInputChannel);
+        process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
+            args->flags &= ~CREATE_NO_WINDOW;
+            args->flags |= CREATE_NEW_CONSOLE;
+            args->startupInfo->dwFlags &= ~(STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW);
+        });
     }
 #else
-    // 非Windows系统使用kill命令
-    for (qint64 pid : pids) {
-        QProcess::execute("kill", QStringList() << "-9" << QString::number(pid));
-    }
+    Q_UNUSED(newConsole);
 #endif
-    
-    qDebug() << "进程结束完成";
-    
-    // 按进程名结束（作为补充）
-#ifdef Q_OS_WIN
-    QStringList uniqueProcessNames;
-    for (const QString &name : processNames) {
-        if (!name.isEmpty() && !uniqueProcessNames.contains(name, Qt::CaseInsensitive)) {
-            uniqueProcessNames.append(name);
-        }
-    }
-    
-    if (!uniqueProcessNames.isEmpty()) {
-        qDebug() << "按进程名结束:" << uniqueProcessNames;
-        
-        for (const QString &processName : uniqueProcessNames) {
-            HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if (hSnapshot != INVALID_HANDLE_VALUE) {
-                PROCESSENTRY32W pe32;
-                pe32.dwSize = sizeof(PROCESSENTRY32W);
-                
-                if (Process32FirstW(hSnapshot, &pe32)) {
-                    do {
-                        QString exeName = QString::fromWCharArray(pe32.szExeFile);
-                        if (exeName.compare(processName, Qt::CaseInsensitive) == 0) {
-                            HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pe32.th32ProcessID);
-                            if (hProcess != NULL) {
-                                TerminateProcess(hProcess, 0);
-                                CloseHandle(hProcess);
-                            }
-                        }
-                    } while (Process32NextW(hSnapshot, &pe32));
-                }
-                CloseHandle(hSnapshot);
-            }
-        }
-    }
-#endif
+    ownedProcesses().append(process);
+    return process;
 }
 
-void ProcessManager::killProcessByName(const QString &processName)
+QProcess *ProcessManager::startProcess(const QString &program, const QStringList &arguments,
+                                      const QString &workingDirectory, bool newConsole)
 {
-    qDebug() << "结束进程:" << processName;
-    
-#ifdef Q_OS_WIN
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe32;
-        pe32.dwSize = sizeof(PROCESSENTRY32W);
-        
-        if (Process32FirstW(hSnapshot, &pe32)) {
-            do {
-                QString exeName = QString::fromWCharArray(pe32.szExeFile);
-                if (exeName.compare(processName, Qt::CaseInsensitive) == 0) {
-                    qDebug() << "找到进程:" << processName << "PID:" << pe32.th32ProcessID;
-                    
-                    HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pe32.th32ProcessID);
-                    if (hProcess != NULL) {
-                        if (TerminateProcess(hProcess, 0)) {
-                            qDebug() << "成功结束进程:" << processName;
-                        }
-                        CloseHandle(hProcess);
-                    }
-                }
-            } while (Process32NextW(hSnapshot, &pe32));
-        }
-        CloseHandle(hSnapshot);
+    QProcess *process = createProcess(QCoreApplication::instance(), newConsole);
+    process->setWorkingDirectory(workingDirectory);
+
+    QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                     process, &QObject::deleteLater);
+    process->start(program, arguments);
+    if (!process->waitForStarted(3000)) {
+        qWarning() << "启动受管进程失败:" << program << process->errorString();
+        delete process;
+        return nullptr;
     }
-#else
-    // 非Windows系统使用killall命令
-    QProcess::execute("killall", QStringList() << processName);
-#endif
+    return process;
 }
 
-void ProcessManager::clearPIDFile()
+void ProcessManager::stopAllProcesses()
 {
-    QString pidFile = getPIDFilePath();
-    
-    if (QFile::exists(pidFile)) {
-        if (QFile::remove(pidFile)) {
-            qDebug() << "已清空PID文件";
-        } else {
-            qDebug() << "无法删除PID文件:" << pidFile;
+    discardDestroyedProcesses();
+    const auto processes = ownedProcesses();
+    QList<bool> signalsWereBlocked;
+
+    // 先屏蔽所有完成回调，避免退出时多步骤操作继续启动下一条命令。
+    for (const auto &process : processes) {
+        signalsWereBlocked.append(process ? process->blockSignals(true) : false);
+    }
+    for (const auto &process : processes) {
+        if (!process) {
+            continue;
+        }
+        if (process->state() == QProcess::Starting) {
+            process->waitForStarted(1000);
+        }
+        if (process->state() != QProcess::NotRunning) {
+            // QProcess 在 Windows 持有实际进程句柄，不会因 PID 复用结束其他实例。
+            process->kill();
         }
     }
+    for (int i = 0; i < processes.size(); ++i) {
+        const auto &process = processes.at(i);
+        if (!process) {
+            continue;
+        }
+        if (process->state() != QProcess::NotRunning && !process->waitForFinished(1000)) {
+            qWarning() << "等待受管进程退出超时:" << process->program();
+        }
+        process->blockSignals(signalsWereBlocked.at(i));
+    }
+    // 不枚举或终止派生进程，也不向共享 ADB Server 发送 kill-server。
 }

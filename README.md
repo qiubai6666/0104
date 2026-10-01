@@ -39,6 +39,7 @@
 ├── tests/                      # 不操作真实设备的 Qt Test 回归测试
 │   ├── readabilitytests.pro
 │   ├── readabilitytests.cpp
+│   ├── processmanagertests.pro/.cpp # 验证受管进程与外部同名实例隔离
 │   ├── deploymentsmoke.pro/.cpp # 只验证发布插件、PNG、绘制及 TLS 能力
 │   └── check-deployment.ps1     # 隔离开发环境后运行发布检查并清理临时 exe
 ├── build/                      # 编译/测试时生成，可清理，Git 忽略
@@ -63,7 +64,7 @@
 | `src/ui/configwindow.cpp/.h` | 读取下载配置；下载/解压/启动工具；显示进度、处理重试 | `DownloadConfig` 表示一条配置；`downloadFile()`、`onFileDownloadFinished()` |
 | `src/ui/uihelper.cpp/.h` | 统一菜单按钮样式、创建按钮、显示居中消息框 | `createMenuButtons()` 只管界面，各窗口自行连接业务信号 |
 | `src/services/devicemanager.cpp/.h` | 共享设备监控、设备模式和信息缓存 | 单例；全模式/仅 ADB 的引用计数；轮询和暂停/恢复 |
-| `src/services/processmanager.cpp/.h` | 写入进程 PID/名称，退出时终止记录的进程 | `recordProcess()`、`killAllRecordedProcesses()`、`killProcessByName()` |
+| `src/services/processmanager.cpp/.h` | 持有本程序创建的 QProcess，退出时仅停止受管实例 | `createProcess()`、`startProcess()`、`stopAllProcesses()` |
 | `src/services/resourceextractor.cpp/.h` | 从 Qt 嵌入资源提取工具，提供统一的工具和图片路径 | `extractResources()`、`getResourcePath()`、`getAdbPath()` |
 | `src/services/integritychecker.cpp/.h` | 检查调试器和关键资源的存在性、可读性及非空性 | `verifyIntegrity()`；哈希函数存在，但启动时没有做可信哈希比对 |
 
@@ -86,21 +87,21 @@ QApplication
   → ResourceExtractor::extractResources()
       重建用户数据目录中的 qiubai 文件夹并提取工具
       失败仅记录日志，启动流程仍继续
-  → ProcessManager::clearPIDFile()
+  → 注册 aboutToQuit 受管进程清理
   → PasswordDialog
       取消 / 验证未通过：退出
       验证通过：显示 MenuWidget
   → QApplication 事件循环
 
 点击主菜单“退出”
-  → 结束记录的进程
-  → 按名称终止 adb.exe / fastboot.exe
+  → 停止设备轮询
+  → 仅停止当前程序持有的 QProcess 实例
   → 等待 500 ms
   → 尝试删除运行时 qiubai 目录
   → QApplication::quit()
 ```
 
-**退出清理属于主菜单“退出”按钮的流程**，并非所有关闭方式都有同样的清理保证。按名称终止进程也可能影响其他软件启动的同名 ADB/Fastboot 实例。
+**进程清理也接入 `aboutToQuit`**，覆盖正常退出方式；运行时目录删除仍属于主菜单“退出”按钮的流程。不再读取 `PID.txt`、按名称扫描进程或无条件停止共享 ADB Server。外部工具和 CMD 直接由本程序持有，不自动接管它们派生的进程；其他软件的同名实例不受影响。共享服务仍占用工具文件时，目录删除可能失败，程序不会为了删除目录而强杀共享服务。
 
 ### 各部分的调用关系
 
@@ -164,7 +165,7 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 | 位置 | 内容与生命周期 |
 | --- | --- |
 | 仓库 `qiubai/` | 编译输入：工具、依赖 DLL、脚本及图片；不要和运行时目录混淆 |
-| `%LOCALAPPDATA%/qiubai` | 每次启动重建并提取资源；也存放 `PID.txt`、下载配置及下载工具；点击“退出”尝试删除 |
+| `%LOCALAPPDATA%/qiubai` | 每次启动重建并提取资源；也存放下载配置及下载工具（不再使用 `PID.txt`）；点击“退出”尝试删除 |
 | `%LOCALAPPDATA%/Neil.jpg` | 单独提取的作者图片，与运行时 qiubai 目录同级；退出清理不删除它 |
 | 系统桌面下的 `IMG/` | IMG 拉取和 Payload 提取输出；程序退出时保留 |
 | `OrangeToolsApp/` | 发布包，包含主 exe、Qt DLL、运行库、插件和 `qt.conf` |
@@ -433,6 +434,31 @@ try {
     Pop-Location
 }
 ```
+
+### 退出进程隔离测试
+
+`tests/processmanagertests.cpp` 只启动测试程序自己的副本（模拟 `adb.exe`、`fastboot.exe`、`cmd.exe` 和外部工具），不运行实际设备工具、不连接设备、不访问网络。验证受管进程退出、外部同名实例存活、空清理与重复清理、对象销毁、正常结束自动释放、进程复用、启动失败、退出时不继续多步骤命令、CMD 控制台创建参数、`aboutToQuit` 清理，以及共享派生服务保留。CMD 参数测试不实际弹出窗口；可见控制台的交互仍需手动验收。
+
+使用独立的新构建目录（示例目录已存在时另选名称），并沿用上面的 Qt/编译器 PATH：
+
+```powershell
+$processTestBuild = '.\build\process-manager-tests'
+if (Test-Path -LiteralPath $processTestBuild) { throw '请选择新的独立测试构建目录' }
+New-Item -ItemType Directory -Path $processTestBuild | Out-Null
+Push-Location $processTestBuild
+try {
+    & "$qtBin\qmake.exe" '..\..\tests\processmanagertests.pro' 'CONFIG+=release' 'CONFIG-=debug'
+    if ($LASTEXITCODE -ne 0) { throw 'Process test qmake failed' }
+    & "$compilerBin\mingw32-make.exe" -j2
+    if ($LASTEXITCODE -ne 0) { throw 'Process test build failed' }
+    & '.\release\ProcessManagerTests.exe' -o 'results.txt,txt'
+    $testExitCode = $LASTEXITCODE
+    Get-Content -LiteralPath 'results.txt'
+    if ($testExitCode -ne 0) { throw 'Process tests failed' }
+} finally { Pop-Location }
+```
+
+测试副本与日志仅存在该构建目录，不属于发布文件。相同构建可重复运行；测试程序重新编译后请另用新目录，避免使用旧的 helper 副本。
 
 ### 发布目录加载检查
 
