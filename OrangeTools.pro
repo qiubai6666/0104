@@ -40,8 +40,13 @@ HEADERS += \
     src/ui/devicecheckwindow.h \
     src/ui/configwindow.h \
     src/services/processmanager.h \
+    src/services/shellcommand.h \
     src/services/resourceextractor.h \
     src/app/version.h \
     src/ui/uihelper.h \
     src/services/devicemanager.h \
     src/services/integritychecker.h
+
+include($$PWD/ouga.pri)
+SOURCES += $$PWD/src/services/deviceoperationlease.cpp
+HEADERS += $$PWD/src/services/deviceoperationlease.h

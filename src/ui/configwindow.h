@@ -49,8 +49,10 @@ private:
     void downloadFile(int id);
     void extractZipAndOpen(const QString &zipPath, const QString &exeName);
     void openExecutable(const QString &exePath);
+    static bool isSafeFileName(const QString &fileName);
     QString findFileRecursively(const QString &dirPath, const QString &fileName);
     void onExtractFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onExtractError(QProcess::ProcessError error);
 
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;

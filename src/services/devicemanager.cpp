@@ -1,8 +1,10 @@
+#include "deviceoperationlease.h"
 #include "processmanager.h"
 #include "devicemanager.h"
 #include "resourceextractor.h"
 #include "version.h"
 #include <QDebug>
+#include <QRegularExpression>
 
 DeviceManager* DeviceManager::m_instance = nullptr;
 
@@ -129,6 +131,8 @@ void DeviceManager::ensureAdbOnlyMonitoring()
             disconnect(m_adbCheckProcess, nullptr, this, nullptr);
             connect(m_adbCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                     this, &DeviceManager::onAdbCheckFinished);
+            connect(m_adbCheckProcess, &QProcess::errorOccurred,
+                    this, &DeviceManager::onAdbCheckError);
             m_adbCheckProcess->start(adbPath, QStringList() << "devices");
         }
     }
@@ -178,20 +182,26 @@ void DeviceManager::pauseMonitoring()
         m_isPaused = true;
         qDebug() << "DeviceManager 暂停监控（用于fastboot操作）";
 
-        // 终止正在运行的fastboot检测进程
-        if (m_fastbootCheckProcess->state() == QProcess::Running) {
-            m_fastbootCheckProcess->kill();
-            m_fastbootCheckProcess->waitForFinished(100);
+        // Queries only; never kill a user's flash or shared ADB server.
+        for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess, m_infoProcess}) {
+            if (process->state() != QProcess::NotRunning) {
+                process->kill();
+                process->waitForFinished(1000);
+            }
         }
         m_isChecking = false;
     }
 }
 
-void DeviceManager::resumeMonitoring()
+void DeviceManager::resumeMonitoring(QObject *waitingOwner)
 {
+    if (DeviceOperationLease::owner() && DeviceOperationLease::owner() != waitingOwner) return;
     if (m_isPaused) {
         m_isPaused = false;
         qDebug() << "DeviceManager 恢复监控";
+    }
+    if (waitingOwner && (m_fullModeRefCount > 0 || m_adbOnlyRefCount > 0) && !m_checkTimer->isActive()) {
+        m_checkTimer->start(DEVICE_CHECK_INTERVAL);
     }
 }
 
@@ -223,14 +233,14 @@ void DeviceManager::checkDeviceStatus()
     // 连接完成信号
     connect(m_adbCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &DeviceManager::onAdbCheckFinished);
+    connect(m_adbCheckProcess, &QProcess::errorOccurred,
+            this, &DeviceManager::onAdbCheckError);
 
     m_adbCheckProcess->start(adbPath, QStringList() << "devices");
 }
 
 void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    Q_UNUSED(exitCode);
-
     // 如果已暂停监控，直接返回，避免与 fastboot 操作冲突
     if (m_isPaused) {
         m_isChecking = false;
@@ -239,12 +249,14 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
 
     bool adbConnected = false;
 
-    if (exitStatus == QProcess::NormalExit) {
-        QString adbOutput = m_adbCheckProcess->readAllStandardOutput();
-        QStringList lines = adbOutput.split('\n');
-        for (int i = 1; i < lines.size(); ++i) {
-            QString line = lines[i].trimmed();
-            if (line.contains("device") && !line.contains("devices")) {
+    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        const QString adbOutput = QString::fromLocal8Bit(m_adbCheckProcess->readAllStandardOutput());
+        const QStringList lines = adbOutput.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
+        for (const QString &rawLine : lines) {
+            const QStringList fields = rawLine.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            // ADB 输出的第二列必须是精确的 device，避免把序列号或其他文本中的
+            // "device" 当成在线设备。
+            if (fields.size() >= 2 && fields.at(1) == "device") {
                 adbConnected = true;
                 break;
             }
@@ -262,6 +274,8 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
         // 连接完成信号
         connect(m_fastbootCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                 this, &DeviceManager::onFastbootCheckFinished);
+        connect(m_fastbootCheckProcess, &QProcess::errorOccurred,
+                this, &DeviceManager::onFastbootCheckError);
 
         m_fastbootCheckProcess->start(fastbootPath, QStringList() << "devices");
     } else {
@@ -287,10 +301,39 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
     }
 }
 
+void DeviceManager::onAdbCheckError(QProcess::ProcessError error)
+{
+    if (error != QProcess::FailedToStart) {
+        return;
+    }
+
+    if (m_isPaused) {
+        m_isChecking = false;
+        return;
+    }
+
+    // ADB 启动失败时不能依赖 finished 信号恢复状态；全模式仍继续探测 Fastboot。
+    if (!m_adbOnly) {
+        const QString fastbootPath = ResourceExtractor::getFastbootPath();
+        m_fastbootCheckProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
+        disconnect(m_fastbootCheckProcess, nullptr, this, nullptr);
+        connect(m_fastbootCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, &DeviceManager::onFastbootCheckFinished);
+        connect(m_fastbootCheckProcess, &QProcess::errorOccurred,
+                this, &DeviceManager::onFastbootCheckError);
+        m_fastbootCheckProcess->start(fastbootPath, QStringList() << "devices");
+        return;
+    }
+
+    if (m_currentMode != None) {
+        m_currentMode = None;
+        emit deviceModeChanged(m_currentMode);
+    }
+    m_deviceInfo.clear();
+    m_isChecking = false;
+}
 void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    Q_UNUSED(exitCode);
-
     // 如果已暂停监控，直接返回，避免与 fastboot 操作冲突
     if (m_isPaused) {
         m_isChecking = false;
@@ -299,10 +342,17 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
 
     bool fastbootConnected = false;
 
-    if (exitStatus == QProcess::NormalExit) {
-        QString fastbootOutput = m_fastbootCheckProcess->readAllStandardOutput();
-        fastbootConnected = !fastbootOutput.trimmed().isEmpty() &&
-                                 fastbootOutput.contains("fastboot");
+    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        const QString fastbootOutput = QString::fromLocal8Bit(m_fastbootCheckProcess->readAllStandardOutput());
+        const QStringList lines = fastbootOutput.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
+        for (const QString &rawLine : lines) {
+            const QStringList fields = rawLine.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            // fastboot devices 的第二列必须精确为 fastboot。
+            if (fields.size() >= 2 && fields.at(1) == "fastboot") {
+                fastbootConnected = true;
+                break;
+            }
+        }
     }
 
     // 更新状态
@@ -328,8 +378,27 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
     m_isChecking = false;
 }
 
+void DeviceManager::onFastbootCheckError(QProcess::ProcessError error)
+{
+    if (error != QProcess::FailedToStart) {
+        return;
+    }
+
+    if (m_isPaused) {
+        m_isChecking = false;
+        return;
+    }
+
+    if (m_currentMode != None) {
+        m_currentMode = None;
+        emit deviceModeChanged(m_currentMode);
+    }
+    m_deviceInfo.clear();
+    m_isChecking = false;
+}
 void DeviceManager::updateDeviceInfo()
 {
+    if (m_isPaused) return;
     // 如果进程正在运行，先终止它
     if (m_infoProcess->state() == QProcess::Running) {
         m_infoProcess->kill();
@@ -355,6 +424,7 @@ void DeviceManager::updateDeviceInfo()
 
 void DeviceManager::onDeviceInfoStep1Finished()
 {
+    if (m_isPaused) return;
     disconnect(m_infoProcess, nullptr, this, nullptr);
 
     // 检查模式是否已经变化
@@ -391,6 +461,7 @@ void DeviceManager::onDeviceInfoStep1Finished()
 
 void DeviceManager::onDeviceInfoStep2Finished()
 {
+    if (m_isPaused) return;
     disconnect(m_infoProcess, nullptr, this, nullptr);
 
     // 检查模式是否已经变化
@@ -431,6 +502,7 @@ void DeviceManager::onDeviceInfoStep2Finished()
 
 void DeviceManager::onDeviceInfoStep3Finished()
 {
+    if (m_isPaused) return;
     disconnect(m_infoProcess, nullptr, this, nullptr);
 
     // 检查模式是否已经变化

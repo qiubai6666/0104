@@ -1,4 +1,5 @@
 #include "menuwidget.h"
+#include "deviceoperationlease.h"
 #include "configwindow.h"
 #include "devicecheckwindow.h"
 #include "deviceinfowindow.h"
@@ -23,6 +24,7 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
+#include <QCloseEvent>
 
 namespace {
 // 可见窗口再次点击时销毁；不可见窗口再次点击时复用。
@@ -31,7 +33,8 @@ template <typename Window, typename Prepare>
 void toggleWindow(Window *&window, Prepare prepare, bool activate = false)
 {
     if (window && window->isVisible()) {
-        window->hide();
+        // 尊重窗口 closeEvent 的拒绝，不能绕过正在进行的刷写保护。
+        if (!window->close()) return;
         window->deleteLater();
         window = nullptr;
         return;
@@ -66,10 +69,13 @@ MenuWidget::MenuWidget(QWidget *parent)
 
     setupUI();
     updatePosition();
+    // 主菜单持续持有 ADB 监控，修复/提取入口不再依赖先打开其他窗口。
+    DeviceManager::instance()->ensureAdbOnlyMonitoring();
 }
 
 MenuWidget::~MenuWidget()
 {
+    DeviceManager::instance()->releaseAdbOnlyMonitoring();
     const QList<QWidget *> windows = {
         deviceInfoWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow
     };
@@ -150,7 +156,7 @@ void MenuWidget::onButtonClicked()
         break;
     case DeviceCheck:
         toggleWindow(deviceCheckWindow, [this](DeviceCheckWindow *window) {
-            window->setPosition(x(), y());
+            window->setPosition(x(), y(), height());
         });
         break;
     case Configuration:
@@ -211,11 +217,14 @@ void MenuWidget::minimizeWindows()
 
 void MenuWidget::extractImg()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 检查设备连接
-    if (!DeviceManager::instance()->isDeviceConnected()) {
+    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "未检测到设备，请检查设备连接与授权。", this);
         return;
     }
+
+    if (!DeviceOperationLease::acquire(this)) return;
 
     // 禁用提取IMG按钮
     buttons[ExtractImg]->setEnabled(false);
@@ -226,6 +235,7 @@ void MenuWidget::extractImg()
         imgProcess->deleteLater();
     }
     imgProcess = ProcessManager::createProcess(this);
+    connect(imgProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) { DeviceOperationLease::release(this); buttons[ExtractImg]->setEnabled(true); buttons[ExtractImg]->setText("提取IMG"); } });
     imgProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     QString adbPath = ResourceExtractor::getAdbPath();
@@ -246,6 +256,7 @@ void MenuWidget::onLsProcessFinished(int exitCode, QProcess::ExitStatus)
     QStringList files = output.split('\n', Qt::SkipEmptyParts);
 
     if (files.isEmpty()) {
+        DeviceOperationLease::release(this);
         buttons[ExtractImg]->setEnabled(true);
         buttons[ExtractImg]->setText("提取IMG");
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "手机 /sdcard/Download 目录下没有 .img 文件。");
@@ -270,11 +281,13 @@ void MenuWidget::onLsProcessFinished(int exitCode, QProcess::ExitStatus)
     connect(imgProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &MenuWidget::onPullProcessFinished);
 
+    connect(imgProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if(e==QProcess::FailedToStart){ DeviceOperationLease::release(this); buttons[ExtractImg]->setEnabled(true); } });
     imgProcess->start(adbPath, QStringList() << "pull" << latestImgFile << imgOutputPath);
 }
 
 void MenuWidget::onPullProcessFinished(int exitCode, QProcess::ExitStatus)
 {
+    DeviceOperationLease::release(this);
     disconnect(imgProcess, nullptr, this, nullptr);
 
     buttons[ExtractImg]->setEnabled(true);
@@ -288,8 +301,24 @@ void MenuWidget::onPullProcessFinished(int exitCode, QProcess::ExitStatus)
     }
 }
 
+void MenuWidget::closeEvent(QCloseEvent *event)
+{
+    if (DeviceOperationLease::owner() || (repairWindow && repairWindow->hasActiveOugaTask()) || (deviceCheckWindow && deviceCheckWindow->isOperationInProgress())) {
+        event->ignore();
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中",
+            "正在重启或刷写设备，请等待操作结束后再关闭主菜单。", this);
+        return;
+    }
+    QWidget::closeEvent(event);
+}
+
 void MenuWidget::cleanupAndExit()
 {
+    if (DeviceOperationLease::owner() || (repairWindow && repairWindow->hasActiveOugaTask()) || (deviceCheckWindow && deviceCheckWindow->isOperationInProgress())) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中",
+            "正在重启或刷写设备，请等待操作结束后再退出。", this);
+        return;
+    }
     qDebug() << "开始清理并退出...";
 
     // 先停止轮询，再仅结束本程序持有的进程；共享 ADB Server 保持运行。

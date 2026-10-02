@@ -44,7 +44,8 @@ public:
 
     // 暂停/恢复监控（用于刷入镜像等操作，避免fastboot冲突）
     void pauseMonitoring();
-    void resumeMonitoring();
+    // Only an owning legacy mode-wait may temporarily permit read-only polling.
+    void resumeMonitoring(QObject *waitingOwner = nullptr);
 
     // 读取缓存的连接状态；不会在此发起新的设备检测。
     bool isDeviceConnected() const;
@@ -59,13 +60,16 @@ signals:
 private slots:
     void checkDeviceStatus();
     void onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onAdbCheckError(QProcess::ProcessError error);
     void onFastbootCheckFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onFastbootCheckError(QProcess::ProcessError error);
     void updateDeviceInfo();
     void onDeviceInfoStep1Finished();
     void onDeviceInfoStep2Finished();
     void onDeviceInfoStep3Finished();
 
 private:
+    friend class DeviceOperationTests;
     explicit DeviceManager(QObject *parent = nullptr);
     ~DeviceManager();
 

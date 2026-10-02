@@ -10,6 +10,8 @@
 #include <QTimer>
 #include <QStringList>
 
+class OugaFlashWindow;
+
 class RepairWindow : public QWidget
 {
     Q_OBJECT
@@ -19,21 +21,36 @@ public:
     ~RepairWindow();
 
     void setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight);
+    bool hasActiveOugaTask() const;
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onButtonClicked();
     void onUsbFixStep1Finished(int exitCode, QProcess::ExitStatus exitStatus);
     void onUsbFixStep2Finished(int exitCode, QProcess::ExitStatus exitStatus);
     void onUsbFixStep3Finished(int exitCode, QProcess::ExitStatus exitStatus);
-    void onTmpFixStepFinished();
+    void onUsbFixProcessError(QProcess::ProcessError error);
+    void onTmpFixStepFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onTmpFixProcessError(QProcess::ProcessError error);
     void onApkInstallStepFinished();
     void onModuleInstallStepFinished();
     void onRootDetectFinished();
 
 private:
-    enum RepairAction { UsbFix, TmpFix, InstallApk, InstallModule };
+    friend class DeviceOperationTests;
+    enum RepairAction { UsbFix, TmpFix, InstallApk, InstallModule, OugaFlash };
     enum class ApkInstallStep { Push, InstallWithSuC, InstallWithSuS, DeleteTemporaryFile };
     enum class ModuleInstallStep { Push, Install, DeleteTemporaryFile };
+    enum class UsbFixStep { Push, Execute, Cleanup };
+    enum class TmpFixStep {
+        CreateDirectory,
+        CreateDirectoryFallback,
+        SetContext,
+        SetContextFallback,
+        SetPermissions,
+        SetPermissionsFallback
+    };
     enum class RootManager { Magisk, APatch, KernelSU };
 
     void setupUI();
@@ -42,12 +59,20 @@ private:
     void installApk();
     void installModule();
     void startModuleInstall();
-    void setButtonsEnabled(bool enabled);
+    bool setButtonsEnabled(bool enabled);
+    void finishUsbFix(bool success, const QString &detail);
+    void startUsbFixCleanup();
+    void finishTmpFix(bool success, const QString &detail);
+    void startTmpFixCommand(const QStringList &arguments, TmpFixStep step);
 
+    OugaFlashWindow *ougaWindow = nullptr;
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;
     QProcess *repairProcess;
-    int tmpFixStep;
+    UsbFixStep usbFixStep;
+    TmpFixStep tmpFixStep;
+    bool usbFixExecutionFailed;
+    QString usbFixError;
 
     // APK安装相关
     QStringList apkFilesToInstall;

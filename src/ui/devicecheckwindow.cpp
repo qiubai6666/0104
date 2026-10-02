@@ -1,3 +1,4 @@
+#include "deviceoperationlease.h"
 #include "devicecheckwindow.h"
 #include "processmanager.h"
 #include "resourceextractor.h"
@@ -15,6 +16,8 @@
 #include <QFileInfo>
 #include <QWindow>
 #include <QMoveEvent>
+#include <QCloseEvent>
+#include <QPainter>
 
 DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     : QWidget(parent)
@@ -61,66 +64,141 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
 
 DeviceCheckWindow::~DeviceCheckWindow()
 {
-    // 清理资源
+    // 真正销毁时先断开业务回调，避免终止进程触发下一步操作。
     if (currentProcess) {
-        currentProcess->kill();
-        currentProcess->deleteLater();
+        disconnect(currentProcess, nullptr, this, nullptr);
+        if (currentProcess->state() != QProcess::NotRunning) {
+            currentProcess->kill();
+            currentProcess->waitForFinished(1000);
+        }
+        delete currentProcess;
+        currentProcess = nullptr;
     }
+    finishOperation();
+    DeviceManager::instance()->releaseFullModeMonitoring();
+}
+
+void DeviceCheckWindow::closeEvent(QCloseEvent *event)
+{
+    if (operationInProgress) {
+        event->ignore();
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中",
+            "正在重启或刷写设备，请等待操作结束后再关闭窗口。", this);
+        return;
+    }
+    QWidget::closeEvent(event);
+}
+
+bool DeviceCheckWindow::beginOperation()
+{
+    if (operationInProgress || !DeviceOperationLease::acquire(this)) {
+        return false;
+    }
+    operationInProgress = true;
+    updateUIForMode(DeviceManager::instance()->currentMode());
+    return true;
+}
+
+void DeviceCheckWindow::finishOperation()
+{
     if (waitTimer) {
         waitTimer->stop();
         waitTimer->deleteLater();
+        waitTimer = nullptr;
     }
-    
-    // 释放全模式监控引用
-    DeviceManager::instance()->releaseFullModeMonitoring();
+    pendingFlashPartition.clear();
+    pendingFlashImage.clear();
+    DeviceOperationLease::release(this);
+    if (monitoringPausedByOperation) {
+        monitoringPausedByOperation = false;
+        DeviceManager::instance()->resumeMonitoring();
+    }
+    operationInProgress = false;
+    updateUIForMode(DeviceManager::instance()->currentMode());
+}
+
+QProcess *DeviceCheckWindow::createOperationProcess()
+{
+    Q_ASSERT(!currentProcess);
+    QProcess *process = ProcessManager::createProcess(this);
+    currentProcess = process;
+    process->setWorkingDirectory(ResourceExtractor::getResourcePath());
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        // Crashed 随后还会触发 finished；只在启动失败时单独收尾。
+        if (error != QProcess::FailedToStart || currentProcess != process) {
+            return;
+        }
+        const QString message = process->errorString();
+        releaseOperationProcess(process);
+        finishOperation();
+        UIHelper::showCenteredMessageBox(QMessageBox::Critical, "启动失败", message, this);
+    });
+    return process;
+}
+
+void DeviceCheckWindow::releaseOperationProcess(QProcess *process)
+{
+    disconnect(process, nullptr, this, nullptr);
+    if (currentProcess == process) {
+        currentProcess = nullptr;
+    }
+    process->deleteLater();
 }
 
 void DeviceCheckWindow::setupUI()
 {
-    setFixedSize(320, 384);  // 收紧控件留白，保留完整的设备信息区域
+    setFixedSize(252, UIHelper::MenuButtonHeight * 9);  // 显示前再同步主菜单实际高度
     
     // 创建主容器
     QWidget *container = new QWidget(this);
     container->setObjectName("deviceCheckSurface");
-    container->setGeometry(rect());
+    QVBoxLayout *windowLayout = new QVBoxLayout(this);
+    windowLayout->setContentsMargins(0, 0, 0, 0);
+    windowLayout->setSpacing(0);
+    windowLayout->addWidget(container);
     container->setStyleSheet(
         "QWidget#deviceCheckSurface {"
-        "   background-color: rgba(235, 244, 249, 248);"
-        "   border: 1px solid rgba(255, 255, 255, 180);"
-        "   border-radius: 10px;"
+        "   background-color: #FFFFFF;"
+        "   border: 1px solid #D6E2EE;"
+        "   border-radius: 12px;"
         "}"
     );
     
     mainLayout = new QVBoxLayout(container);
-    mainLayout->setSpacing(6);
-    mainLayout->setContentsMargins(15, 12, 15, 12);
+    mainLayout->setSpacing(0);
+    mainLayout->setContentsMargins(12, 10, 12, 10);
     
     // 标题
-    QLabel *titleLabel = new QLabel("📱 设备检测", container);
+    QLabel *titleLabel = new QLabel("设备检测", container);
     titleLabel->setAlignment(Qt::AlignCenter);
-    titleLabel->setFixedHeight(30);  // 固定标题高度
+    titleLabel->setFixedHeight(28);
     titleLabel->setStyleSheet(
         "QLabel {"
         "   color: #2c3e50;"
         "   font-size: 15px;"  // 稍微减小字体
         "   font-weight: bold;"
-        "   background: transparent;"
+        "   background-color: #F3F7FC;"
+        "   border: 1px solid #E7EEF6;"
+        "   border-radius: 8px;"
         "}"
     );
     mainLayout->addWidget(titleLabel);
+    mainLayout->addSpacing(8);
     
     // 状态卡片
     QWidget *statusCard = new QWidget(container);
     statusCard->setObjectName("deviceStatusCard");
+    statusCard->setFixedHeight(122);  // 固定信息区，将剩余高度均匀分配给操作区间隔
     statusCard->setStyleSheet(
         "QWidget#deviceStatusCard {"
-        "   background-color: rgba(255, 255, 255, 210);"
-        "   border-radius: 8px;"
+        "   background-color: #F7FAFD;"
+        "   border: 1px solid #E7EEF6;"
+        "   border-radius: 6px;"
         "}"
     );
     QVBoxLayout *statusLayout = new QVBoxLayout(statusCard);
     statusLayout->setSpacing(4);
-    statusLayout->setContentsMargins(10, 8, 10, 8);
+    statusLayout->setContentsMargins(10, 7, 10, 7);
     
     statusLabel = new QLabel("检测中...", statusCard);
     statusLabel->setAlignment(Qt::AlignCenter);
@@ -131,6 +209,7 @@ void DeviceCheckWindow::setupUI()
         "   font-size: 13px;"  // 稍微减小字体
         "   font-weight: bold;"
         "   background: transparent;"
+        "   border-bottom: 1px solid #E7EEF6;"
         "}"
     );
     statusLayout->addWidget(statusLabel);
@@ -138,7 +217,7 @@ void DeviceCheckWindow::setupUI()
     infoLabel = new QLabel("等待设备", statusCard);
     infoLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);  // 左对齐，顶部对齐
     infoLabel->setWordWrap(true);
-    infoLabel->setMinimumHeight(80);  // 设置合适的高度
+    infoLabel->setMinimumHeight(68);  // 容纳多行设备信息，不添加滚动区域
     infoLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     infoLabel->setStyleSheet(
         "QLabel {"
@@ -152,7 +231,12 @@ void DeviceCheckWindow::setupUI()
     statusLayout->addWidget(infoLabel);
     
     mainLayout->addWidget(statusCard);
+    mainLayout->addStretch(1);
     
+    // 标签和下拉框作为一个整体参与均匀分布
+    QVBoxLayout *rebootLayout = new QVBoxLayout();
+    rebootLayout->setContentsMargins(0, 0, 0, 0);
+    rebootLayout->setSpacing(4);
     // 重启选项区域
     QLabel *rebootLabel = new QLabel("重启选项", container);
     rebootLabel->setStyleSheet(
@@ -163,142 +247,140 @@ void DeviceCheckWindow::setupUI()
         "   background: transparent;"
         "}"
     );
-    mainLayout->addWidget(rebootLabel);
+    rebootLayout->addWidget(rebootLabel);
     
     // 下拉选择框
-    rebootComboBox = new QComboBox(container);
-    rebootComboBox->addItem("🔄 重启到系统");
-    rebootComboBox->addItem("⚡ 重启到Fastboot");
-    rebootComboBox->addItem("🔧 重启到Fastbootd");
-    rebootComboBox->addItem("🔌 重启到EDL");
-    rebootComboBox->setMinimumHeight(36);
+    // 绘制矢量下拉指示，避免样式表的三角边框在不同 DPI 下变成短横线。
+    class RebootComboBox : public QComboBox {
+    public:
+        using QComboBox::QComboBox;
+    protected:
+        void paintEvent(QPaintEvent *event) override {
+            QComboBox::paintEvent(event);
+            QPainter painter(this);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(QPen(QColor("#2c3e50"), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            const qreal x = width() - 18;
+            const qreal y = height() / 2.0;
+            const QPointF chevron[] = {QPointF(x - 4, y - 2), QPointF(x, y + 2), QPointF(x + 4, y - 2)};
+            painter.drawPolyline(chevron, 3);
+        }
+    };
+    rebootComboBox = new RebootComboBox(container);
+    rebootComboBox->addItem("重启到系统");
+    rebootComboBox->addItem("重启到Fastboot");
+    rebootComboBox->addItem("重启到Fastbootd");
+    rebootComboBox->addItem("重启到EDL");
+    rebootComboBox->setFixedHeight(34);
     rebootComboBox->setEnabled(false);
     rebootComboBox->setStyleSheet(
         "QComboBox {"
-        "   background-color: rgba(255, 255, 255, 180);"
+        "   background-color: #F7FAFD;"
         "   color: #2c3e50;"
-        "   border: 1px solid rgba(100, 160, 180, 150);"
-        "   border-radius: 8px;"
-        "   padding: 6px 10px;"
+        "   border: 1px solid #D0DEEB;"
+        "   border-radius: 6px;"
+        "   padding: 4px 10px;"
         "   font-size: 13px;"
         "}"
         "QComboBox:hover {"
         "   background-color: rgba(255, 255, 255, 220);"
-        "   border: 1px solid rgba(100, 160, 180, 200);"
+        "   border: 1px solid #83AECA;"
+        "}"
+        "QComboBox:focus {"
+        "   border: 1px solid #83AECA;"
+        "}"
+        "QComboBox:disabled {"
+        "   background-color: #F1F4F8;"
+        "   border: 1px solid #E0E7EF;"
         "}"
         "QComboBox::drop-down {"
         "   border: none;"
-        "   width: 30px;"
+        "   width: 28px;"
         "}"
-        "QComboBox::down-arrow {"
-        "   image: none;"
-        "   border-left: 5px solid transparent;"
-        "   border-right: 5px solid transparent;"
-        "   border-top: 6px solid #2c3e50;"
-        "   margin-right: 10px;"
-        "}"
+        "QComboBox::down-arrow { image: none; }"
         "QComboBox QAbstractItemView {"
-        "   background-color: rgba(255, 255, 255, 240);"
+        "   background-color: #FFFFFF;"
         "   color: #2c3e50;"
-        "   border: 1px solid rgba(100, 160, 180, 200);"
-        "   border-radius: 8px;"
-        "   selection-background-color: rgba(100, 160, 180, 180);"
+        "   border: 1px solid #83AECA;"
+        "   border-radius: 6px;"
+        "   selection-background-color: #649EB3;"
         "   selection-color: white;"
         "   padding: 5px;"
         "}"
     );
-    mainLayout->addWidget(rebootComboBox);
+    rebootLayout->addWidget(rebootComboBox);
+    mainLayout->addLayout(rebootLayout);
+    mainLayout->addStretch(1);
     
-    // 执行按钮
-    executeButton = new QPushButton("执行重启", container);
-    executeButton->setMinimumHeight(36);
-    executeButton->setCursor(Qt::PointingHandCursor);
-    executeButton->setEnabled(false);
-    executeButton->setStyleSheet(UIHelper::getStandardButtonStyle());
-    connect(executeButton, &QPushButton::clicked, this, &DeviceCheckWindow::onRebootButtonClicked);
-    mainLayout->addWidget(executeButton);
-    
-    // 打开CMD按钮
-    QPushButton *cmdButton = new QPushButton("💻 打开CMD", container);
-    cmdButton->setMinimumHeight(36);
-    cmdButton->setCursor(Qt::PointingHandCursor);
-    cmdButton->setStyleSheet(
+    // 与 PAYLOAD「开始提取」采用同一套按钮色板，仅保留各按钮原文字颜色。
+    const QString actionButtonStyle = QStringLiteral(
         "QPushButton {"
-        "   background-color: rgba(120, 120, 120, 180);"
+        "   background-color: #649EB3;"
         "   color: white;"
-        "   border: none;"
-        "   border-radius: 8px;"
+        "   border: 1px solid #D0DEEB;"
+        "   border-radius: 6px;"
         "   font-size: 13px;"
         "   font-weight: bold;"
-        "   padding: 6px 10px;"
+        "   padding: 4px;"
         "}"
-        "QPushButton:hover {"
-        "   background-color: rgba(100, 100, 100, 200);"
-        "}"
-        "QPushButton:pressed {"
-        "   background-color: rgba(80, 80, 80, 220);"
+        "QPushButton:hover { background-color: #578FA6; }"
+        "QPushButton:pressed { background-color: #477F96; }"
+        "QPushButton:focus { border-color: #3F7894; }"
+        "QPushButton:disabled {"
+        "   background-color: #A8C3D0;"
+        "   border-color: #A8C3D0;"
         "}"
     );
+
+    // 执行按钮
+    executeButton = new QPushButton("执行重启", container);
+    executeButton->setFixedHeight(34);
+    executeButton->setCursor(Qt::PointingHandCursor);
+    executeButton->setEnabled(false);
+    executeButton->setStyleSheet(actionButtonStyle +
+        "QPushButton:disabled { color: rgba(255, 255, 255, 150); }");
+    connect(executeButton, &QPushButton::clicked, this, &DeviceCheckWindow::onRebootButtonClicked);
+    mainLayout->addWidget(executeButton);
+    mainLayout->addStretch(1);
+    
+    // 打开CMD按钮
+    cmdButton = new QPushButton("打开CMD", container);
+    cmdButton->setFixedHeight(34);
+    cmdButton->setCursor(Qt::PointingHandCursor);
+    cmdButton->setStyleSheet(actionButtonStyle);
     connect(cmdButton, &QPushButton::clicked, this, &DeviceCheckWindow::onOpenCmdClicked);
     mainLayout->addWidget(cmdButton);
+    mainLayout->addStretch(1);
     
     // 刷入分区按钮（2列1行）
     QWidget *flashWidget = new QWidget(container);
+    flashWidget->setFixedHeight(34);
     QHBoxLayout *flashLayout = new QHBoxLayout(flashWidget);
-    flashLayout->setSpacing(10);
+    flashLayout->setSpacing(6);
     flashLayout->setContentsMargins(0, 0, 0, 0);
     
-    QPushButton *bootButton = new QPushButton("📦 刷入Boot", flashWidget);
-    bootButton->setMinimumHeight(36);
+    bootButton = new QPushButton("刷入Boot", flashWidget);
+    bootButton->setFixedHeight(34);
     bootButton->setCursor(Qt::PointingHandCursor);
-    bootButton->setStyleSheet(
-        "QPushButton {"
-        "   background-color: rgba(100, 149, 237, 180);"
-        "   color: white;"
-        "   border: none;"
-        "   border-radius: 8px;"
-        "   font-size: 13px;"
-        "   font-weight: bold;"
-        "}"
-        "QPushButton:hover {"
-        "   background-color: rgba(100, 149, 237, 220);"
-        "}"
-        "QPushButton:pressed {"
-        "   background-color: rgba(80, 129, 217, 240);"
-        "}"
-    );
+    bootButton->setStyleSheet(actionButtonStyle);
     connect(bootButton, &QPushButton::clicked, this, &DeviceCheckWindow::onFlashBootClicked);
     flashLayout->addWidget(bootButton);
     
-    QPushButton *initBootButton = new QPushButton("📦 刷入Init_Boot", flashWidget);
-    initBootButton->setMinimumHeight(36);
+    initBootButton = new QPushButton("刷入Init_Boot", flashWidget);
+    initBootButton->setFixedHeight(34);
     initBootButton->setCursor(Qt::PointingHandCursor);
-    initBootButton->setStyleSheet(
-        "QPushButton {"
-        "   background-color: rgba(100, 149, 237, 180);"
-        "   color: white;"
-        "   border: none;"
-        "   border-radius: 8px;"
-        "   font-size: 13px;"
-        "   font-weight: bold;"
-        "}"
-        "QPushButton:hover {"
-        "   background-color: rgba(100, 149, 237, 220);"
-        "}"
-        "QPushButton:pressed {"
-        "   background-color: rgba(80, 129, 217, 240);"
-        "}"
-    );
+    initBootButton->setStyleSheet(actionButtonStyle);
     connect(initBootButton, &QPushButton::clicked, this, &DeviceCheckWindow::onFlashInitBootClicked);
     flashLayout->addWidget(initBootButton);
     
+    // 最后一行无底部弹性空间，刷入按钮始终贴合内容区底边。
     mainLayout->addWidget(flashWidget);
-    
-    mainLayout->addStretch();
 }
 
-void DeviceCheckWindow::setPosition(int mainMenuX, int mainMenuY)
+void DeviceCheckWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight)
 {
+    // 按实际菜单高度同步，上下边缘始终对齐。
+    setFixedHeight(mainMenuHeight);
     // 窗口紧靠主菜单左侧
     int x = mainMenuX - width();
     int y = mainMenuY;
@@ -317,82 +399,59 @@ void DeviceCheckWindow::onDeviceInfoUpdated(const QString &info)
 
 void DeviceCheckWindow::updateUIForMode(DeviceManager::DeviceMode mode)
 {
-    if (mode == DeviceManager::ADB) {
-        statusLabel->setText("ADB 模式");
-        rebootComboBox->setEnabled(true);
-        executeButton->setEnabled(true);
-    } else if (mode == DeviceManager::Fastboot) {
-        statusLabel->setText("Fastboot 模式");
-        rebootComboBox->setEnabled(true);
-        executeButton->setEnabled(true);
-    } else {
-        statusLabel->setText("未连接");
+    const bool connected = mode != DeviceManager::None;
+    statusLabel->setText(mode == DeviceManager::ADB ? "ADB 模式" :
+                         mode == DeviceManager::Fastboot ? "Fastboot 模式" : "未连接");
+    if (!connected) {
         infoLabel->setText("等待设备");
-        rebootComboBox->setEnabled(false);
-        executeButton->setEnabled(false);
     }
+    const bool available = connected && !operationInProgress;
+    rebootComboBox->setEnabled(available);
+    executeButton->setEnabled(available);
+    bootButton->setEnabled(available);
+    initBootButton->setEnabled(available);
+    cmdButton->setEnabled(!operationInProgress);
 }
 
 void DeviceCheckWindow::onRebootButtonClicked()
 {
-    int index = rebootComboBox->currentIndex();
-    QString adbPath = ResourceExtractor::getAdbPath();
-    QString fastbootPath = ResourceExtractor::getFastbootPath();
-    
-    if (currentProcess) {
-        if (currentProcess->state() == QProcess::Running) {
-            currentProcess->kill();
-            currentProcess->waitForFinished(100);
-        }
-        currentProcess->deleteLater();
+    const auto mode = DeviceManager::instance()->currentMode();
+    if (mode == DeviceManager::None || !beginOperation()) {
+        return;
     }
-    
-    currentProcess = ProcessManager::createProcess(this);
-    currentProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-    
-    DeviceManager::DeviceMode currentMode = DeviceManager::instance()->currentMode();
-    
-    connect(currentProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int exitCode, QProcess::ExitStatus exitStatus) {
-        Q_UNUSED(exitCode);
-        Q_UNUSED(exitStatus);
-        currentProcess->deleteLater();
-        currentProcess = nullptr;
+    const int index = rebootComboBox->currentIndex();
+    QStringList arguments;
+    if (mode == DeviceManager::ADB) {
+        arguments << "reboot";
+        if (index == 1) arguments << "bootloader";
+        else if (index == 2) arguments << "fastboot";
+        else if (index == 3) arguments << "edl";
+    } else {
+        if (index == 1) arguments << "reboot-bootloader";
+        else if (index == 2) arguments << "reboot-fastboot";
+        else if (index == 3) arguments << "oem" << "edl";
+        else arguments << "reboot";
+        DeviceManager::instance()->pauseMonitoring();
+        monitoringPausedByOperation = true;
+    }
+    QProcess *process = createOperationProcess();
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, process](int exitCode, QProcess::ExitStatus status) {
+        const QString error = QString::fromLocal8Bit(process->readAllStandardError());
+        releaseOperationProcess(process);
+        finishOperation();
+        if (exitCode != 0 || status != QProcess::NormalExit) {
+            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "重启失败", error, this);
+        }
     });
-    
-    if (currentMode == DeviceManager::ADB) {
-        if (index == 0) {
-            // 重启到系统
-            currentProcess->start(adbPath, QStringList() << "reboot");
-        } else if (index == 1) {
-            // 重启到 Fastboot
-            currentProcess->start(adbPath, QStringList() << "reboot" << "bootloader");
-        } else if (index == 2) {
-            // 重启到 Fastbootd
-            currentProcess->start(adbPath, QStringList() << "reboot" << "fastboot");
-        } else if (index == 3) {
-            // 重启到 EDL
-            currentProcess->start(adbPath, QStringList() << "reboot" << "edl");
-        }
-    } else if (currentMode == DeviceManager::Fastboot) {
-        if (index == 0) {
-            // 重启到系统
-            currentProcess->start(fastbootPath, QStringList() << "reboot");
-        } else if (index == 1) {
-            // 重启到 Fastboot
-            currentProcess->start(fastbootPath, QStringList() << "reboot-bootloader");
-        } else if (index == 2) {
-            // 重启到 Fastbootd
-            currentProcess->start(fastbootPath, QStringList() << "reboot-fastboot");
-        } else if (index == 3) {
-            // 重启到 EDL (Fastboot模式下使用oem edl命令)
-            currentProcess->start(fastbootPath, QStringList() << "oem" << "edl");
-        }
-    }
+    process->start(mode == DeviceManager::ADB ? ResourceExtractor::getAdbPath() :
+                                             ResourceExtractor::getFastbootPath(), arguments);
 }
 
 void DeviceCheckWindow::onOpenCmdClicked()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
+    if (operationInProgress) return;
     QString qiubaiPath = ResourceExtractor::getResourcePath();
     QString cmdBatPath = qiubaiPath + "/CMD.bat";
     
@@ -425,203 +484,123 @@ void DeviceCheckWindow::onFlashInitBootClicked()
 
 void DeviceCheckWindow::flashPartition(const QString &partition)
 {
-    // 获取桌面IMG文件夹路径
-    QString desktopPath = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
-    QString imgPath = desktopPath + "/IMG";
-    
-    // 检查IMG文件夹是否存在，如果不存在则使用桌面目录
-    QString selectPath = imgPath;
-    if (!QDir(imgPath).exists()) {
-        selectPath = desktopPath;
-    }
-    
-    // 让用户选择镜像文件
-    QString imagePath = QFileDialog::getOpenFileName(
-        this,
-        QString("选择%1镜像文件").arg(partition),
-        selectPath,
-        "镜像文件 (*.img);;所有文件 (*.*)"
-    );
-    
+    // 选择镜像、等待 Fastboot、刷写及后续重启均属于同一次互斥操作。
+    if (!beginOperation()) return;
+    const QString desktopPath = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    const QString imgPath = desktopPath + "/IMG";
+    const QString imagePath = QFileDialog::getOpenFileName(this,
+        QString("选择%1镜像文件").arg(partition), QDir(imgPath).exists() ? imgPath : desktopPath,
+        "镜像文件 (*.img);;所有文件 (*.*)");
     if (imagePath.isEmpty()) {
-        // 用户取消选择
+        finishOperation();
         return;
     }
-    
-    QFileInfo fileInfo(imagePath);
-    QString selectedFile = fileInfo.fileName();
-    
-    // 确认刷入
-    QMessageBox::StandardButton reply = UIHelper::showCenteredQuestion("确认刷入",
-        QString("确定要刷入以下镜像到%1分区吗？\n\n%2").arg(partition, selectedFile),
-        this);
-    
-    if (reply != QMessageBox::Yes) {
+    if (UIHelper::showCenteredQuestion("确认刷入",
+            QString("确定要刷入以下镜像到%1分区吗？\n\n%2")
+                .arg(partition, QFileInfo(imagePath).fileName()), this) != QMessageBox::Yes) {
+        finishOperation();
         return;
     }
-    
-    DeviceManager::DeviceMode currentMode = DeviceManager::instance()->currentMode();
-    
-    // 根据当前模式处理
-    if (currentMode == DeviceManager::ADB) {
-        // 在ADB模式，需要重启到Fastboot
-        qDebug() << "设备在ADB模式，正在重启到Fastboot...";
-        
+    const auto mode = DeviceManager::instance()->currentMode();
+    if (mode == DeviceManager::ADB) {
         pendingFlashPartition = partition;
         pendingFlashImage = imagePath;
-        
-        QString adbPath = ResourceExtractor::getAdbPath();
-        QString qiubaiPath = ResourceExtractor::getResourcePath();
-        
-        if (currentProcess) {
-            if (currentProcess->state() == QProcess::Running) {
-                currentProcess->kill();
-                currentProcess->waitForFinished(100);
+        QProcess *process = createOperationProcess();
+        connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, process](int exitCode, QProcess::ExitStatus status) {
+            const QString error = QString::fromLocal8Bit(process->readAllStandardError());
+            releaseOperationProcess(process);
+            if (exitCode == 0 && status == QProcess::NormalExit) {
+                waitForFastbootMode();
+            } else {
+                finishOperation();
+                UIHelper::showCenteredMessageBox(QMessageBox::Warning, "重启失败", error, this);
             }
-            currentProcess->deleteLater();
-        }
-        
-        currentProcess = ProcessManager::createProcess(this);
-        currentProcess->setWorkingDirectory(qiubaiPath);
-        
-        connect(currentProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this](int exitCode, QProcess::ExitStatus exitStatus) {
-            Q_UNUSED(exitCode);
-            Q_UNUSED(exitStatus);
-            
-            // 等待设备进入Fastboot模式
-            waitForFastbootMode();
         });
-        
-        currentProcess->start(adbPath, QStringList() << "reboot" << "bootloader");
-        
-    } else if (currentMode == DeviceManager::Fastboot) {
-        // 已在Fastboot模式，直接刷入
+        process->start(ResourceExtractor::getAdbPath(), {"reboot", "bootloader"});
+    } else if (mode == DeviceManager::Fastboot) {
         performFlash(partition, imagePath);
     } else {
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", 
+        finishOperation();
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
             "请先连接设备并进入Fastboot模式", this);
-        return;
     }
 }
 
 void DeviceCheckWindow::waitForFastbootMode()
 {
-    // 如果已经有定时器在运行，先停止并清理
-    if (waitTimer) {
-        waitTimer->stop();
-        waitTimer->deleteLater();
-        waitTimer = nullptr;
-    }
-    
+    Q_ASSERT(!waitTimer);
+    // No write is running here. The lease owner explicitly permits read-only
+    // mode detection, then suspends it again before the flash delay.
+    monitoringPausedByOperation = true;
+    DeviceManager::instance()->resumeMonitoring(this);
     waitCounter = 0;
     waitTimer = new QTimer(this);
-    
     connect(waitTimer, &QTimer::timeout, this, [this]() {
-        waitCounter++;
-        
-        // 检查是否已进入Fastboot模式
+        ++waitCounter;
         if (DeviceManager::instance()->currentMode() == DeviceManager::Fastboot) {
+            DeviceManager::instance()->pauseMonitoring();
             waitTimer->stop();
             waitTimer->deleteLater();
             waitTimer = nullptr;
-            
-            // 延迟2秒后执行刷入，确保设备稳定
-            QTimer::singleShot(2000, this, [this]() {
-                performFlash(pendingFlashPartition, pendingFlashImage);
-                pendingFlashPartition.clear();
-                pendingFlashImage.clear();
+            const QString partition = pendingFlashPartition;
+            const QString image = pendingFlashImage;
+            // 延迟期间仍保持互斥，参数属于当前任务，不读取可变的共享字段。
+            QTimer::singleShot(2000, this, [this, partition, image]() {
+                if (operationInProgress) performFlash(partition, image);
             });
-            return;
-        }
-        
-        // 超时20秒
-        if (waitCounter >= 40) {  // 40 * 500ms = 20秒
-            waitTimer->stop();
-            waitTimer->deleteLater();
-            waitTimer = nullptr;
-            
-            // 清空pending变量
-            pendingFlashPartition.clear();
-            pendingFlashImage.clear();
-            
-            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "超时", 
+        } else if (waitCounter >= 40) {
+            finishOperation();
+            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "超时",
                 "设备未能进入Fastboot模式，请手动重试", this);
-            return;
         }
     });
-    
-    waitTimer->start(500);  // 每500ms检查一次
+    waitTimer->start(500);
 }
 
 void DeviceCheckWindow::performFlash(const QString &partition, const QString &imagePath)
 {
-    QString qiubaiPath = ResourceExtractor::getResourcePath();
-    QString fastbootPath = qiubaiPath + "/fastboot.exe";
-    
-    // 暂停设备监控，避免fastboot冲突
-    DeviceManager::instance()->pauseMonitoring();
-    
-    if (currentProcess) {
-        if (currentProcess->state() == QProcess::Running) {
-            currentProcess->kill();
-            currentProcess->waitForFinished(100);
-        }
-        currentProcess->deleteLater();
+    if (!operationInProgress || currentProcess) return;
+    if (DeviceManager::instance()->currentMode() != DeviceManager::Fastboot) {
+        finishOperation();
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "设备已离开Fastboot模式", this);
+        return;
     }
-    
-    currentProcess = ProcessManager::createProcess(this);
-    currentProcess->setWorkingDirectory(qiubaiPath);
-    
-    connect(currentProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, partition](int exitCode, QProcess::ExitStatus exitStatus) {
-        Q_UNUSED(exitStatus);
-        
-        QString output = currentProcess->readAllStandardOutput();
-        QString error = currentProcess->readAllStandardError();
-        QString allOutput = output + "\n" + error;
-        
-        qDebug() << "Flash output:" << output;
-        qDebug() << "Flash error:" << error;
-        qDebug() << "Exit code:" << exitCode;
-        
-        // 检查是否成功：查找OKAY和Finished关键字
-        if (allOutput.contains("OKAY") && allOutput.contains("Finished")) {
-            qDebug() << partition << "分区刷入成功，正在重启...";
-            
-            // 重启到系统
-            QString fastbootPath = ResourceExtractor::getResourcePath() + "/fastboot.exe";
-            QProcess *rebootProcess = ProcessManager::createProcess(this);
-            rebootProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-            
-            connect(rebootProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                    this, [rebootProcess](int exitCode, QProcess::ExitStatus exitStatus) {
-                Q_UNUSED(exitCode);
-                Q_UNUSED(exitStatus);
-                rebootProcess->deleteLater();
-                // 重启后恢复监控
-                DeviceManager::instance()->resumeMonitoring();
-            });
-            
-            rebootProcess->start(fastbootPath, QStringList() << "reboot");
-            
-        } else if (allOutput.contains("FAILED") || allOutput.contains("error")) {
-            // 刷入失败，恢复监控
-            DeviceManager::instance()->resumeMonitoring();
-            UIHelper::showCenteredMessageBox(QMessageBox::Critical, "失败", 
-                QString("%1分区刷入失败！\n\n%2").arg(partition, allOutput), this);
-        } else {
-            // 不确定的情况，恢复监控
-            DeviceManager::instance()->resumeMonitoring();
-            UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", 
-                QString("%1分区刷入完成\n\n%2").arg(partition, allOutput), this);
+    DeviceManager::instance()->pauseMonitoring();
+    monitoringPausedByOperation = true;
+    QProcess *process = createOperationProcess();
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, process, partition](int exitCode, QProcess::ExitStatus status) {
+        const QString output = QString::fromLocal8Bit(process->readAllStandardOutput()) + "\n" +
+                               QString::fromLocal8Bit(process->readAllStandardError());
+        releaseOperationProcess(process);
+        if (exitCode != 0 || status != QProcess::NormalExit ||
+                output.contains("FAILED") || output.contains("error")) {
+            finishOperation();
+            UIHelper::showCenteredMessageBox(QMessageBox::Critical, "失败",
+                QString("%1分区刷入失败！\n\n%2").arg(partition, output), this);
+            return;
         }
-        
-        currentProcess->deleteLater();
-        currentProcess = nullptr;
+        if (!output.contains("OKAY") || !output.contains("Finished")) {
+            finishOperation();
+            UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成",
+                QString("%1分区刷入完成\n\n%2").arg(partition, output), this);
+            return;
+        }
+        // 刷写后的重启也由当前窗口持有，结束/启动失败均走同一个收尾路径。
+        QProcess *reboot = createOperationProcess();
+        connect(reboot, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, reboot](int code, QProcess::ExitStatus rebootStatus) {
+            const QString error = QString::fromLocal8Bit(reboot->readAllStandardError());
+            releaseOperationProcess(reboot);
+            finishOperation();
+            if (code != 0 || rebootStatus != QProcess::NormalExit) {
+                UIHelper::showCenteredMessageBox(QMessageBox::Warning, "刷写后重启失败", error, this);
+            }
+        });
+        reboot->start(ResourceExtractor::getFastbootPath(), {"reboot"});
     });
-    
-    currentProcess->start(fastbootPath, QStringList() << "flash" << partition << imagePath);
+    process->start(ResourceExtractor::getFastbootPath(), {"flash", partition, imagePath});
 }
 
 void DeviceCheckWindow::mousePressEvent(QMouseEvent *event)

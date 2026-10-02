@@ -21,6 +21,9 @@ public:
     explicit MenuWidget(QWidget *parent = nullptr);
     ~MenuWidget();
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private slots:
     void onButtonClicked();
     void onLsProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
@@ -28,6 +31,7 @@ private slots:
     void onCleanupProcessFinished();
 
 private:
+    friend class DeviceOperationTests;
     // 与 setupUI() 中按钮顺序对应，避免在业务代码中直接使用数字索引。
     enum MenuAction {
         ScreenCast, RepairTools, Payload, ExtractImg, DeviceCheck,

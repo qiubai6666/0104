@@ -1,4 +1,8 @@
 #include "processmanager.h"
+#include "ougaflashwindow.h"
+#include "deviceoperationlease.h"
+#include <QCloseEvent>
+#include "shellcommand.h"
 #include "repairwindow.h"
 #include "resourceextractor.h"
 #include "devicemanager.h"
@@ -15,7 +19,9 @@
 RepairWindow::RepairWindow(QWidget *parent)
     : QWidget(parent)
     , repairProcess(nullptr)
-    , tmpFixStep(0)
+    , usbFixStep(UsbFixStep::Push)
+    , tmpFixStep(TmpFixStep::CreateDirectory)
+    , usbFixExecutionFailed(false)
     , currentApkIndex(0)
     , successCount(0)
     , failCount(0)
@@ -34,10 +40,12 @@ RepairWindow::RepairWindow(QWidget *parent)
     setWindowTitle("修复");
 
     setupUI();
+    DeviceManager::instance()->ensureAdbOnlyMonitoring();
 }
 
 RepairWindow::~RepairWindow()
 {
+    DeviceManager::instance()->releaseAdbOnlyMonitoring();
     if (repairProcess) {
         repairProcess->kill();
         repairProcess->deleteLater();
@@ -54,7 +62,8 @@ void RepairWindow::setupUI()
         "USB修复",
         "修复TMP",
         "安装APK",
-        "安装模块"
+        "安装模块",
+        "欧加线刷"
     };
 
     buttons = UIHelper::createMenuButtons(this, mainLayout, buttonTexts);
@@ -105,20 +114,30 @@ void RepairWindow::onButtonClicked()
     case InstallModule:
         installModule();
         break;
+    case OugaFlash:
+        if (!ougaWindow) ougaWindow = new OugaFlashWindow(this);
+        ougaWindow->showNormal();
+        ougaWindow->raise();
+        ougaWindow->activateWindow();
+        break;
     }
 }
 
-void RepairWindow::setButtonsEnabled(bool enabled)
+bool RepairWindow::setButtonsEnabled(bool enabled)
 {
+    if (!enabled && !DeviceOperationLease::acquire(this)) return false;
+    if (enabled) DeviceOperationLease::release(this);
     for (QPushButton *btn : buttons) {
         btn->setEnabled(enabled);
     }
+    return true;
 }
 
 void RepairWindow::executeUsbFix()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 检查设备连接
-    if (!DeviceManager::instance()->isDeviceConnected()) {
+    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "未检测到设备，请检查设备连接与授权。", this);
         return;
     }
@@ -132,7 +151,7 @@ void RepairWindow::executeUsbFix()
         return;
     }
 
-    setButtonsEnabled(false);
+    if (!setButtonsEnabled(false)) return;
     buttons[UsbFix]->setText("修复中...");
 
     // 创建进程对象
@@ -140,64 +159,134 @@ void RepairWindow::executeUsbFix()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
+    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
+    usbFixStep = UsbFixStep::Push;
+    usbFixExecutionFailed = false;
+    usbFixError.clear();
 
     // 第1步：推送 usb.sh 到手机
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RepairWindow::onUsbFixStep1Finished);
+    connect(repairProcess, &QProcess::errorOccurred,
+            this, &RepairWindow::onUsbFixProcessError);
 
     repairProcess->start(adbPath, QStringList() << "push" << usbShPath << "/storage/emulated/0/usb.sh");
 }
 
-void RepairWindow::onUsbFixStep1Finished(int exitCode, QProcess::ExitStatus)
+void RepairWindow::onUsbFixStep1Finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
 
-    if (exitCode != 0) {
-        setButtonsEnabled(true);
-        buttons[UsbFix]->setText("USB修复");
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "传送 usb.sh 失败，请检查设备连接与授权。", this);
+    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+        finishUsbFix(false, "传送 usb.sh 失败，请检查设备连接与授权。\n" +
+            QString::fromLocal8Bit(repairProcess->readAllStandardError()).trimmed());
         return;
     }
 
     // 第2步：执行 usb.sh
+    usbFixStep = UsbFixStep::Execute;
     QString adbPath = ResourceExtractor::getAdbPath();
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RepairWindow::onUsbFixStep2Finished);
+    connect(repairProcess, &QProcess::errorOccurred,
+            this, &RepairWindow::onUsbFixProcessError);
 
     repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "sh /storage/emulated/0/usb.sh");
 }
 
-void RepairWindow::onUsbFixStep2Finished(int, QProcess::ExitStatus)
+void RepairWindow::onUsbFixStep2Finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
 
-    // 第3步：删除 usb.sh
-    QString adbPath = ResourceExtractor::getAdbPath();
-    connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &RepairWindow::onUsbFixStep3Finished);
+    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+        usbFixExecutionFailed = true;
+        usbFixError = QString::fromLocal8Bit(repairProcess->readAllStandardError()).trimmed();
+        if (usbFixError.isEmpty()) {
+            usbFixError = "执行 usb.sh 失败。";
+        }
+    }
 
-    repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "rm -r /storage/emulated/0/usb.sh");
+    // 即使执行失败也尝试删除临时脚本，避免残留在设备上。
+    startUsbFixCleanup();
 }
 
-void RepairWindow::onUsbFixStep3Finished(int, QProcess::ExitStatus)
+void RepairWindow::onUsbFixStep3Finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
 
+    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+        const QString cleanupError = QString::fromLocal8Bit(repairProcess->readAllStandardError()).trimmed();
+        if (!cleanupError.isEmpty()) {
+            usbFixError += (usbFixError.isEmpty() ? QString() : "\n") +
+                "清理 usb.sh 失败：" + cleanupError;
+        } else if (usbFixError.isEmpty()) {
+            usbFixError = "清理 usb.sh 失败。";
+        }
+        usbFixExecutionFailed = true;
+    }
+
+    finishUsbFix(!usbFixExecutionFailed, usbFixError);
+}
+
+void RepairWindow::onUsbFixProcessError(QProcess::ProcessError error)
+{
+    if (error != QProcess::FailedToStart) {
+        return;
+    }
+
+    const QString errorText = repairProcess->errorString().trimmed();
+    if (usbFixStep == UsbFixStep::Execute) {
+        usbFixExecutionFailed = true;
+        usbFixError = errorText.isEmpty() ? "无法启动 usb.sh 执行命令。" : errorText;
+        startUsbFixCleanup();
+    } else if (usbFixStep == UsbFixStep::Cleanup) {
+        usbFixExecutionFailed = true;
+        usbFixError += (usbFixError.isEmpty() ? QString() : "\n") +
+            (errorText.isEmpty() ? "无法启动清理命令。" : "清理 usb.sh 失败：" + errorText);
+        finishUsbFix(false, usbFixError);
+    } else {
+        finishUsbFix(false, errorText.isEmpty() ? "无法启动 ADB 传送命令。" : errorText);
+    }
+}
+
+void RepairWindow::finishUsbFix(bool success, const QString &detail)
+{
+    disconnect(repairProcess, nullptr, this, nullptr);
     setButtonsEnabled(true);
     buttons[UsbFix]->setText("USB修复");
-    UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", "USB修复执行完成！", this);
+
+    if (success) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", "USB修复执行完成！", this);
+    } else {
+        const QString message = detail.isEmpty() ? "USB修复失败。" : "USB修复失败：\n" + detail;
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", message, this);
+    }
+}
+
+void RepairWindow::startUsbFixCleanup()
+{
+    disconnect(repairProcess, nullptr, this, nullptr);
+    usbFixStep = UsbFixStep::Cleanup;
+
+    const QString adbPath = ResourceExtractor::getAdbPath();
+    connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &RepairWindow::onUsbFixStep3Finished);
+    connect(repairProcess, &QProcess::errorOccurred,
+            this, &RepairWindow::onUsbFixProcessError);
+    repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "rm -f /storage/emulated/0/usb.sh");
 }
 
 void RepairWindow::fixTmpFolder()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 检查设备连接
-    if (!DeviceManager::instance()->isDeviceConnected()) {
+    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "未检测到设备，请检查设备连接与授权。", this);
         return;
     }
 
-    setButtonsEnabled(false);
+    if (!setButtonsEnabled(false)) return;
     buttons[TmpFix]->setText("修复中...");
 
     // 创建进程对象
@@ -205,70 +294,114 @@ void RepairWindow::fixTmpFolder()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
+    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
-    tmpFixStep = 0;
-    connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &RepairWindow::onTmpFixStepFinished);
-
     // 第1步：创建目录
-    QString adbPath = ResourceExtractor::getAdbPath();
-    repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "mkdir -p /data/local/tmp");
+    startTmpFixCommand(QStringList() << "shell" << "su" << "-c" << "mkdir -p /data/local/tmp",
+                       TmpFixStep::CreateDirectory);
 }
 
-void RepairWindow::onTmpFixStepFinished()
+void RepairWindow::onTmpFixStepFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
+    disconnect(repairProcess, nullptr, this, nullptr);
     QString adbPath = ResourceExtractor::getAdbPath();
-    int exitCode = repairProcess->exitCode();
-
-    tmpFixStep++;
+    const bool succeeded = exitStatus == QProcess::NormalExit && exitCode == 0;
 
     switch (tmpFixStep) {
-    case 1:
-        // 如果第1步失败，尝试使用 -s 参数
-        if (exitCode != 0) {
-            repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-s" << "mkdir -p /data/local/tmp");
+    case TmpFixStep::CreateDirectory:
+        if (succeeded) {
+            startTmpFixCommand(QStringList() << "shell" << "su" << "-c" << "chcon -R u:object_r:shell_data_file:s0 /data/local/tmp",
+                               TmpFixStep::SetContext);
         } else {
-            // 成功，继续第2步
-            tmpFixStep++;
-            repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "chcon -R u:object_r:shell_data_file:s0 /data/local/tmp");
+            startTmpFixCommand(QStringList() << "shell" << "su" << "-s" << "mkdir -p /data/local/tmp",
+                               TmpFixStep::CreateDirectoryFallback);
         }
         break;
-    case 2:
-        // 第2步：设置 SELinux 上下文
-        if (exitCode != 0) {
-            repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-s" << "chcon -R u:object_r:shell_data_file:s0 /data/local/tmp");
+    case TmpFixStep::CreateDirectoryFallback:
+        if (succeeded) {
+            startTmpFixCommand(QStringList() << "shell" << "su" << "-c" << "chcon -R u:object_r:shell_data_file:s0 /data/local/tmp",
+                               TmpFixStep::SetContext);
         } else {
-            tmpFixStep++;
-            repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "chmod 777 /data/local/tmp");
+            finishTmpFix(false, "创建 /data/local/tmp 失败：" +
+                QString::fromLocal8Bit(repairProcess->readAllStandardError()).trimmed());
         }
         break;
-    case 3:
-        // 第3步：设置权限
-        if (exitCode != 0) {
-            repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-s" << "chmod 777 /data/local/tmp");
+    case TmpFixStep::SetContext:
+        if (succeeded) {
+            startTmpFixCommand(QStringList() << "shell" << "su" << "-c" << "chmod 777 /data/local/tmp",
+                               TmpFixStep::SetPermissions);
         } else {
-            // 完成
-            disconnect(repairProcess, nullptr, this, nullptr);
-            setButtonsEnabled(true);
-            buttons[TmpFix]->setText("修复TMP");
-            UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", "/data/local/tmp 修复完成！", this);
+            startTmpFixCommand(QStringList() << "shell" << "su" << "-s" << "chcon -R u:object_r:shell_data_file:s0 /data/local/tmp",
+                               TmpFixStep::SetContextFallback);
         }
         break;
-    default:
-        // 完成
-        disconnect(repairProcess, nullptr, this, nullptr);
-        setButtonsEnabled(true);
-        buttons[TmpFix]->setText("修复TMP");
-        UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", "/data/local/tmp 修复完成！", this);
+    case TmpFixStep::SetContextFallback:
+        if (succeeded) {
+            startTmpFixCommand(QStringList() << "shell" << "su" << "-c" << "chmod 777 /data/local/tmp",
+                               TmpFixStep::SetPermissions);
+        } else {
+            finishTmpFix(false, "设置 /data/local/tmp 的 SELinux 上下文失败：" +
+                QString::fromLocal8Bit(repairProcess->readAllStandardError()).trimmed());
+        }
+        break;
+    case TmpFixStep::SetPermissions:
+        if (succeeded) {
+            finishTmpFix(true, QString());
+        } else {
+            startTmpFixCommand(QStringList() << "shell" << "su" << "-s" << "chmod 777 /data/local/tmp",
+                               TmpFixStep::SetPermissionsFallback);
+        }
+        break;
+    case TmpFixStep::SetPermissionsFallback:
+        if (succeeded) {
+            finishTmpFix(true, QString());
+        } else {
+            finishTmpFix(false, "设置 /data/local/tmp 权限失败：" +
+                QString::fromLocal8Bit(repairProcess->readAllStandardError()).trimmed());
+        }
         break;
     }
 }
 
+void RepairWindow::onTmpFixProcessError(QProcess::ProcessError error)
+{
+    if (error == QProcess::FailedToStart) {
+        const QString errorText = repairProcess->errorString().trimmed();
+        finishTmpFix(false, errorText.isEmpty() ? "无法启动修复命令。" : errorText);
+    }
+}
+
+void RepairWindow::finishTmpFix(bool success, const QString &detail)
+{
+    disconnect(repairProcess, nullptr, this, nullptr);
+    setButtonsEnabled(true);
+    buttons[TmpFix]->setText("修复TMP");
+
+    if (success) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", "/data/local/tmp 修复完成！", this);
+    } else {
+        const QString message = detail.isEmpty() ? "/data/local/tmp 修复失败。" : "/data/local/tmp 修复失败：\n" + detail;
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", message, this);
+    }
+}
+
+void RepairWindow::startTmpFixCommand(const QStringList &arguments, TmpFixStep step)
+{
+    disconnect(repairProcess, nullptr, this, nullptr);
+    tmpFixStep = step;
+    connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &RepairWindow::onTmpFixStepFinished);
+    connect(repairProcess, &QProcess::errorOccurred,
+            this, &RepairWindow::onTmpFixProcessError);
+    repairProcess->start(ResourceExtractor::getAdbPath(), arguments);
+}
+
 void RepairWindow::installApk()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 检查设备连接
-    if (!DeviceManager::instance()->isDeviceConnected()) {
+    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "未检测到设备，请检查设备连接与授权。", this);
         return;
     }
@@ -342,7 +475,7 @@ void RepairWindow::installApk()
     }
 
     // 开始安装
-    setButtonsEnabled(false);
+    if (!setButtonsEnabled(false)) return;
     buttons[InstallApk]->setText("安装中...");
 
     currentApkIndex = 0;
@@ -355,6 +488,7 @@ void RepairWindow::installApk()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
+    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -401,8 +535,8 @@ void RepairWindow::onApkInstallStepFinished()
             // push成功，执行pm install (su -c)
             apkInstallStep = ApkInstallStep::InstallWithSuC;
             buttons[InstallApk]->setText(QString("安装中(%1/%2)").arg(currentApkIndex + 1).arg(apkFilesToInstall.size()));
-            // 把完整命令作为单个字符串传递，避免参数被shell拆分
-            repairProcess->start(adbPath, QStringList() << "shell" << QString("su -c 'pm install -r %1'").arg(remotePath));
+            // 路径先按内层 shell 引用，再引用完整的 su 命令字符串
+            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("pm install -r " + ShellCommand::quote(remotePath)));
         }
         break;
 
@@ -412,12 +546,12 @@ void RepairWindow::onApkInstallStepFinished()
             qDebug() << "安装成功:" << apkName;
             // 删除临时文件
             apkInstallStep = ApkInstallStep::DeleteTemporaryFile;
-            repairProcess->start(adbPath, QStringList() << "shell" << QString("su -c 'rm -f %1'").arg(remotePath));
+            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
         } else {
             // -c 失败，尝试使用 -s
             qDebug() << "su -c 失败，尝试 su -s:" << apkName;
             apkInstallStep = ApkInstallStep::InstallWithSuS;
-            repairProcess->start(adbPath, QStringList() << "shell" << QString("su -s 'pm install -r %1'").arg(remotePath));
+            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("pm install -r " + ShellCommand::quote(remotePath), "-s"));
         }
         break;
 
@@ -431,7 +565,7 @@ void RepairWindow::onApkInstallStepFinished()
         }
         // 删除临时文件
         apkInstallStep = ApkInstallStep::DeleteTemporaryFile;
-        repairProcess->start(adbPath, QStringList() << "shell" << QString("su -c 'rm -f %1'").arg(remotePath));
+        repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
         break;
 
     case ApkInstallStep::DeleteTemporaryFile:  // delete完成
@@ -469,8 +603,9 @@ finished:
 
 void RepairWindow::installModule()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 检查设备连接
-    if (!DeviceManager::instance()->isDeviceConnected()) {
+    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "未检测到设备，请检查设备连接与授权。", this);
         return;
     }
@@ -528,7 +663,7 @@ void RepairWindow::installModule()
     }
 
     // 禁用按钮，开始检测Root管理器
-    setButtonsEnabled(false);
+    if (!setButtonsEnabled(false)) return;
     buttons[InstallModule]->setText("检测中...");
 
     // 创建进程对象
@@ -536,6 +671,7 @@ void RepairWindow::installModule()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
+    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -610,6 +746,7 @@ void RepairWindow::onRootDetectFinished()
 
 void RepairWindow::startModuleInstall()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     buttons[InstallModule]->setText("安装中...");
 
     currentModuleIndex = 0;
@@ -666,16 +803,16 @@ void RepairWindow::onModuleInstallStepFinished()
             QString installCmd;
             switch (rootManagerType) {
                 case RootManager::Magisk:  // Magisk/Alpha
-                    installCmd = QString("magisk --install-module %1").arg(remotePath);
+                    installCmd = QString("magisk --install-module %1").arg(ShellCommand::quote(remotePath));
                     break;
                 case RootManager::APatch:  // APatch
-                    installCmd = QString("/data/adb/ap/bin/apd module install %1").arg(remotePath);
+                    installCmd = QString("/data/adb/ap/bin/apd module install %1").arg(ShellCommand::quote(remotePath));
                     break;
                 case RootManager::KernelSU:  // KernelSU
-                    installCmd = QString("/data/adb/ksu/bin/ksud module install %1").arg(remotePath);
+                    installCmd = QString("/data/adb/ksu/bin/ksud module install %1").arg(ShellCommand::quote(remotePath));
                     break;
             }
-            repairProcess->start(adbPath, QStringList() << "shell" << QString("su -c '%1'").arg(installCmd));
+            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot(installCmd));
         }
         break;
 
@@ -702,7 +839,7 @@ void RepairWindow::onModuleInstallStepFinished()
 
             // 删除临时文件
             moduleInstallStep = ModuleInstallStep::DeleteTemporaryFile;
-            repairProcess->start(adbPath, QStringList() << "shell" << QString("su -c 'rm -f %1'").arg(remotePath));
+            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
         }
         break;
 
@@ -750,4 +887,14 @@ module_finished:
         QString adbPath = ResourceExtractor::getAdbPath();
         repairProcess->start(adbPath, QStringList() << "reboot");
     }
+}
+
+bool RepairWindow::hasActiveOugaTask() const { return ougaWindow && ougaWindow->isBusy(); }
+void RepairWindow::closeEvent(QCloseEvent *event) {
+    if (hasActiveOugaTask() || DeviceOperationLease::owner()==this) {
+        event->ignore();
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中", "请等待设备操作结束；不能销毁所属菜单。", this);
+        return;
+    }
+    QWidget::closeEvent(event);
 }

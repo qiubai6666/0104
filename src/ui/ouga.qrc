@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/ouga">
+    <file alias="folder.svg">ouga-icons/folder.svg</file>
+    <file alias="shield.svg">ouga-icons/shield.svg</file>
+    <file alias="power.svg">ouga-icons/power.svg</file>
+  </qresource>
+</RCC>

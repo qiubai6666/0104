@@ -23,7 +23,8 @@ public:
     explicit DeviceCheckWindow(QWidget *parent = nullptr);
     ~DeviceCheckWindow();
     
-    void setPosition(int mainMenuX, int mainMenuY);
+    void setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight);
+    bool isOperationInProgress() const { return operationInProgress; }
 
 private slots:
     void onRebootButtonClicked();
@@ -35,12 +36,18 @@ private slots:
     void restoreOpacity();
 
 protected:
+    void closeEvent(QCloseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void moveEvent(QMoveEvent *event) override;
 
 private:
+    friend class DeviceOperationTests;
+    bool beginOperation();
+    void finishOperation();
+    QProcess *createOperationProcess();
+    void releaseOperationProcess(QProcess *process);
     void setupUI();
     void updateUIForMode(DeviceManager::DeviceMode mode);
     void flashPartition(const QString &partition);
@@ -52,6 +59,11 @@ private:
     QLabel *infoLabel;
     QComboBox *rebootComboBox;
     QPushButton *executeButton;
+    QPushButton *cmdButton;
+    QPushButton *bootButton;
+    QPushButton *initBootButton;
+    bool operationInProgress = false;
+    bool monitoringPausedByOperation = false;
     
     QProcess *currentProcess;
     QTimer *waitTimer;

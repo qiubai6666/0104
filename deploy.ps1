@@ -5,6 +5,7 @@ param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'OrangeToolsApp'),
     [switch]$IncludeSoftwareOpenGL,
     [switch]$IncludeOptionalDependencies,
+    [switch]$PreserveExistingFiles,
     [switch]$UseUpx,
     [string]$UpxPath
 )
@@ -60,6 +61,39 @@ if ($UseUpx) {
 }
 
 $output = [IO.Path]::GetFullPath($OutputDirectory)
+# Validate before any writes. Do not traverse links or partially update a running app.
+$ancestor = $output
+while (-not [string]::IsNullOrWhiteSpace($ancestor)) {
+    if (Test-Path -LiteralPath $ancestor) {
+        $item = Get-Item -LiteralPath $ancestor -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Deployment path contains a symlink/junction: $ancestor"
+        }
+    }
+    $ancestor = Split-Path -Parent $ancestor
+}
+if (Test-Path -LiteralPath $output) {
+    if (-not (Get-Item -LiteralPath $output).PSIsContainer) { throw 'Deployment output is not a directory.' }
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($output)
+    while ($pending.Count -gt 0) {
+        foreach ($item in Get-ChildItem -LiteralPath $pending.Pop() -Force) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Deployment contains a symlink/junction: $($item.FullName)"
+            }
+            if ($item.PSIsContainer) { $pending.Push($item.FullName); continue }
+            if ($item.Extension -in @('.exe', '.dll') -or $item.Name -eq 'qt.conf') {
+                try {
+                    $handle = [IO.File]::Open($item.FullName, [IO.FileMode]::Open,
+                                              [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                    $handle.Dispose()
+                } catch {
+                    throw "Deployment file is locked or not writable; close the application and retry: $($item.FullName)"
+                }
+            }
+        }
+    }
+}
 [IO.Directory]::CreateDirectory($output) | Out-Null
 $target = Join-Path $output ([IO.Path]::GetFileName($executable))
 if ($UseUpx -and [string]::Equals($executable, $target, [StringComparison]::OrdinalIgnoreCase)) {
@@ -70,16 +104,18 @@ if (-not [string]::Equals($executable, $target, [StringComparison]::OrdinalIgnor
 }
 
 # Plain Widgets currently does not use OpenGL; keep its optional software renderer opt-in.
-$deployArguments = @('--release', '--force', '--compiler-runtime', '--no-translations', '--dir', $output)
+$deployArguments = @('--release', '--force', '--compiler-runtime', '--concurrent', '--no-translations',
+                     '--qtpaths', (Join-Path $QtBinPath 'qtpaths.exe'), '--dir', $output)
 if (-not $IncludeSoftwareOpenGL) {
     $deployArguments += '--no-opengl-sw'
 }
 if (-not $IncludeOptionalDependencies) {
-    $deployArguments += @('--no-system-d3d-compiler', '--no-svg',
+    $deployArguments += @('--no-system-d3d-compiler',
                           '--skip-plugin-types', 'generic,iconengines',
                           '--exclude-plugins', 'qgif,qico,qjpeg,qsvg,qcertonlybackend')
 }
-$deployArguments += $target
+# Inspect the build artifact, not the output beside potentially stale Qt DLLs.
+$deployArguments += $executable
 
 # Do not alter the user's PATH or copy DLLs into Windows system directories.
 $originalPath = $env:PATH
@@ -95,7 +131,7 @@ try {
 
 # Resolve plugins relative to the executable instead of the developer's Qt installation.
 [IO.File]::WriteAllText((Join-Path $output 'qt.conf'), "[Paths]`r`nPrefix = .`r`nPlugins = .`r`n", [Text.UTF8Encoding]::new($false))
-$required = @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll',
+$required = @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll', 'Qt6Concurrent.dll', 'Qt6Svg.dll',
               'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll',
               'platforms\qwindows.dll', 'styles\qmodernwindowsstyle.dll',
               'networkinformation\qnetworklistmanager.dll', 'tls\qschannelbackend.dll')
@@ -110,10 +146,12 @@ if (-not $IncludeSoftwareOpenGL) {
     $optionalFiles += 'opengl32sw.dll'
 }
 if (-not $IncludeOptionalDependencies) {
-    $optionalFiles += @('D3Dcompiler_47.dll', 'Qt6Svg.dll', 'generic\qtuiotouchplugin.dll',
+    $optionalFiles += @('D3Dcompiler_47.dll', 'generic\qtuiotouchplugin.dll',
                         'iconengines\qsvgicon.dll', 'imageformats\qgif.dll', 'imageformats\qico.dll',
                         'imageformats\qjpeg.dll', 'imageformats\qsvg.dll', 'tls\qcertonlybackend.dll')
 }
+# Safe in-place application updates must not prune any existing files.
+if ($PreserveExistingFiles) { $optionalFiles = @() }
 $outputPrefix = $output.TrimEnd('\') + '\'
 foreach ($relativePath in $optionalFiles) {
     $optionalPath = [IO.Path]::GetFullPath((Join-Path $output $relativePath))

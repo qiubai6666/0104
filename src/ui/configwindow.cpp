@@ -1,3 +1,4 @@
+#include "deviceoperationlease.h"
 #include "configwindow.h"
 #include "processmanager.h"
 #include "resourceextractor.h"
@@ -6,6 +7,7 @@
 #include <QScreen>
 #include <QGuiApplication>
 #include <QFile>
+#include <QSaveFile>
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QDesktopServices>
@@ -14,6 +16,20 @@
 #include <QEventLoop>
 #include <QTimer>
 
+bool ConfigWindow::isSafeFileName(const QString &fileName)
+{
+    if (fileName.isEmpty() || fileName == "." || fileName == "..") {
+        return false;
+    }
+
+    // 配置文件只允许指定资源目录下的单层文件名，不能借助路径穿越写出资源目录。
+    if (fileName.contains("/") || fileName.contains("\\") || fileName.contains("..") ||
+        fileName.contains(":") || QDir::isAbsolutePath(fileName)) {
+        return false;
+    }
+
+    return QFileInfo(fileName).fileName() == fileName;
+}
 ConfigWindow::ConfigWindow(QWidget *parent)
     : QWidget(parent)
     , extractProcess(nullptr)
@@ -140,6 +156,7 @@ void ConfigWindow::onButtonClicked()
 
 void ConfigWindow::openGeekFlashTool()
 {
+    if (DeviceOperationLease::busyFor(this)) { UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备通道占用", "请等待设备操作完成后再启动外部工具。", this); return; }
     // 使用默认浏览器打开GeekFlashTool链接
     QUrl url("https://syxz.lanzoue.com/b0mbywcli");
     bool success = QDesktopServices::openUrl(url);
@@ -162,6 +179,7 @@ void ConfigWindow::openWebLink()
 
 void ConfigWindow::openNDM()
 {
+    if (DeviceOperationLease::busyFor(this)) { UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备通道占用", "请等待设备操作完成后再启动外部工具。", this); return; }
     QString qiubaiPath = ResourceExtractor::getResourcePath();
     QString ndmPath = qiubaiPath + "/NDM.exe";
 
@@ -228,10 +246,16 @@ void ConfigWindow::loadConfigFile()
 
         QStringList parts = line.split('|');
         if (parts.size() >= 4) {
-            int id = parts[0].toInt();
-            QString fileType = parts[1];
-            QString fileName = parts[2];
-            QString url = parts[3];
+            const int id = parts[0].toInt();
+            const QString fileType = parts[1].trimmed().toLower();
+            const QString fileName = parts[2].trimmed();
+            const QString url = parts[3].trimmed();
+            if (id < 1 || id > DownloadOptionCount ||
+                (fileType != "exe" && fileType != "zip") ||
+                !isSafeFileName(fileName) || !QUrl(url).isValid()) {
+                qWarning() << "忽略无效下载配置:" << line;
+                continue;
+            }
             configData[id] = DownloadConfig{fileType, fileName, url};
         }
     }
@@ -251,6 +275,11 @@ void ConfigWindow::downloadFile(int id)
     const QString fileType = entry.fileType;
     const QString fileName = entry.fileName;
     const QString url = entry.url;
+
+    if (!isSafeFileName(fileName) || (fileType != "exe" && fileType != "zip")) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "下载配置中的文件名或类型无效。", this);
+        return;
+    }
 
     QString qiubaiPath = ResourceExtractor::getResourcePath();
 
@@ -461,8 +490,8 @@ void ConfigWindow::onFileDownloadFinished(QNetworkReply *reply)
 
     QString filePath = qiubaiPath + "/" + actualFileName;
 
-    // 保存文件
-    QFile file(filePath);
+    // 使用 QSaveFile，避免下载中断时留下一个看似完整但实际损坏的正式文件。
+    QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly)) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
             QString("无法保存文件：%1").arg(file.errorString()), this);
@@ -470,8 +499,14 @@ void ConfigWindow::onFileDownloadFinished(QNetworkReply *reply)
         return;
     }
 
-    qint64 written = file.write(data);
-    file.close();
+    const qint64 written = file.write(data);
+    if (written != data.size() || !file.commit()) {
+        const QString error = file.errorString();
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
+            QString("保存文件失败：%1").arg(error), this);
+        reply->deleteLater();
+        return;
+    }
 
     qDebug() << "文件保存完成:" << filePath << "写入字节:" << written;
 
@@ -488,14 +523,21 @@ void ConfigWindow::onFileDownloadFinished(QNetworkReply *reply)
 
 void ConfigWindow::extractZipAndOpen(const QString &zipPath, const QString &exeName)
 {
+    if (DeviceOperationLease::busyFor(this)) { UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备通道占用", "请等待设备操作完成后再启动外部工具。", this); return; }
     QString qiubaiPath = ResourceExtractor::getResourcePath();
+
+    if (!isSafeFileName(exeName)) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "解压配置中的目标文件名无效。", this);
+        return;
+    }
 
     // 保存待打开的exe文件名
     pendingExeName = exeName;
 
-    // 使用PowerShell解压zip文件
-    QString psCommand = QString("Expand-Archive -Path '%1' -DestinationPath '%2' -Force")
-                            .arg(zipPath, qiubaiPath);
+    // 通过脚本参数传递路径，不把用户/配置路径拼接进 PowerShell 代码，避免引号和特殊字符导致注入或解析错误。
+    const QString psCommand =
+        "& { param([string]$zipPath, [string]$destinationPath) "
+        "Expand-Archive -LiteralPath $zipPath -DestinationPath $destinationPath -Force }";
 
     if (extractProcess) {
         extractProcess->deleteLater();
@@ -504,8 +546,12 @@ void ConfigWindow::extractZipAndOpen(const QString &zipPath, const QString &exeN
 
     connect(extractProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &ConfigWindow::onExtractFinished);
+    connect(extractProcess, &QProcess::errorOccurred,
+            this, &ConfigWindow::onExtractError);
 
-    extractProcess->start("powershell.exe", QStringList() << "-Command" << psCommand);
+    extractProcess->start("powershell.exe", QStringList()
+        << "-NoProfile" << "-NonInteractive" << "-Command" << psCommand
+        << zipPath << qiubaiPath);
 }
 
 void ConfigWindow::onExtractFinished(int exitCode, QProcess::ExitStatus)
@@ -536,6 +582,17 @@ void ConfigWindow::onExtractFinished(int exitCode, QProcess::ExitStatus)
     }
 }
 
+void ConfigWindow::onExtractError(QProcess::ProcessError error)
+{
+    if (error != QProcess::FailedToStart) {
+        return;
+    }
+
+    const QString errorMsg = extractProcess->errorString().trimmed();
+    disconnect(extractProcess, nullptr, this, nullptr);
+    UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
+        QString("无法启动解压程序：%1").arg(errorMsg), this);
+}
 QString ConfigWindow::findFileRecursively(const QString &dirPath, const QString &fileName)
 {
     QDir dir(dirPath);
@@ -559,6 +616,7 @@ QString ConfigWindow::findFileRecursively(const QString &dirPath, const QString 
 
 void ConfigWindow::openExecutable(const QString &exePath)
 {
+    if (DeviceOperationLease::busyFor(this)) { UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备通道占用", "请等待设备操作完成后再启动外部工具。", this); return; }
     if (!QFile::exists(exePath)) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
             QString("找不到文件：%1").arg(exePath), this);

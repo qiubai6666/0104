@@ -1,4 +1,5 @@
 #include "processmanager.h"
+#include "deviceoperationlease.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -51,6 +52,7 @@ QProcess *ProcessManager::createProcess(QObject *parent, bool newConsole)
 QProcess *ProcessManager::startProcess(const QString &program, const QStringList &arguments,
                                       const QString &workingDirectory, bool newConsole)
 {
+    if (DeviceOperationLease::owner()) return nullptr;
     QProcess *process = createProcess(QCoreApplication::instance(), newConsole);
     process->setWorkingDirectory(workingDirectory);
 
@@ -67,6 +69,7 @@ QProcess *ProcessManager::startProcess(const QString &program, const QStringList
 
 void ProcessManager::stopAllProcesses()
 {
+    if (DeviceOperationLease::owner()) return;
     discardDestroyedProcesses();
     const auto processes = ownedProcesses();
     QList<bool> signalsWereBlocked;
@@ -98,4 +101,12 @@ void ProcessManager::stopAllProcesses()
         process->blockSignals(signalsWereBlocked.at(i));
     }
     // 不枚举或终止派生进程，也不向共享 ADB Server 发送 kill-server。
+}
+bool ProcessManager::hasActiveDeviceProcesses()
+{
+    discardDestroyedProcesses();
+    for (const auto &p : ownedProcesses()) {
+        if (p && p->state()!=QProcess::NotRunning && !(p->parent() && p->parent()->inherits("DeviceManager"))) return true;
+    }
+    return false;
 }

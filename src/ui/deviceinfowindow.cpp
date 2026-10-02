@@ -1,3 +1,4 @@
+#include "deviceoperationlease.h"
 #include "processmanager.h"
 #include "deviceinfowindow.h"
 #include "resourceextractor.h"
@@ -333,6 +334,7 @@ void DeviceInfoWindow::applyPresentation(bool connected)
 }
 void DeviceInfoWindow::startScrcpy()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 使用绝对路径确保调用qiubai文件夹中的scrcpy
     QString scrcpyPath = ResourceExtractor::getResourcePath() + "/scrcpy.exe";
     scrcpyProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
@@ -341,6 +343,7 @@ void DeviceInfoWindow::startScrcpy()
 
 void DeviceInfoWindow::onDeviceModeChanged(DeviceManager::DeviceMode mode)
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     if (mode == DeviceManager::ADB) {
         // 设备连接（ADB 模式）- 显示设备信息并启动投屏
         showDeviceInfo();
@@ -360,6 +363,7 @@ void DeviceInfoWindow::onDeviceModeChanged(DeviceManager::DeviceMode mode)
 
 void DeviceInfoWindow::onDeviceInfoUpdated(const QString &info)
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 只在 ADB 模式下更新设备信息
     if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         return;
@@ -403,6 +407,7 @@ void DeviceInfoWindow::onDeviceInfoUpdated(const QString &info)
 
 void DeviceInfoWindow::onModelQueryFinished()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     disconnect(queryProcess, nullptr, this, nullptr);
     
     // 检查设备是否仍然连接
@@ -430,6 +435,7 @@ void DeviceInfoWindow::onModelQueryFinished()
 
 void DeviceInfoWindow::onVersionQueryFinished()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     disconnect(queryProcess, nullptr, this, nullptr);
     
     // 检查设备是否仍然连接
@@ -592,6 +598,8 @@ void DeviceInfoWindow::dropEvent(QDropEvent *event)
 
 void DeviceInfoWindow::transferFiles(const QStringList &filePaths)
 {
+    if (DeviceOperationLease::busyFor(this)) return;
+    if (!DeviceOperationLease::acquire(this)) return;
     // 保存待传输文件列表
     pendingTransferFiles = filePaths;
     transferIndex = 0;
@@ -608,6 +616,7 @@ void DeviceInfoWindow::transferFiles(const QStringList &filePaths)
         transferProcess->deleteLater();
     }
     transferProcess = ProcessManager::createProcess(this);
+    connect(transferProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if(e==QProcess::FailedToStart) DeviceOperationLease::release(this); });
     transferProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
     
     connect(transferProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -619,9 +628,11 @@ void DeviceInfoWindow::transferFiles(const QStringList &filePaths)
 
 void DeviceInfoWindow::transferNextFile()
 {
+    if (DeviceOperationLease::busyFor(this)) return;
     // 检查设备是否仍然连接
     if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         disconnect(transferProcess, nullptr, this, nullptr);
+        DeviceOperationLease::release(this);
         if (transferIndex > 0) {
             UIHelper::showCenteredMessageBox(QMessageBox::Warning, "传输中断", 
                 QString("设备已断开，已成功传输 %1 个文件").arg(transferSuccessCount), this);
@@ -632,6 +643,7 @@ void DeviceInfoWindow::transferNextFile()
     if (transferIndex >= pendingTransferFiles.size()) {
         // 所有文件传输完成
         disconnect(transferProcess, nullptr, this, nullptr);
+        DeviceOperationLease::release(this);
         
         // 只在有失败时才显示提示
         if (transferFailCount > 0) {

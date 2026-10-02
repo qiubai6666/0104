@@ -2,6 +2,7 @@
 #include <QDebug>
 #include <QMessageBox>
 #include "menuwidget.h"
+#include "deviceoperationlease.h"
 #include "passworddialog.h"
 #include "processmanager.h"
 #include "devicemanager.h"
@@ -43,6 +44,12 @@ int main(int argc, char *argv[])
     QObject::connect(&application, &QCoreApplication::aboutToQuit, &application, []() {
         DeviceManager::instance()->stopMonitoring();
         ProcessManager::stopAllProcesses();
+    });
+
+    DeviceOperationLease::setIdleCheck([] { return !ProcessManager::hasActiveDeviceProcesses(); });
+    QObject::connect(DeviceOperationLease::instance(), &DeviceOperationLease::changed, &application, [](bool held) {
+        if (held) DeviceManager::instance()->pauseMonitoring();
+        else DeviceManager::instance()->resumeMonitoring();
     });
 
     // 密码验证

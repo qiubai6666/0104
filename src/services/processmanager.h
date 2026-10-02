@@ -20,6 +20,7 @@ public:
 
     // 仅结束仍存活的受管进程；可重复调用，不凭历史 PID 查找系统进程。
     static void stopAllProcesses();
+    static bool hasActiveDeviceProcesses();
 
 private:
     ProcessManager() = default;
