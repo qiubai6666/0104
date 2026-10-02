@@ -1,0 +1,1 @@
+legacy root resource; do not replace with bundled tool

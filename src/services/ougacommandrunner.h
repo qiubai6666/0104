@@ -23,6 +23,9 @@ public:
            int readTimeoutMs = 0) override;
   bool running() const override;
   static QString formatToolsError(const QString &fastbootPath);
+  static QString bundledToolPath(const QString &resourceDirectory,
+                                 const QString &key,
+                                 const QString &fallback = {});
 
 private:
   QProcess m_process;

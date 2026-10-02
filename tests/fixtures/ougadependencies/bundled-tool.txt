@@ -1,0 +1,1 @@
+bundled dependency fixture; never execute this text

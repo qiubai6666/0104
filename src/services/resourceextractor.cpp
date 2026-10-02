@@ -28,16 +28,22 @@ bool ResourceExtractor::extractFile(const QString &resourcePath, const QString &
         return false;
     }
 
-    outputFile.write(resourceFile.readAll());
+    const QByteArray data = resourceFile.readAll();
+    const bool success = resourceFile.error() == QFileDevice::NoError &&
+                         outputFile.write(data) == data.size() && outputFile.flush();
     outputFile.close();
     resourceFile.close();
 
-    return true;
+    return success;
 }
 
 bool ResourceExtractor::extractResources()
 {
-    QString targetPath = getResourcePath();
+    return extractResources(getResourcePath(), getNeilImagePath());
+}
+
+bool ResourceExtractor::extractResources(const QString &targetPath, const QString &neilImagePath)
+{
     QDir targetDir(targetPath);
 
     // 如果目录已存在，先删除
@@ -58,7 +64,8 @@ bool ResourceExtractor::extractResources()
     qDebug() << "开始提取资源到:" << targetPath;
 
     // 遍历所有qiubai资源
-    QDirIterator it(":/qiubai", QDirIterator::Subdirectories);
+    const QDir resourceRoot(":/qiubai/qiubai");
+    QDirIterator it(resourceRoot.path(), QDirIterator::Subdirectories);
     int successCount = 0;
     int totalCount = 0;
 
@@ -73,12 +80,14 @@ bool ResourceExtractor::extractResources()
 
             // Neil.jpg 单独提取到 AppData/Local 目录
             if (fileName == "Neil.jpg") {
-                outputPath = getNeilImagePath();
+                outputPath = neilImagePath;
             } else {
-                outputPath = targetPath + "/" + fileName;
+                outputPath = targetDir.filePath(resourceRoot.relativeFilePath(resourcePath));
             }
 
-            if (extractFile(resourcePath, outputPath)) {
+            // 保留 bin/ 内布局，完整 platform-tools 不与旧版同名文件混用。
+            if (dir.mkpath(QFileInfo(outputPath).absolutePath()) &&
+                extractFile(resourcePath, outputPath)) {
                 successCount++;
                 qDebug() << "提取成功:" << fileName;
             } else {
@@ -88,7 +97,7 @@ bool ResourceExtractor::extractResources()
     }
 
     qDebug() << "资源提取完成:" << successCount << "/" << totalCount;
-    return successCount > 0;
+    return totalCount > 0 && successCount == totalCount;
 }
 
 QString ResourceExtractor::getAdbPath()

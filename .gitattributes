@@ -1,0 +1,2 @@
+# Preserve bundled dependency bytes so manifest SHA-256 survives checkout.
+/qiubai/bin/** -text

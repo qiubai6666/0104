@@ -66,3 +66,23 @@ QString OugaProcessRunner::formatToolsError(const QString &fastbootPath) {
   }
   return {};
 }
+
+QString OugaProcessRunner::bundledToolPath(const QString &resourceDirectory,
+                                          const QString &key,
+                                          const QString &fallback) {
+  if (resourceDirectory.isEmpty())
+    return fallback;
+  QString relative;
+  if (key == "7z")
+    relative = "7zip/7z.exe";
+  else if (key == "lpmake")
+    relative = "lpmake/lpmake.exe";
+  else if (key == "fastboot" || key == "adb")
+    relative = "platform-tools/" + key + ".exe";
+  else
+    return fallback;
+  const QFileInfo file(QDir(resourceDirectory).filePath("bin/" + relative));
+  return file.isFile() && file.isReadable() && file.size() > 0
+             ? file.absoluteFilePath()
+             : fallback;
+}

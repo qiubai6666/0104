@@ -40,11 +40,12 @@ AB、强力、仅 FBD 必须具有匹配的 my_company / my_preload。来自包�
 
 ## 工具与包准备
 
-复用应用内 adb、fastboot、payload。原版页面没有新增工具配置入口；需要额外工具时通过文件选择配置，使用应用 QSettings 的 Ouga 分组持久保存。
+复用应用内 payload；欧加优先使用 qiubai/bin 内随应用提供的 7-Zip、lpmake 和完整 platform-tools。资源提取保留子目录，不覆盖旧功能在 qiubai 根目录使用的 adb/fastboot。原版页面没有新增工具配置入口；用户已配置路径仍优先，缺失时通过文件选择配置，使用应用 QSettings 的 Ouga 分组持久保存。
 
 - 应用组织名为 QiuBai，应用名为 Orange Tools；Windows 默认设置位于 HKCU\Software\QiuBai\Orange Tools\Ouga。工具键为 adb、fastboot、payload、7z、lpmake，ROM 服务键为 rom。ROM 服务地址默认为空，不预填作者地址。
 - 高通清除数据在首次写入前检查 fastboot 同目录的 mke2fs.exe、make_f2fs.exe、mke2fs.conf。缺失时提示选择可信完整 platform-tools；仍缺失则阻止。文件存在检查不是签名或版本一致性认证。
-- 7z / lpmake 用户提供，不捆绑、不自动安装；缺失只阻止相关解压 / Super 生成，不影响已准备的镜像目录或有效 super.img。
+- 已提供 7-Zip 26.03 命令行及格式库、Google platform-tools 37.0.1 完整 Windows 包、用户 SMT 参考包内的 lpmake；不进行系统安装。qiubai/bin/README.md 与 manifest.json 保留版本、来源、许可及逐文件摘要。lpmake 为参考包的未签名二进制，构建版本未知，不能声称已验证其上游构建来源。缺失工具仍只阻止相应解压 / Super 生成。
+- lpmake --help 正常输出完整 AOSP 用法而退出 1 时，只将该能力查询视为有效；Super 生成及设备命令的非零退出、异常退出、FAILED/错误输出仍立即失败。USB 驱动及 ROM 服务地址不由放置这些文件完成。
 - 支持普通镜像目录、售后 IMAGES/RADIO 与可确定映像的 my_* 子目录。多候选、重复目标、冲突映射阻止；任意 bin、说明文件或包内脚本不作为分区。
 - rawprogram 只作受校验的完整映像映射资料；多段拼接、非零文件偏移等不支持格式明确停止，不执行其中的擦除或偏移写入。
 - 镜像检查可读性、Sparse 头 / 块边界、展开大小、路径边界和 SHA-256；执行前与每次写入前再核对文件未变化。
@@ -93,6 +94,8 @@ ROM 服务适配 SMT 的 /series、/devices、/versions（GET）与 /download-li
 ## 回归与交付验证
 
 正式测试：
+
+- tests/ougadependencytests.pro：分目录资源完整性、内置工具默认路径、匹配的格式化文件、lpmake 帮助/实际生成失败边界。捆绑的 Windows lpmake 使用独立输出目录中的相对文件名，工作目录由 QProcess 以 Unicode 传入；源镜像和 JSON 不改动。参考 lpmake 对超长 Win32 路径有限制，宜选择较短的输出目录；生成失败仍停止，不伪报成功。默认只用不可执行的夹具及测试进程；显式 bundled_dependency_resources 构建验证真实内嵌工具的版本、全部摘要、中文路径 ZIP 解压和 8 MiB 小型 Super 生成，始终不发出真实设备命令。
 
 - tests/ougatests.pro：包 / Payload / ARB / Super、平台和槽位命令矩阵、共享规则、确定性排序与实际刷写计数、has-slot 稳定性、Super 后重新确认、格式化依赖复检、命令输出去重、结果落盘失败、故障注入、停止 / 租约、原版控件与最小尺寸布局、表格缓存 / 拖入、内部开始线刷、模态期间停止。
 - tests/ouganetworktests.pro：仅 loopback 的服务、Range、摘要 / 长度、跨站凭证隔离、取消 / 续传。

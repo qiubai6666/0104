@@ -118,7 +118,9 @@ bool OugaFlashWindow::continueTask(quint64 generation) {
 QString OugaFlashWindow::toolPath(const QString &key,
                                   const QString &fallback) const {
   QSettings settings;
-  return settings.value("Ouga/" + key, fallback).toString().trimmed();
+  const QString bundled = OugaProcessRunner::bundledToolPath(
+      ResourceExtractor::getResourcePath(), key, fallback);
+  return settings.value("Ouga/" + key, bundled).toString().trimmed();
 }
 QString OugaFlashWindow::requireTool(const QString &key, const QString &label,
                                      const QString &fallback) {

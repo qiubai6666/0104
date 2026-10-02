@@ -1,0 +1,135 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-10-02T17:43:14.967Z",
+  "components": [
+    {
+      "id": "7zip",
+      "version": "26.03",
+      "architecture": "x64",
+      "source": "https://www.7-zip.org/a/7z2603-x64.exe",
+      "sourceSha256": "0859C524B8A63551848F0C246ABDDCB1D0B7B656B0FBFE879F8D85E61A9E6EDD",
+      "sourceCode": "https://www.7-zip.org/a/7z2603-src.7z",
+      "license": "7zip/License.txt"
+    },
+    {
+      "id": "platform-tools",
+      "version": "37.0.1-15733141",
+      "source": "https://dl.google.com/android/repository/platform-tools-latest-windows.zip",
+      "sourceSha256": "45F4D63113E895EBDE0C90F194099A4676B6AC653BD28D54314A9E022BBC1A99",
+      "license": "platform-tools/NOTICE.txt"
+    },
+    {
+      "id": "lpmake",
+      "version": null,
+      "architecture": "x86",
+      "source": "D:\\Downloads\\~8160665324498448780\\exe\\lpmake.exe",
+      "sourceSha256": "FF893ED7582E0FB9C3C8D482899C0FF8888E09CFE112E52ECD8B3135E2425334",
+      "digitallySigned": false,
+      "buildProvenanceVerified": false,
+      "upstreamLicense": "lpmake/LICENSE-AOSP.txt",
+      "helpNormalExitCode": 1
+    }
+  ],
+  "files": [
+    {
+      "path": "7zip/7z.dll",
+      "bytes": 1906688,
+      "sha256": "65E4C1F855F9EF6E8F0F5DF8E3F27D9EB5F07311408639DA0A1CA0B8F4871B0D"
+    },
+    {
+      "path": "7zip/7z.exe",
+      "bytes": 577536,
+      "sha256": "6EE3C0ED0B27663C1B948AE85A7C0BB073AED1498983182F3F0DF1F6A8C30B2F"
+    },
+    {
+      "path": "7zip/License.txt",
+      "bytes": 6031,
+      "sha256": "519AC0A4BDED9C18EA02E0AFB71F663D8C47373BD9FACD3AC96A79F51D77765D"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2325,
+      "sha256": "61F708BF063752D1A85E7B1BE42D3B28438B4DB6CF4C756BE39C8674455EC351"
+    },
+    {
+      "path": "lpmake/LICENSE-AOSP.txt",
+      "bytes": 11358,
+      "sha256": "CFC7749B96F63BD31C3C42B5C471BF756814053E847C10F3EB003417BC523D30"
+    },
+    {
+      "path": "lpmake/lpmake.exe",
+      "bytes": 1999360,
+      "sha256": "FF893ED7582E0FB9C3C8D482899C0FF8888E09CFE112E52ECD8B3135E2425334"
+    },
+    {
+      "path": "platform-tools/AdbWinApi.dll",
+      "bytes": 108184,
+      "sha256": "C1D653030B4BDE65D3E07E4D0B0979E17BE56DF1436CDD15528630F27808050D"
+    },
+    {
+      "path": "platform-tools/AdbWinUsbApi.dll",
+      "bytes": 73368,
+      "sha256": "0710E894D9B40F71A670C13C694079D564C92C1279DA382CFE4850983AAEBE1B"
+    },
+    {
+      "path": "platform-tools/NOTICE.txt",
+      "bytes": 1154131,
+      "sha256": "38EC8C6F5B7799C223FFEAB1F9E81C2D5FC67B5E56D6424F649630CA1EE1A811"
+    },
+    {
+      "path": "platform-tools/adb.exe",
+      "bytes": 8273560,
+      "sha256": "B4A6B455702684652CCCF7B46258B29E653538904359A58FD4931CF3EF286B3F"
+    },
+    {
+      "path": "platform-tools/etc1tool.exe",
+      "bytes": 451224,
+      "sha256": "EE9BB89BB770BADCFEB12BB9A3C4095682FB2EA0105487F9F16E440C582064A3"
+    },
+    {
+      "path": "platform-tools/fastboot.exe",
+      "bytes": 2429080,
+      "sha256": "B2D9CBFF4CE9AE7EB448CFC831BAFC867935F50F5BE38F8F81057FD7EB3B8D86"
+    },
+    {
+      "path": "platform-tools/hprof-conv.exe",
+      "bytes": 52888,
+      "sha256": "70CFEF266DD9D94922679BE159901CEC3218561BE946347E6E4A7577FC81DEDE"
+    },
+    {
+      "path": "platform-tools/libwinpthread-1.dll",
+      "bytes": 243016,
+      "sha256": "F2044C755E39EFC5D47F47C5A942178DD6D79DC8945BB182DC8753D10E2A4269"
+    },
+    {
+      "path": "platform-tools/make_f2fs.exe",
+      "bytes": 473752,
+      "sha256": "A1D8E18474636972E4EBAF2617AC17C880E76642FAD7FA3E51AE5CD3C1FE5D17"
+    },
+    {
+      "path": "platform-tools/make_f2fs_casefold.exe",
+      "bytes": 473752,
+      "sha256": "9AC076516C2A1F620DF24E148660BECF3E7D4102B46DDDA66970D35C59DB2962"
+    },
+    {
+      "path": "platform-tools/mke2fs.conf",
+      "bytes": 1157,
+      "sha256": "AD58A58DCDD24D85055814CA9CAC67DB89D4E67C434E96774BDCE0D0A007D067"
+    },
+    {
+      "path": "platform-tools/mke2fs.exe",
+      "bytes": 763544,
+      "sha256": "308304852B1F1A1449E9D9115332AB908B8A54B99F460ED1DF5D109DECEF5BE7"
+    },
+    {
+      "path": "platform-tools/source.properties",
+      "bytes": 38,
+      "sha256": "2DCCD788C0234D8CF7F7457377E57F57527A86A629C6ED54FEB8AF0F549DAC38"
+    },
+    {
+      "path": "platform-tools/sqlite3.exe",
+      "bytes": 3031704,
+      "sha256": "234D9E6C475C6E9BA07498A1AD96A6A32840FBFDC74E50277E1A94CBAC48ABDC"
+    }
+  ]
+}

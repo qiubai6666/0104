@@ -10,6 +10,9 @@ public:
     // 提取所有资源到AppData目录
     static bool extractResources();
 
+    // 显式输出路径用于隔离验证，不触碰用户现有资源目录。
+    static bool extractResources(const QString &targetPath, const QString &neilImagePath);
+
     // 获取资源目录路径
     static QString getResourcePath();
 

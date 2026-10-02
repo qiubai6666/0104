@@ -18,23 +18,30 @@ OugaPreparation::OugaPreparation(QObject *parent) : QObject(parent) {
     m_output += s;
     emit log(s);
   });
-  connect(&m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
-          this, [this](int c, QProcess::ExitStatus status) {
-            auto cb = std::move(m_callback);
-            m_callback = {};
-            if (m_cancel) {
-              end(false, "准备已取消；保留生成的文件，不自动删除");
-              return;
-            }
-            m_output +=
-                QString::fromLocal8Bit(m_process.readAllStandardOutput());
-            m_output +=
-                QString::fromLocal8Bit(m_process.readAllStandardError());
-            if (cb)
-              cb(Ouga::commandSucceeded(c, status == QProcess::NormalExit,
-                                        m_output),
-                 m_output);
-          });
+  connect(
+      &m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+      this, [this](int c, QProcess::ExitStatus status) {
+        auto cb = std::move(m_callback);
+        m_callback = {};
+        if (m_cancel) {
+          end(false, "准备已取消；保留生成的文件，不自动删除");
+          return;
+        }
+        m_output += QString::fromLocal8Bit(m_process.readAllStandardOutput());
+        m_output += QString::fromLocal8Bit(m_process.readAllStandardError());
+        // AOSP lpmake prints valid --help text with exit status 1.
+        // This exception is only for a read-only capability query; actual
+        // generation and device commands keep strict failure handling.
+        const bool lpmakeHelp =
+            c == 1 && m_process.arguments() == QStringList{"--help"} &&
+            m_output.contains("command-line tool for creating Android "
+                              "Logical Partition images.") &&
+            m_output.contains("Usage:");
+        if (cb)
+          cb(Ouga::commandSucceeded(lpmakeHelp ? 0 : c,
+                                    status == QProcess::NormalExit, m_output),
+             m_output);
+      });
   connect(&m_process, &QProcess::errorOccurred, this,
           [this](QProcess::ProcessError e) {
             if (e == QProcess::FailedToStart) {
@@ -369,7 +376,12 @@ void OugaPreparation::makeSuper(const QString &tool, const QString &directory,
                                 dst = QDir(output).filePath(n + ".raw.img");
                         if (!OugaPackage::toRaw(src, dst, allocation[n], &e))
                           return e;
-                        (*args)[i + 1] = n + "=" + dst;
+                        // All files are in the independent output directory.
+                        // Pass validated ASCII basenames to the old tool;
+                        // QProcess supplies its Unicode working directory.
+                        (*args)[i + 1] = n + "=" + QFileInfo(dst).fileName();
+                      } else if (args->at(i) == "--output") {
+                        (*args)[i + 1] = QFileInfo(args->at(i + 1)).fileName();
                       }
                     return QString();
                   },
