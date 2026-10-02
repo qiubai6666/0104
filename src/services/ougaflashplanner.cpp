@@ -1,9 +1,7 @@
 #include "ougaflashplanner.h"
-#include "ougapackage.h"
 #include <QRegularExpression>
 #include <algorithm>
 #include <climits>
-#include <limits>
 using namespace Ouga;
 namespace {
 bool fail(QString *e, const QString &s) {
@@ -18,33 +16,8 @@ struct Builder {
   bool mode = true;
   QMap<QString, QString> written;
   QSet<QString> rebuilt;
-  QString target(const QString &name, const QString &s) {
-    QString b = baseName(name);
-    bool plain = p.device.partitions.contains(b),
-         a = p.device.partitions.contains(b + "_a"),
-         bb = p.device.partitions.contains(b + "_b");
-    QString has = p.device.variables.value("has-slot:" + b);
-    if (plain && (a || bb)) {
-      error = "分区表有槽/无槽映射冲突：" + b;
-      return {};
-    }
-    if (has == "no" && (a || bb)) {
-      error = "has-slot 与分区表冲突：" + b;
-      return {};
-    }
-    if (plain && has != "yes")
-      return b;
-    QString t = b + "_" + s;
-    if ((a || bb || has == "yes") && p.device.partitions.contains(t))
-      return t;
-    error = "实际目标不存在：" + t;
-    return {};
-  }
-  bool logical(const QString &n) {
-    QString b = baseName(n);
-    return logicalName(b) || p.device.logical.contains(b) ||
-           p.device.logical.contains(b + "_a") ||
-           p.device.logical.contains(b + "_b");
+  QString target(const QString &name, const QString &requestedSlot) {
+    return p.device.targetPartition(name, requestedSlot, &error);
   }
   void command(const QString &title, const QStringList &args,
                const QString &target = {}, bool missing = false) {
@@ -76,8 +49,7 @@ struct Builder {
     s.userspace = mode;
     p.steps << s;
   }
-  bool flash(const Partition &img, const QString &s) {
-    QString t = target(img.name, s);
+  bool flashTarget(const Partition &img, const QString &t) {
     if (t.isEmpty())
       return false;
     if (written.contains(t)) {
@@ -90,6 +62,10 @@ struct Builder {
         (!p.device.sizes.contains(t) ||
          quint64(img.expandedBytes) > p.device.sizes[t])) {
       error = "目标容量未知或镜像超容量：" + t;
+      return false;
+    }
+    if (img.expandedBytes > LLONG_MAX - p.totalBytes) {
+      error = "刷写总大小溢出";
       return false;
     }
     Step step;
@@ -106,7 +82,84 @@ struct Builder {
     p.totalBytes += img.expandedBytes;
     return true;
   }
-  bool both(const Partition &p) { return flash(p, "a") && flash(p, "b"); }
+  bool flash(const Partition &image, const QString &requestedSlot) {
+    return flashTarget(image, target(image.name, requestedSlot));
+  }
+  bool both(const Partition &image) {
+    const QString a = target(image.name, "a");
+    if (a.isEmpty())
+      return false;
+    const QString b = target(image.name, "b");
+    return !b.isEmpty() && flashTarget(image, a) &&
+           (a == b || flashTarget(image, b));
+  }
+  bool flashImages(const QVector<Partition> &images,
+                   bool bothPhysical = false) {
+    for (const Partition &image : images)
+      if (!(bothPhysical && !p.device.isLogical(image.name)
+                ? both(image)
+                : flash(image, slot)))
+        return false;
+    return true;
+  }
+  bool flashCritical(const QVector<Partition> &images, const QString &missing) {
+    for (const QString &name : criticalImages(p.device.platform)) {
+      auto image =
+          std::find_if(images.cbegin(), images.cend(), [&](const Partition &i) {
+            return baseName(i.name) == name;
+          });
+      if (image == images.cend()) {
+        error = missing + name;
+        return false;
+      }
+      if (!both(*image))
+        return false;
+    }
+    return true;
+  }
+  bool deferModem() const {
+    return p.options.mode != FlashMode::OnlyFastbootd &&
+           ((p.device.platform == Platform::Qualcomm &&
+             !p.device.partitions.contains("modem")) ||
+            p.options.mode == FlashMode::AfterSalesFastbootd ||
+            (p.options.mode == FlashMode::Force && p.device.slot == "b"));
+  }
+  bool flashDeferredModem(const QVector<Partition> &images) {
+    if (images.isEmpty())
+      return true;
+    if (p.device.platform == Platform::Qualcomm &&
+        !p.device.partitions.contains("modem"))
+      switchMode(false);
+    const bool dual = p.device.platform == Platform::Qualcomm ||
+                      p.options.mode == FlashMode::AfterSalesFastbootd ||
+                      p.options.mode == FlashMode::BothSlots;
+    for (const Partition &image : images)
+      if (!(dual ? both(image) : flash(image, slot)))
+        return false;
+    return true;
+  }
+  bool selectAfterSalesSlot() {
+    quint64 sizes[2] = {0, 0};
+    bool found[2] = {false, false};
+    for (auto it = p.device.sizes.cbegin(); it != p.device.sizes.cend(); ++it) {
+      if (!p.device.isLogical(it.key()) ||
+          (!it.key().endsWith("_a") && !it.key().endsWith("_b")))
+        continue;
+      const int index = it.key().endsWith("_a") ? 0 : 1;
+      if (it.value() > quint64(LLONG_MAX) - sizes[index]) {
+        error = "槽位容量溢出";
+        return false;
+      }
+      sizes[index] += it.value();
+      found[index] = true;
+    }
+    if (!found[0] || !found[1] || (!sizes[0] && !sizes[1])) {
+      error = "无法读取双槽逻辑分区容量，不能猜测启动槽 A";
+      return false;
+    }
+    slot = sizes[0] >= sizes[1] ? "a" : "b";
+    return true;
+  }
   void cow() {
     QStringList names = p.device.partitions.values();
     std::sort(names.begin(), names.end());
@@ -119,8 +172,8 @@ struct Builder {
     quint64 freed = 0, needed = 0;
     QSet<QString> deletes;
     for (const Partition &i : images)
-      if (logical(i.name)) {
-        for (const QString &s : {"a", "b"}) {
+      if (p.device.isLogical(i.name)) {
+        for (const QString s : {"a", "b"}) {
           QString t = target(i.name, s);
           if (t.isEmpty())
             return false;
@@ -149,7 +202,7 @@ struct Builder {
     }
     quint64 used = 0;
     for (auto it = p.device.sizes.cbegin(); it != p.device.sizes.cend(); ++it)
-      if (logical(it.key()) && !deletes.contains(it.key())) {
+      if (p.device.isLogical(it.key()) && !deletes.contains(it.key())) {
         if (it.value() > quint64(LLONG_MAX) - used) {
           error = "逻辑占用容量溢出";
           return false;
@@ -170,7 +223,7 @@ struct Builder {
       command("删除逻辑分区（不可逆） " + t, {"delete-logical-partition", t}, t,
               true);
     for (const Partition &i : images)
-      if (logical(i.name)) {
+      if (p.device.isLogical(i.name)) {
         QString t = target(i.name, slot);
         command("重建逻辑分区 " + t,
                 {"create-logical-partition", t,
@@ -182,7 +235,7 @@ struct Builder {
   bool finish() {
     switchMode(true);
     if (p.options.clearData) {
-      for (const QString &n : {"userdata", "metadata"}) {
+      for (const QString n : {"userdata", "metadata"}) {
         if (!p.device.partitions.contains(n) || !p.device.sizes.contains(n)) {
           error = "清除数据目标不存在或容量未知：" + n;
           return false;
@@ -206,6 +259,18 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
   if (!out)
     return fail(error, "缺少计划输出");
   *out = Plan();
+  switch (options.mode) {
+  case FlashMode::Normal:
+  case FlashMode::BothSlots:
+  case FlashMode::Force:
+  case FlashMode::OnlyFastbootd:
+  case FlashMode::RepairFastbootd:
+  case FlashMode::AfterSalesBootloader:
+  case FlashMode::AfterSalesFastbootd:
+    break;
+  default:
+    return fail(error, "未知刷写模式");
+  }
   Builder b;
   b.p.device = d;
   b.p.options = options;
@@ -217,8 +282,8 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     return fail(error, "必须绑定有效序列号");
   if (!d.modeKnown || !d.unlockKnown || !d.unlocked)
     return fail(error, "设备模式/解锁状态未知或设备未解锁");
-  if (d.platform == Platform::Unknown || d.product.isEmpty() ||
-      (d.slot != "a" && d.slot != "b"))
+  if ((d.platform != Platform::Qualcomm && d.platform != Platform::MediaTek) ||
+      d.product.isEmpty() || (d.slot != "a" && d.slot != "b"))
     return fail(error, "平台、机型或当前槽位未知");
   Platform package = options.packagePlatform;
   bool xbl = false, lk = false;
@@ -242,13 +307,14 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
        af = options.mode == FlashMode::AfterSalesBootloader,
        ab = options.mode == FlashMode::BothSlots,
        force = options.mode == FlashMode::Force,
-       only = options.mode == FlashMode::OnlyFastbootd,
-       afterD = options.mode == FlashMode::AfterSalesFastbootd;
-  if ((repair || af) && !options.afterSuper && d.userspace)
+       only = options.mode == FlashMode::OnlyFastbootd;
+  if (options.afterSuper && !af)
+    return fail(error, "Super 检查点只能用于售后 Fastboot");
+  if (!startsInFastbootd(options.mode) && d.userspace)
     return fail(
         error,
         "该操作需要普通 Fastboot，请先明确执行准备模式切换并重新读取设备");
-  if (!(repair || af) && !d.userspace)
+  if (startsInFastbootd(options.mode) && !d.userspace)
     return fail(error, "请先准备 FastbootD 模式并重新读取完整分区表");
   if (only && (d.platform != Platform::Qualcomm || !d.userspace))
     return fail(error, "仅 FBD 只允许已在 FastbootD 的高通设备");
@@ -267,8 +333,7 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     if (!i.selected)
       continue;
     QString n = baseName(i.name);
-    if (!safeName(n) || n == "frp" || n == "misc" || n == "userdata" ||
-        n == "metadata")
+    if (!safeName(n) || blockedImageName(n))
       return fail(error, "不允许刷写该目标：" + n);
     if (names.contains(n))
       return fail(error, "重复归一化分区：" + n);
@@ -296,18 +361,13 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     b.slot = "a";
   if (only)
     b.slot = d.slot == "a" ? "b" : "a";
-  if (ab || force || only)
-    for (const QString &n : {"my_company", "my_preload"})
+  if (needsAdditionalImages(options.mode))
+    for (const QString n : {"my_company", "my_preload"})
       if (!names.contains(n))
         return fail(error, "此模式必须明确提供并选择匹配的 " + n + ".img");
   if (repair) {
-    QStringList required = OugaPackage::repairNames(d.platform);
-    for (const QString &n : required)
-      if (!names.contains(n))
-        return fail(error, "修复 FastbootD 缺失必要镜像：" + n);
-    for (const Partition &i : ps)
-      if (required.contains(baseName(i.name)) && !b.both(i))
-        return fail(error, b.error);
+    if (!b.flashCritical(ps, "修复 FastbootD 缺失必要镜像："))
+      return fail(error, b.error);
     b.switchMode(true);
     b.p.options.clearData = false;
     b.p.options.autoReboot = false;
@@ -325,6 +385,8 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     Plan tail;
     if (!build(images, d, cont, &tail, error))
       return false;
+    if (b.target("super", d.slot) != "super")
+      return fail(error, "售后 Super 阶段需要已确认存在的无槽 super 分区");
     b.command("擦除 Super（不可逆）", {"erase", "super"}, "super");
     if (!b.flash(*super, d.slot))
       return fail(error, b.error);
@@ -335,6 +397,8 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     checkpoint.userspace = false;
     b.p.steps << checkpoint;
     b.p.steps += tail.steps;
+    if (tail.totalBytes > LLONG_MAX - b.p.totalBytes)
+      return fail(error, "刷写总大小溢出");
     b.p.totalBytes += tail.totalBytes;
     b.p.flashCount += tail.flashCount;
     b.slot = tail.options.targetSlot;
@@ -348,97 +412,68 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
           merged.unite(i.merged);
       if (merged.isEmpty())
         return fail(error, "缺少 Super 合并清单");
-      quint64 a = 0, bb = 0;
-      bool foundA = false, foundB = false;
-      for (auto it = d.sizes.cbegin(); it != d.sizes.cend(); ++it)
-        if (b.logical(it.key())) {
-          if (it.key().endsWith("_a")) {
-            if (it.value() > quint64(LLONG_MAX) - a)
-              return fail(error, "槽位容量溢出");
-            a += it.value();
-            foundA = true;
-          } else if (it.key().endsWith("_b")) {
-            if (it.value() > quint64(LLONG_MAX) - bb)
-              return fail(error, "槽位容量溢出");
-            bb += it.value();
-            foundB = true;
-          }
-        }
-      if (!foundA || !foundB || (!a && !bb))
-        return fail(error, "无法读取双槽逻辑分区容量，不能猜测启动槽 A");
-      b.slot = a >= bb ? "a" : "b";
-      QStringList critical = OugaPackage::repairNames(d.platform);
-      for (const QString &n : critical)
-        if (!names.contains(n))
-          return fail(error, "售后关键镜像缺失：" + n);
-      for (const Partition &i : ps)
-        if (critical.contains(baseName(i.name)) && !b.both(i))
-          return fail(error, b.error);
+      if (!b.selectAfterSalesSlot() ||
+          !b.flashCritical(ps, "售后关键镜像缺失："))
+        return fail(error, b.error);
       b.switchMode(true);
     }
     QVector<Partition> active;
-    for (const Partition &i : ps)
-      if (baseName(i.name) != "super" && !merged.contains(baseName(i.name)))
-        active << i;
+    const QStringList critical =
+        af ? criticalImages(d.platform) : QStringList();
+    for (const Partition &image : ps) {
+      const QString name = baseName(image.name);
+      if (name != "super" && !merged.contains(name) && !critical.contains(name))
+        active << image;
+    }
     if (!af && names.contains("super"))
       return fail(error, "Super 只能在售后 Fastboot 专用阶段刷写");
+    // Match the reference's small-image-first order without consulting files.
+    // Required additional images stay first; only inspected manifest data is
+    // used.
+    const bool additional = needsAdditionalImages(options.mode);
+    std::sort(active.begin(), active.end(),
+              [additional](const Partition &a, const Partition &b) {
+                const QString an = baseName(a.name), bn = baseName(b.name);
+                const auto extra = [](const QString &name) {
+                  return name == "my_company" || name == "my_preload";
+                };
+                if (additional && extra(an) != extra(bn))
+                  return extra(an);
+                if (a.bytes != b.bytes)
+                  return a.bytes < b.bytes;
+                return an < bn;
+              });
+    const bool preSwitch = force && d.slot == "b";
+    QVector<Partition> early, normal, modem;
+    for (const Partition &image : active) {
+      if (baseName(image.name) == "modem" && b.deferModem())
+        modem << image;
+      else if (preSwitch && !d.isLogical(image.name))
+        early << image;
+      else
+        normal << image;
+    }
     if (only)
       b.wait(5000, "仅 FBD：切槽前 5 秒倒计时，可请求停止");
-    if (force && d.slot == "b") {
+    if (preSwitch) {
       b.cow();
-      for (const Partition &i : active)
-        if (!b.logical(i.name) && baseName(i.name) != "modem" &&
-            !b.flash(i, "a"))
-          return fail(error, b.error);
+      if (!b.flashImages(early))
+        return fail(error, b.error);
     }
-    bool rebuild = force || only || (ab && b.slot != d.slot);
+    const bool rebuild = force || only || (ab && b.slot != d.slot);
     if (b.slot != d.slot && (rebuild || af))
       b.command("切换活动槽（不可逆） " + b.slot, {"set_active", b.slot},
                 b.slot);
     if (rebuild && !b.rebuild(active))
       return fail(error, b.error);
-    if (!(force && d.slot == "b"))
+    if (!preSwitch)
       b.cow();
-    // The additional images are part of the same validated manifest, but
-    // deliberately first.
-    std::stable_sort(active.begin(), active.end(),
-                     [](const Partition &a, const Partition &bb) {
-                       auto rank = [](const Partition &p) {
-                         QString n = baseName(p.name);
-                         return n == "my_company" || n == "my_preload" ? 0 : 1;
-                       };
-                       return rank(a) < rank(bb);
-                     });
-    for (const Partition &i : active) {
-      QString n = baseName(i.name);
-      if (n == "modem" && !only &&
-          ((d.platform == Platform::Qualcomm &&
-            !d.partitions.contains("modem")) ||
-           afterD))
-        continue;
-      if (ab && !b.logical(n)) {
-        if (!b.both(i))
-          return fail(error, b.error);
-      } else if (!b.flash(i, b.slot))
-        return fail(error, b.error);
-    }
-    if (!only)
-      for (const Partition &i : active)
-        if (baseName(i.name) == "modem" && !b.written.contains("modem")) {
-          if (d.platform == Platform::Qualcomm &&
-              !d.partitions.contains("modem"))
-            b.switchMode(false);
-          if (d.platform == Platform::Qualcomm || afterD || ab) {
-            if (!b.both(i))
-              return fail(error, b.error);
-          } else if (!b.flash(i, b.slot))
-            return fail(error, b.error);
-        }
+    if (!b.flashImages(normal, ab) || !b.flashDeferredModem(modem))
+      return fail(error, b.error);
     if (!b.finish())
       return fail(error, b.error);
   }
   b.p.options.targetSlot = b.slot;
-  b.p.partitionCount = ps.size();
   b.p.summary =
       QString(
           "序列号 %1 | 机型 %2 | %3 | 当前槽 %4 → 最终槽 %5 | %6 次刷写 | %7")

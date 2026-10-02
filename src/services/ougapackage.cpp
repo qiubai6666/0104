@@ -45,12 +45,6 @@ quint64 number(const QJsonValue &v, bool *ok) {
   s.remove('_');
   return s.toULongLong(ok, s.startsWith("0x") ? 16 : 10);
 }
-bool forbidden(const QString &n) {
-  QString b = Ouga::baseName(n);
-  return b == "frp" || b == "misc" || b == "userdata" || b == "metadata" ||
-         b == "super_empty" || b == "payload" || b.contains("gpt") ||
-         b.startsWith("prog_");
-}
 struct Field {
   int n = 0, wire = 0;
   quint64 value = 0;
@@ -181,8 +175,11 @@ qint64 OugaPackage::expandedSize(const QString &file, QString *error) {
 
 bool OugaPackage::inspect(const QString &name, const QString &file,
                           Ouga::Partition *p, QString *error) {
-  if (!Ouga::safeName(name) || forbidden(name))
+  if (!Ouga::safeName(name) || Ouga::blockedImageName(name))
     return fail(error, "禁止或无法确定用途的分区：" + name);
+  const QFileInfo source(file);
+  if (source.isSymLink() || source.isJunction())
+    return fail(error, "不接受镜像链接或目录联接");
   p->name = name.toLower();
   p->path = QFileInfo(file).canonicalFilePath();
   p->bytes = QFileInfo(file).size();
@@ -206,7 +203,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
     return {};
   }
   QStringList dirs = {root.absolutePath()};
-  for (const QString &n : {"images", "IMAGES", "RADIO"}) {
+  for (const QString n : {"images", "IMAGES", "RADIO"}) {
     QString d = root.filePath(n);
     if (QDir(d).exists() && !dirs.contains(d, Qt::CaseInsensitive))
       dirs << d;
@@ -214,7 +211,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
   QMap<QString, QString> files;
   QSet<QString> usedFiles;
   auto add = [&](const QString &name, const QString &file) {
-    if (forbidden(name))
+    if (Ouga::blockedImageName(name))
       return true;
     if (!Ouga::safeName(name) || !inside(directory, file))
       return fail(error, "映射名称或路径越界：" + name + " / " + file);
@@ -249,7 +246,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
         auto a = r.attributes();
         QString n = a.value("label").toString().toLower(),
                 rel = a.value("filename").toString();
-        if (rel.isEmpty() || forbidden(n))
+        if (rel.isEmpty() || Ouga::blockedImageName(n))
           continue;
         bool ok = true;
         QString off = a.value("file_sector_offset").toString();
@@ -298,7 +295,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
     }
     // SMT's eight named after-sales directories: never arbitrarily pick a
     // candidate.
-    for (const QString &n :
+    for (const QString n :
          {"my_bigball", "my_carrier", "my_company", "my_heytap", "my_manifest",
           "my_preload", "my_region", "my_stock"}) {
       QDir sub(QDir(d).filePath(n));
@@ -327,15 +324,6 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
 QString OugaPackage::findPayload(const QString &directory) {
   QString p = QDir(directory).filePath("payload.bin");
   return QFileInfo(p).isFile() ? p : QString();
-}
-QStringList OugaPackage::repairNames(Ouga::Platform p) {
-  QStringList n = {"boot",        "init_boot",     "dtbo",         "vbmeta",
-                   "vendor_boot", "vbmeta_system", "vbmeta_vendor"};
-  if (p == Ouga::Platform::MediaTek)
-    n << "lk";
-  else
-    n << "modem" << "recovery";
-  return n;
 }
 QStringList OugaPackage::parsePayloadList(const QString &out) {
   QStringList names;
@@ -642,8 +630,7 @@ bool OugaPackage::lpmakeArguments(const QString &directory,
       return fail(error, "Super 分区定义冲突：" + n);
     QStringList candidates;
     if (!rel.isEmpty()) {
-      for (const QString &dir :
-           {directory, QFileInfo(defs[0]).absolutePath()}) {
+      for (const QString &dir : {directory, QFileInfo(defs[0]).absolutePath()}) {
         QString file = QDir(dir).filePath(rel);
         if (inside(directory, file) && QFileInfo(file).isFile() &&
             !candidates.contains(QFileInfo(file).canonicalFilePath()))

@@ -12,35 +12,29 @@
 #include <QSaveFile>
 #include <QUuid>
 #include <QtConcurrent>
-#include <algorithm>
 using namespace Ouga;
-namespace {
-QString signature(const Device &d) {
-  QString s = d.serial + "|" + d.product + "|" + d.slot + "|" +
-              QString::number(int(d.platform)) + "|" +
-              QString::number(d.userspace) + "|" + QString::number(d.unlocked);
-  QStringList logical = d.logical.values();
-  std::sort(logical.begin(), logical.end());
-  s += "|" + logical.join(",");
-  s += "|" + QString::number(d.unlockKnown);
-  for (auto i = d.sizes.cbegin(); i != d.sizes.cend(); ++i)
-    s += '|' + i.key() + ':' + QString::number(i.value());
-  return s;
-}
-} // namespace
 OugaFlashService::OugaFlashService(OugaCommandRunner *runner, QObject *parent)
     : QObject(parent), m_runner(runner) {
   Q_ASSERT(runner);
   m_wait.setSingleShot(true);
   connect(runner, &OugaCommandRunner::output, this,
-          &OugaFlashService::writeLog);
+          [this](const QString &text) {
+            m_streamedOutput += text;
+            writeLog(text);
+          });
   connect(runner, &OugaCommandRunner::stalled, this, [this] {
     writeLog("命令长时间无响应。请勿拔线；等待人工处理。程序不会强制杀死正在写"
              "入的进程。");
   });
   connect(runner, &OugaCommandRunner::completed, this,
           [this](int c, bool n, const QString &out) {
-            writeLog(out);
+            // A runner may stream output, return it only at completion, or
+            // both. Persist the final unread suffix instead of logging every
+            // command twice.
+            writeLog(out.startsWith(m_streamedOutput)
+                         ? out.mid(m_streamedOutput.size())
+                         : out);
+            m_streamedOutput.clear();
             auto cb = std::move(m_callback);
             m_callback = {};
             if (cb)
@@ -72,22 +66,33 @@ void OugaFlashService::finish(bool success, const QString &message) {
   ++m_generation;
   m_wait.stop();
   m_modeClock.invalidate();
-  writeLog((success ? "完成：" : "已停止/失败：") + message);
   success = success && !m_stop;
+  writeLog((success ? "完成：" : "已停止/失败：") + message);
+  QString finalMessage = message;
+  if (success && m_stop) {
+    success = false;
+    finalMessage = "日志保存失败或结束前收到停止请求；请保留本次日志排错。";
+  }
   if (m_log.isOpen()) {
+    // Final durability is part of success, not an after-the-fact warning.
+    if (!m_log.flush()) {
+      success = false;
+      finalMessage = "无法持久保存最终命令日志；请保留本次日志排错。";
+      emit log(finalMessage);
+    }
     QSaveFile result(QDir(m_logDir).filePath("result.json"));
     QJsonObject record{{"success", success},
-                       {"message", message},
+                       {"message", finalMessage},
                        {"completedWrites", m_completed},
                        {"totalWrites", m_plan.flashCount},
                        {"timestamp", QDateTime::currentDateTime().toString(
                                          Qt::ISODateWithMs)}};
-    QByteArray data = QJsonDocument(record).toJson();
+    const QByteArray data = QJsonDocument(record).toJson();
     if (!result.open(QIODevice::WriteOnly) ||
-        result.write(data) != data.size() || !result.commit() ||
-        !m_log.flush()) {
+        result.write(data) != data.size() || !result.commit()) {
       success = false;
-      emit log("无法持久保存最终结果；请保留本次日志排错。");
+      finalMessage = "无法持久保存最终结果；请保留本次日志排错。";
+      emit log(finalMessage);
     }
     m_log.close();
     if (success)
@@ -98,7 +103,7 @@ void OugaFlashService::finish(bool success, const QString &message) {
   m_callback = {};
   DeviceOperationLease::release(this);
   emit busyChanged(false);
-  emit finished(success, message);
+  emit finished(success, finalMessage);
 }
 void OugaFlashService::writeLog(const QString &text) {
   if (text.isEmpty())
@@ -130,6 +135,7 @@ void OugaFlashService::command(
     a << "-s" << m_serial;
   }
   a += args;
+  m_streamedOutput.clear();
   m_callback = std::move(cb);
   writeLog("命令：" + m_tool + " " + a.join(' '));
   if (m_stop) {
@@ -228,7 +234,6 @@ void OugaFlashService::probeStable(bool userspace,
                                    std::function<void(const Device &)> ready) {
   m_expectedMode = userspace;
   m_stable = 0;
-  m_lastSignature.clear();
   m_modeClock.start();
   m_stableClock.invalidate();
   pollStable(std::move(ready));
@@ -248,11 +253,11 @@ void OugaFlashService::pollStable(std::function<void(const Device &)> ready) {
                       d.variables.value("serialno") == m_serial;
     if (commandSucceeded(c, n, out) && d.modeKnown &&
         d.userspace == m_expectedMode && sameSerial) {
-      QString sig = signature(d);
-      if (sig != m_lastSignature || !m_stableClock.isValid() ||
+      if (m_stable == 0 || !d.sameSnapshot(m_lastSnapshot) ||
+          !m_stableClock.isValid() ||
           m_stableClock.elapsed() > m_timing.stableWindowMs) {
         m_stable = 0;
-        m_lastSignature = sig;
+        m_lastSnapshot = d;
         m_stableClock.start();
       }
       if (++m_stable >= m_timing.stableSamples) {
@@ -262,7 +267,6 @@ void OugaFlashService::pollStable(std::function<void(const Device &)> ready) {
       }
     } else {
       m_stable = 0;
-      m_lastSignature.clear();
     }
     const quint64 generation = m_generation;
     QTimer::singleShot(m_timing.pollMs, this, [this, ready, generation] {
@@ -312,34 +316,52 @@ bool OugaFlashService::savePlan(const Plan &p) {
   QByteArray data = QJsonDocument(obj).toJson();
   return f.write(data) == data.size() && f.flush();
 }
-void OugaFlashService::verifyImages(std::function<void()> ready) {
+void OugaFlashService::checkAsync(std::function<QString()> check,
+                                  std::function<void()> ready) {
+  const quint64 generation = m_generation;
   auto *watch = new QFutureWatcher<QString>(this);
-  auto images = m_plan.images;
   connect(watch, &QFutureWatcher<QString>::finished, this,
-          [this, watch, ready] {
-            QString error = watch->result();
+          [this, watch, ready, generation] {
+            const QString error = watch->result();
             watch->deleteLater();
-            if (!error.isEmpty()) {
-              finish(false, error);
+            if (!m_busy || generation != m_generation)
               return;
-            }
-            if (m_stop) {
-              finish(false, "镜像复检后停止");
+            if (!error.isEmpty() || m_stop) {
+              finish(false, m_stop ? "镜像复检后停止" : error);
               return;
             }
             ready();
           });
-  watch->setFuture(QtConcurrent::run([images] {
-    for (const Partition &i : images) {
-      if (!i.selected)
-        continue;
-      QString e;
-      if (OugaPackage::expandedSize(i.path, &e) != i.expandedBytes ||
-          OugaPackage::digest(i.path, &e) != i.sha256)
-        return QString("镜像自预览后已变更或不可读：") + i.path;
-    }
-    return QString();
-  }));
+  watch->setFuture(QtConcurrent::run(std::move(check)));
+}
+void OugaFlashService::verifyImages(std::function<void()> ready) {
+  const auto images = m_plan.images;
+  checkAsync(
+      [images] {
+        for (const Partition &image : images) {
+          if (!image.selected)
+            continue;
+          QString error;
+          if (OugaPackage::expandedSize(image.path, &error) !=
+                  image.expandedBytes ||
+              OugaPackage::digest(image.path, &error) != image.sha256)
+            return QString("镜像自预览后已变更或不可读：") + image.path;
+        }
+        return QString();
+      },
+      std::move(ready));
+}
+void OugaFlashService::validateAndResume() {
+  verifyImages([this] {
+    probeStable(m_expected.userspace, [this](const Device &device) {
+      QString error;
+      if (!compatible(device, true, &error)) {
+        finish(false, error);
+        return;
+      }
+      next();
+    });
+  });
 }
 bool OugaFlashService::compatible(const Device &d, bool initial,
                                   QString *e) const {
@@ -356,9 +378,7 @@ bool OugaFlashService::compatible(const Device &d, bool initial,
     return false;
   }
   if (initial &&
-      (d.sizes != m_expected.sizes || d.partitions != m_expected.partitions ||
-       d.logical != m_expected.logical ||
-       d.userspace != m_expected.userspace)) {
+      (!d.sameLayout(m_expected) || d.userspace != m_expected.userspace)) {
     *e = "设备表自预览后改变，请重新生成计划";
     return false;
   }
@@ -378,13 +398,10 @@ void OugaFlashService::execute(const Plan &plan) {
   if (plan.options.clearData &&
       plan.options.mode != FlashMode::RepairFastbootd &&
       plan.device.platform == Platform::Qualcomm) {
-    const QDir toolDirectory(QFileInfo(m_tool).absolutePath());
-    for (const QString &name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"}) {
-      QFileInfo file(toolDirectory.filePath(name));
-      if (!file.isFile() || !file.isReadable() || file.size() == 0) {
-        finish(false, "格式化依赖缺失/不可读：" + name);
-        return;
-      }
+    const QString dependencyError = OugaProcessRunner::formatToolsError(m_tool);
+    if (!dependencyError.isEmpty()) {
+      finish(false, dependencyError);
+      return;
     }
   }
   m_plan = plan;
@@ -408,16 +425,7 @@ void OugaFlashService::execute(const Plan &plan) {
     return;
   }
   writeLog("日志目录：" + m_logDir);
-  verifyImages([this] {
-    probeStable(m_expected.userspace, [this](const Device &d) {
-      QString e;
-      if (!compatible(d, true, &e)) {
-        finish(false, e);
-        return;
-      }
-      next();
-    });
-  });
+  validateAndResume();
 }
 void OugaFlashService::requestStop() {
   if (!m_busy)
@@ -443,16 +451,7 @@ void OugaFlashService::confirmCheckpoint(bool proceed) {
     finish(false, "无法持久保存检查点计划");
     return;
   }
-  verifyImages([this] {
-    probeStable(m_expected.userspace, [this](const Device &d) {
-      QString error;
-      if (!compatible(d, true, &error)) {
-        finish(false, error);
-        return;
-      }
-      next();
-    });
-  });
+  validateAndResume();
 }
 void OugaFlashService::next() {
   if (!m_busy || m_paused)
@@ -549,26 +548,19 @@ void OugaFlashService::next() {
     run();
     return;
   }
-  auto *watch = new QFutureWatcher<QString>(this);
-  connect(watch, &QFutureWatcher<QString>::finished, this,
-          [this, watch, s, run] {
-            QString error = watch->result();
-            watch->deleteLater();
-            if (!error.isEmpty()) {
-              finish(false, error);
-              return;
-            }
-            if (!m_expected.sizes.contains(s.target) ||
-                quint64(s.bytes) > m_expected.sizes[s.target]) {
-              finish(false, "实际目标容量变化：" + s.target);
-              return;
-            }
-            run();
-          });
-  watch->setFuture(QtConcurrent::run([s] {
-    QString e;
-    if (OugaPackage::digest(s.image, &e) != s.sha256)
-      return QString("镜像在执行期间改变：") + s.image;
-    return QString();
-  }));
+  checkAsync(
+      [s] {
+        QString error;
+        if (OugaPackage::digest(s.image, &error) != s.sha256)
+          return QString("镜像在执行期间改变：") + s.image;
+        return QString();
+      },
+      [this, s, run] {
+        if (!m_expected.sizes.contains(s.target) ||
+            quint64(s.bytes) > m_expected.sizes[s.target]) {
+          finish(false, "实际目标容量变化：" + s.target);
+          return;
+        }
+        run();
+      });
 }

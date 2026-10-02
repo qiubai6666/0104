@@ -8,7 +8,6 @@
 #include <QStringList>
 #include <QVector>
 namespace Ouga {
-enum class PackageMode { Full, AfterSales };
 enum class FlashMode {
   Normal,
   BothSlots,
@@ -27,12 +26,11 @@ struct Partition {
   QSet<QString> merged;
 };
 struct Options {
-  PackageMode packageMode = PackageMode::Full;
   FlashMode mode = FlashMode::Normal;
   bool clearData = true, autoReboot = true, validateTable = true;
-  QString targetSlot, currentXblConfig;
+  QString targetSlot;
   Platform packagePlatform = Platform::Unknown;
-  bool checkArb = false, arbVerified = false, arbDowngrade = false;
+  bool arbVerified = false, arbDowngrade = false;
   bool formatToolsReady = false;
   bool afterSuper =
       false; // Internal checkpoint continuation, not a user setting.
@@ -45,6 +43,12 @@ struct Device {
   QMap<QString, QString> variables;
   QMap<QString, quint64> sizes;
   QSet<QString> partitions, logical;
+
+  QString targetPartition(const QString &name, const QString &requestedSlot,
+                          QString *error = nullptr) const;
+  bool isLogical(const QString &name) const;
+  bool sameLayout(const Device &other) const;
+  bool sameSnapshot(const Device &other) const;
 };
 struct Step {
   enum Kind { Command, ModeSwitch, Wait, Checkpoint };
@@ -65,11 +69,15 @@ struct Plan {
   QStringList warnings;
   QString summary;
   qint64 totalBytes = 0;
-  int partitionCount = 0, flashCount = 0;
+  int flashCount = 0;
 };
 QString baseName(const QString &name);
 bool safeName(const QString &name);
 bool logicalName(const QString &name);
+bool blockedImageName(const QString &name);
+QStringList criticalImages(Platform platform);
+bool needsAdditionalImages(FlashMode mode);
+bool startsInFastbootd(FlashMode mode);
 QString sizeText(qint64 bytes);
 Device parseDevice(const QString &serial, const QString &output);
 bool commandSucceeded(int code, bool normalExit, const QString &output);

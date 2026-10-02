@@ -35,6 +35,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <thread>
 using namespace Ouga;
@@ -181,14 +182,14 @@ Device fixtureDevice(Platform platform = Platform::Qualcomm,
       "vendor",        "my_company",
       "my_preload",    platform == Platform::Qualcomm ? "xbl" : "lk"};
   for (const auto &n : names)
-    for (const QString &s : {"a", "b"}) {
+    for (const QString s : {"a", "b"}) {
       QString t = n + "_" + s;
       d.partitions.insert(t);
       d.sizes[t] = 1024 * 1024;
       if (logicalName(n))
         d.logical.insert(t);
     }
-  for (const QString &n :
+  for (const QString n :
        {"persist", "userdata", "metadata", "super", "system_a-cow"}) {
     d.partitions.insert(n);
     d.sizes[n] = n == "super" ? 64 * 1024 * 1024 : 1024 * 1024;
@@ -210,6 +211,9 @@ QString dump(const Device &d) {
            QString::number(i.value(), 16) + "\n";
   for (const auto &n : d.logical)
     out += "(bootloader) is-logical:" + n + ": yes\n";
+  for (auto i = d.variables.cbegin(); i != d.variables.cend(); ++i)
+    if (i.key().startsWith("has-slot:"))
+      out += "(bootloader) " + i.key() + ": " + i.value() + "\n";
   return out + "Finished. Total time: 0.001s\n";
 }
 QStringList commands(const Plan &p) {
@@ -228,6 +232,9 @@ public:
   bool normal = true, holdFlash = false, stuckMode = false,
        disconnected = false, multipleDevices = true;
   std::function<void(const QStringList &)> after;
+  std::function<void(Device &, int)> beforeProbe;
+  int probes = 0, outputStyle = 0;
+  bool markedOutput = false;
   bool active = false;
   void run(const QString &, const QStringList &args, int) override {
     Q_ASSERT(!active);
@@ -247,6 +254,9 @@ public:
         return;
       }
       if (a.value(0) == "getvar") {
+        ++probes;
+        if (beforeProbe)
+          beforeProbe(device, probes);
         complete(disconnected ? 1 : 0, true,
                  disconnected ? "FAILED transport disconnected" : dump(device));
         return;
@@ -278,7 +288,15 @@ public:
   }
   void complete(int c, bool n, const QString &out) {
     active = false;
-    emit completed(c, n, out);
+    const QString prefix = "OUTPUT-ONE\nOUTPUT-TWO\n";
+    const QString text = markedOutput ? prefix + out + "\nOUTPUT-TAIL\n" : out;
+    if (outputStyle == 1)
+      emit output(text);
+    else if (outputStyle == 2) {
+      emit output("OUTPUT-ONE\n");
+      emit output("OUTPUT-TWO\n");
+    }
+    emit completed(c, n, text);
   }
   bool running() const override { return active; }
 };
@@ -308,7 +326,7 @@ class OugaTests : public QObject {
   }
   QVector<Partition> images() {
     QVector<Partition> ps;
-    for (const QString &n :
+    for (const QString n :
          {"boot", "system", "my_company", "my_preload", "modem", "persist"})
       ps << image(n);
     return ps;
@@ -455,9 +473,8 @@ private slots:
     QTest::addColumn<QString>("entry");
     QTest::addColumn<bool>("ok");
     QTest::newRow("safe") << "Path = IMAGES/boot.img\nAttributes = A\n" << true;
-    for (const QString &p :
-         {"../escape", "C:/boot.img", "/root", "dir/NUL.img", "boot.img:stream",
-          "dir/file. ", "dir/../boot.img"})
+    for (const QString p : {"../escape", "C:/boot.img", "/root", "dir/NUL.img",
+                            "boot.img:stream", "dir/file. ", "dir/../boot.img"})
       QTest::newRow(qPrintable(p)) << "Path = " + p + "\n" << false;
     QTest::newRow("symlink") << "Path = alias\nSymbolic Link = ../elsewhere\n"
                              << false;
@@ -574,7 +591,7 @@ private slots:
     if (m == FlashMode::RepairFastbootd ||
         m == FlashMode::AfterSalesBootloader) {
       ps.clear();
-      for (const auto &n : OugaPackage::repairNames(pf))
+      for (const auto &n : criticalImages(pf))
         ps << image(n);
       if (m == FlashMode::AfterSalesBootloader) {
         ps << image("system");
@@ -603,7 +620,7 @@ private slots:
         std::accumulate(p.steps.cbegin(), p.steps.cend(), qint64(0),
                         [](qint64 v, const Step &s) { return v + s.bytes; }));
     if (m == FlashMode::RepairFastbootd) {
-      QCOMPARE(writes, OugaPackage::repairNames(pf).size() * 2);
+      QCOMPARE(writes, criticalImages(pf).size() * 2);
       QVERIFY(!p.options.clearData);
       QVERIFY(!p.options.autoReboot);
       QVERIFY(p.steps.last().kind == Step::ModeSwitch);
@@ -654,6 +671,209 @@ private slots:
       for (const auto &c : cmds)
         QVERIFY(!c.startsWith("set_active") &&
                 !c.startsWith("create-logical-partition"));
+  }
+  void targetRouting_data() {
+    QTest::addColumn<QStringList>("partitions");
+    QTest::addColumn<QString>("hasSlot");
+    QTest::addColumn<QString>("source");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<QString>("target");
+    const QStringList dual = {"boot_a", "boot_b"};
+    QTest::newRow("source-b-to-a")
+        << dual << "yes" << "BOOT_B.IMG" << "a" << "boot_a";
+    QTest::newRow("source-a-to-b")
+        << dual << "" << "boot_a.bin" << "b" << "boot_b";
+    QTest::newRow("slotless-once") << QStringList{"persist"} << "no"
+                                   << "persist_b.img" << "b" << "persist";
+    QTest::newRow("one-present-slot")
+        << QStringList{"boot_a"} << "yes" << "boot" << "a" << "boot_a";
+    QTest::newRow("missing-other-slot")
+        << QStringList{"boot_a"} << "yes" << "boot" << "b" << "";
+    QTest::newRow("mixed-table")
+        << QStringList{"boot", "boot_a", "boot_b"} << "" << "boot" << "a" << "";
+    QTest::newRow("slotless-with-yes")
+        << QStringList{"boot"} << "yes" << "boot" << "a" << "";
+    QTest::newRow("slotted-with-no") << dual << "no" << "boot" << "a" << "";
+    QTest::newRow("unknown-has-slot")
+        << dual << "unknown" << "boot" << "a" << "";
+    QTest::newRow("missing-target")
+        << QStringList{} << "" << "boot" << "a" << "";
+    QTest::newRow("invalid-slot") << dual << "yes" << "boot" << "c" << "";
+    QTest::newRow("unsafe-name") << dual << "yes" << "../boot.img" << "a" << "";
+  }
+  void targetRouting() {
+    QFETCH(QStringList, partitions);
+    QFETCH(QString, hasSlot);
+    QFETCH(QString, source);
+    QFETCH(QString, slot);
+    QFETCH(QString, target);
+    Device device;
+    for (const QString &name : partitions)
+      device.partitions.insert(name);
+    if (!hasSlot.isEmpty())
+      device.variables["has-slot:" + baseName(source)] = hasSlot;
+    QString error = "stale";
+    QCOMPARE(device.targetPartition(source, slot, &error), target);
+    QCOMPARE(error.isEmpty(), !target.isEmpty());
+  }
+  void sharedRules() {
+    QCOMPARE(
+        criticalImages(Platform::Qualcomm),
+        QStringList({"boot", "init_boot", "dtbo", "vbmeta", "vendor_boot",
+                     "vbmeta_system", "vbmeta_vendor", "modem", "recovery"}));
+    QCOMPARE(criticalImages(Platform::MediaTek),
+             QStringList({"boot", "init_boot", "dtbo", "vbmeta", "vendor_boot",
+                          "vbmeta_system", "vbmeta_vendor", "lk"}));
+    QVERIFY(criticalImages(Platform::Unknown).isEmpty());
+    QVERIFY(criticalImages(Platform(99)).isEmpty());
+    for (int i = 0; i <= 6; ++i) {
+      const FlashMode mode = FlashMode(i);
+      QCOMPARE(needsAdditionalImages(mode), i == 1 || i == 2 || i == 3);
+      QCOMPARE(startsInFastbootd(mode), i != 4 && i != 5);
+    }
+    for (const QString name :
+         {"frp.img", "misc_b.img", "USERDATA_A", "metadata", "super_empty",
+          "payload.bin", "gpt_backup", "prog_firehose"})
+      QVERIFY2(blockedImageName(name), qPrintable(name));
+    for (const QString name : {"boot", "modem", "modem_backup", "my_custom"})
+      QVERIFY2(!blockedImageName(name), qPrintable(name));
+  }
+  void snapshotRules() {
+    const Device original = fixtureDevice();
+    Device changed = original;
+    QVERIFY(original.sameLayout(changed));
+    QVERIFY(original.sameSnapshot(changed));
+    changed.variables["version-bootloader"] = "transient-version";
+    QVERIFY(original.sameSnapshot(changed));
+    changed.variables["has-slot:boot"] = "yes";
+    QVERIFY(!original.sameLayout(changed));
+    QVERIFY(!original.sameSnapshot(changed));
+    changed = original;
+    changed.sizes["boot_a"] += 512;
+    QVERIFY(!original.sameLayout(changed));
+    changed = original;
+    changed.logical.insert("my_custom_a");
+    QVERIFY(!original.sameLayout(changed));
+    QVERIFY(changed.isLogical("my_custom"));
+    QVERIFY(!original.isLogical("my_custom"));
+    QVERIFY(original.isLogical("system_a.img"));
+    changed = original;
+    changed.partitions.remove("persist");
+    QVERIFY(!original.sameLayout(changed));
+    changed = original;
+    changed.slot = "b";
+    QVERIFY(original.sameLayout(changed));
+    QVERIFY(!original.sameSnapshot(changed));
+    changed = original;
+    changed.variables["serialno"] = "OTHER";
+    QVERIFY(!original.sameSnapshot(changed));
+    changed = original;
+    changed.unlockKnown = false;
+    QVERIFY(!original.sameSnapshot(changed));
+  }
+  void deterministicOrderAndProgress() {
+    QVector<Partition> ps = {image("boot", QByteArray(4096, 'b')),
+                             image("system", QByteArray(1024, 's')),
+                             image("persist", QByteArray(512, 'p')),
+                             image("modem", QByteArray(256, 'm')),
+                             image("vbmeta", QByteArray(128, 'v'))};
+    Plan first, second;
+    QString error;
+    const auto device = fixtureDevice();
+    QVERIFY2(OugaFlashPlanner::build(ps, device, options(), &first, &error),
+             qPrintable(error));
+    std::reverse(ps.begin(), ps.end());
+    QVERIFY2(OugaFlashPlanner::build(ps, device, options(), &second, &error),
+             qPrintable(error));
+    QCOMPARE(planText(first), planText(second));
+    QStringList writes;
+    for (const QString &cmd : commands(first))
+      if (cmd.startsWith("flash "))
+        writes << cmd;
+    QCOMPARE(writes,
+             QStringList({"flash vbmeta_a", "flash persist", "flash system_a",
+                          "flash boot_a", "flash modem_a", "flash modem_b"}));
+    QCOMPARE(first.flashCount, 6);
+    QCOMPARE(first.totalBytes, qint64(128 + 512 + 1024 + 4096 + 256 * 2));
+    ps = {image("boot", QByteArray(1024, 'b')),
+          image("system", QByteArray(1536, 's')),
+          image("persist", QByteArray(512, 'p')),
+          image("my_company"),
+          image("my_preload"),
+          image("modem", QByteArray(256, 'm'))};
+    auto opts = options(FlashMode::BothSlots);
+    opts.targetSlot = "a";
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &second, &error),
+             qPrintable(error));
+    QCOMPARE(second.flashCount, 8);
+    QCOMPARE(second.totalBytes, qint64(5632));
+    QCOMPARE(commands(second).count("flash persist"), 1);
+  }
+  void forceMtkModemLast() {
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(
+                 images(), fixtureDevice(Platform::MediaTek, "b"),
+                 options(FlashMode::Force, Platform::MediaTek), &plan, &error),
+             qPrintable(error));
+    const QStringList cmds = commands(plan);
+    QCOMPARE(cmds.count("flash boot_a"), 1);
+    QCOMPARE(cmds.count("flash persist"), 1);
+    QVERIFY(cmds.indexOf("flash boot_a") < cmds.indexOf("set_active a"));
+    QVERIFY(cmds.indexOf("flash persist") < cmds.indexOf("set_active a"));
+    QCOMPARE(cmds.last(), QString("flash modem_a"));
+    QCOMPARE(cmds.count("flash modem_a"), 1);
+    QVERIFY(!cmds.contains("flash modem_b"));
+    for (const auto &step : plan.steps)
+      QVERIFY(step.userspace);
+  }
+  void planOverflow_data() {
+    QTest::addColumn<bool>("dual");
+    QTest::newRow("single-slot-sum") << false;
+    QTest::newRow("dual-slot-write-count") << true;
+  }
+  void planOverflow() {
+    QFETCH(bool, dual);
+    auto device = fixtureDevice();
+    auto opts = options(dual ? FlashMode::BothSlots : FlashMode::Normal);
+    opts.targetSlot = "a";
+    auto boot = image("boot");
+    boot.expandedBytes = std::numeric_limits<qint64>::max() / 2 + 1;
+    device.sizes["boot_a"] = device.sizes["boot_b"] =
+        quint64(std::numeric_limits<qint64>::max());
+    QVector<Partition> ps{boot};
+    if (dual)
+      ps << image("my_company") << image("my_preload");
+    else {
+      auto persist = image("persist");
+      persist.expandedBytes = boot.expandedBytes;
+      device.sizes["persist"] = quint64(std::numeric_limits<qint64>::max());
+      ps << persist;
+    }
+    Plan plan;
+    QString error;
+    QVERIFY(!OugaFlashPlanner::build(ps, device, opts, &plan, &error));
+    QVERIFY2(error.contains("总大小溢出"), qPrintable(error));
+    QVERIFY(plan.steps.isEmpty());
+    QCOMPARE(plan.flashCount, 0);
+  }
+  void internalModeGuards() {
+    auto opts = options(FlashMode(99));
+    Plan plan;
+    QString error;
+    QVERIFY(!OugaFlashPlanner::build(images(), fixtureDevice(), opts, &plan,
+                                     &error));
+    QVERIFY(error.contains("未知刷写模式"));
+    opts = options();
+    opts.afterSuper = true;
+    QVERIFY(!OugaFlashPlanner::build(images(), fixtureDevice(), opts, &plan,
+                                     &error));
+    QVERIFY(error.contains("Super 检查点"));
+    opts = options(FlashMode::AfterSalesBootloader);
+    opts.afterSuper = true;
+    QVERIFY(!OugaFlashPlanner::build(images(), fixtureDevice(), opts, &plan,
+                                     &error));
+    QVERIFY(error.contains("普通 Fastboot"));
   }
   void guardrails() {
     auto d = fixtureDevice();
@@ -770,6 +990,203 @@ private slots:
     for (const auto &row : prog)
       QVERIFY(row[2].toString() != "全部步骤成功");
   }
+  void formatDependencies_data() {
+    QTest::addColumn<QString>("missing");
+    QTest::addColumn<bool>("empty");
+    QTest::newRow("complete") << QString() << false;
+    for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"}) {
+      QTest::newRow(qPrintable(name + "-missing")) << name << false;
+      QTest::newRow(qPrintable(name + "-empty")) << name << true;
+    }
+  }
+  void formatDependencies() {
+    QFETCH(QString, missing);
+    QFETCH(bool, empty);
+    for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"}) {
+      if (name == missing && !empty)
+        continue;
+      QVERIFY(put(dir + "/" + name,
+                  name == missing ? QByteArray() : QByteArray("fixture-only")));
+    }
+    const QString error =
+        OugaProcessRunner::formatToolsError(dir + "/fake-fastboot.exe");
+    QCOMPARE(error.isEmpty(), missing.isEmpty());
+    if (!missing.isEmpty())
+      QVERIFY2(error.contains(missing), qPrintable(error));
+    FakeRunner runner;
+    OugaFlashService service(&runner);
+    configure(service);
+    auto opts = options();
+    opts.clearData = true;
+    // The IO boundary must not trust a previously prepared boolean flag.
+    opts.formatToolsReady = true;
+    Plan plan;
+    QString buildError;
+    QVERIFY2(OugaFlashPlanner::build(images(), runner.device, opts, &plan,
+                                     &buildError),
+             qPrintable(buildError));
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QCOMPARE(done[0][0].toBool(), missing.isEmpty());
+    if (!missing.isEmpty()) {
+      QVERIFY(runner.trace.isEmpty());
+      QVERIFY(done[0][1].toString().contains(missing));
+    } else
+      QVERIFY(runner.trace.contains("-w"));
+  }
+  void streamedOutput_data() {
+    QTest::addColumn<int>("style");
+    QTest::newRow("completion-only") << 0;
+    QTest::newRow("all-streamed") << 1;
+    QTest::newRow("streamed-prefix-final-tail") << 2;
+  }
+  void streamedOutput() {
+    QFETCH(int, style);
+    FakeRunner runner;
+    runner.outputStyle = style;
+    runner.markedOutput = true;
+    OugaFlashService service(&runner);
+    configure(service);
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(images(), runner.device, options(), &plan,
+                                     &error),
+             qPrintable(error));
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    const QStringList sessions =
+        QDir(dir + "/logs").entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(sessions.size(), 1);
+    const QByteArray log =
+        read(dir + "/logs/" + sessions[0] + "/execution.log");
+    for (const QByteArray &marker :
+         {QByteArray("OUTPUT-ONE"), QByteArray("OUTPUT-TWO"),
+          QByteArray("OUTPUT-TAIL")})
+      QCOMPARE(log.count(marker), runner.trace.size());
+  }
+  void stableProbeIncludesSlotProperties() {
+    FakeRunner runner;
+    runner.device.variables["has-slot:boot"] = "yes";
+    runner.beforeProbe = [](Device &device, int count) {
+      device.variables["has-slot:boot"] = count == 3 ? "no" : "yes";
+    };
+    OugaFlashService service(&runner);
+    configure(service);
+    QSignalSpy ready(&service, &OugaFlashService::deviceReady);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.probe(runner.device.serial);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(done[0][0].toBool());
+    QCOMPARE(ready.count(), 1);
+    QCOMPARE(runner.probes,
+             6); // Initial query, two changes, three stable samples.
+    QCOMPARE(
+        qvariant_cast<Device>(ready[0][0]).variables.value("has-slot:boot"),
+        QString("yes"));
+    for (const QString &cmd : runner.trace)
+      QVERIFY(cmd.startsWith("getvar "));
+  }
+  void changedSlotPropertyStopsBeforeWrite() {
+    FakeRunner runner;
+    runner.device.variables["has-slot:boot"] = "yes";
+    Plan plan;
+    QString error;
+    auto opts = options();
+    opts.validateTable = false;
+    QVERIFY2(
+        OugaFlashPlanner::build(images(), runner.device, opts, &plan, &error),
+        qPrintable(error));
+    runner.device.variables["has-slot:boot"] = "no";
+    OugaFlashService service(&runner);
+    configure(service);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY2(done[0][1].toString().contains("设备表自预览后改变"),
+             qPrintable(done[0][1].toString()));
+    for (const QString &cmd : runner.trace)
+      QVERIFY(cmd.startsWith("getvar "));
+  }
+  void stopDuringAsyncVerification() {
+    FakeRunner runner;
+    OugaFlashService service(&runner);
+    configure(service);
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(images(), runner.device, options(), &plan,
+                                     &error),
+             qPrintable(error));
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    service.requestStop();
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(!service.busy());
+  }
+  void changedImageBetweenWrites() {
+    FakeRunner runner;
+    runner.device = fixtureDevice(Platform::MediaTek);
+    auto ps = images();
+    const QString changed = ps[2].path;
+    bool mutated = false;
+    runner.after = [&](const QStringList &args) {
+      if (args.value(0) == "flash" && args.value(1) == "boot_a")
+        mutated = put(changed, "changed after first write");
+    };
+    OugaFlashService service(&runner);
+    configure(service);
+    auto opts = options(FlashMode::Normal, Platform::MediaTek);
+    opts.clearData = opts.autoReboot = true;
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, runner.device, opts, &plan, &error),
+             qPrintable(error));
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(mutated);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY2(done[0][1].toString().contains("镜像在执行期间改变"),
+             qPrintable(done[0][1].toString()));
+    QVERIFY(!runner.trace.join('\n').contains("flash my_company"));
+    for (const QString &cmd : runner.trace)
+      QVERIFY(!cmd.startsWith("erase ") && cmd != "-w" && cmd != "reboot");
+  }
+  void resultFailureNeverReportsComplete() {
+    FakeRunner runner;
+    bool blockedResult = false;
+    runner.after = [&](const QStringList &args) {
+      if (args.value(0) != "flash" || blockedResult)
+        return;
+      const QStringList sessions =
+          QDir(dir + "/logs").entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+      if (sessions.size() == 1)
+        blockedResult =
+            QDir().mkpath(dir + "/logs/" + sessions[0] + "/result.json");
+    };
+    OugaFlashService service(&runner);
+    configure(service);
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(images(), runner.device, options(), &plan,
+                                     &error),
+             qPrintable(error));
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(blockedResult);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY2(done[0][1].toString().contains("最终结果"),
+             qPrintable(done[0][1].toString()));
+    for (const auto &sample : progress)
+      QVERIFY(sample[2].toString() != "全部步骤成功");
+  }
   void successfulExecutionAndLogs() {
     FakeRunner r;
     OugaFlashService s(&r);
@@ -842,7 +1259,7 @@ private slots:
     OugaFlashService s(&r);
     configure(s);
     QVector<Partition> ps;
-    for (const auto &n : OugaPackage::repairNames(Platform::Qualcomm))
+    for (const auto &n : criticalImages(Platform::Qualcomm))
       ps << image(n);
     ps << image("system") << image("super", superBytes());
     Plan p;
@@ -859,6 +1276,104 @@ private slots:
     s.confirmCheckpoint(false);
     QCOMPARE(done.count(), 1);
     QVERIFY(!done[0][0].toBool());
+  }
+  void afterSalesTailUsesVerifiedTargets_data() {
+    QTest::addColumn<int>("platform");
+    QTest::newRow("qualcomm") << 1;
+    QTest::newRow("mediatek") << 2;
+  }
+  void afterSalesTailUsesVerifiedTargets() {
+    QFETCH(int, platform);
+    const Platform pf = Platform(platform);
+    auto device = fixtureDevice(pf, "a", false);
+    device.sizes["system_b"] += 1024 * 1024;
+    for (const QString slot : {"a", "b"}) {
+      device.partitions.insert("modem_backup_" + slot);
+      device.sizes["modem_backup_" + slot] = 1024 * 1024;
+    }
+    QVector<Partition> ps;
+    for (const QString &name : criticalImages(pf))
+      ps << image(name);
+    if (pf == Platform::MediaTek)
+      ps << image("modem");
+    ps << image("system") << image("super", superBytes())
+       << image("modem_backup");
+    auto opts = options(FlashMode::AfterSalesBootloader, pf);
+    opts.afterSuper = true;
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &plan, &error),
+             qPrintable(error));
+    QCOMPARE(plan.options.targetSlot, QString("b"));
+    const QStringList cmds = commands(plan);
+    for (const QString &name : criticalImages(pf)) {
+      QCOMPARE(cmds.count("flash " + name + "_a"), 1);
+      QCOMPARE(cmds.count("flash " + name + "_b"), 1);
+    }
+    QVERIFY(!cmds.contains("flash system_a") &&
+            !cmds.contains("flash system_b"));
+    QCOMPARE(cmds.count("flash modem_backup_b"), 1);
+    QVERIFY(!cmds.contains("flash modem_backup_a"));
+    if (pf == Platform::MediaTek) {
+      QCOMPARE(cmds.count("flash modem_b"), 1);
+      QVERIFY(!cmds.contains("flash modem_a"));
+    }
+    QCOMPARE(cmds.count("set_active b"), 1);
+    QVERIFY(cmds.indexOf("reboot fastboot") <
+            cmds.indexOf("flash modem_backup_b"));
+    for (const QString &key : device.sizes.keys())
+      if (device.isLogical(key) && key.endsWith("_b"))
+        device.sizes.remove(key);
+    QVERIFY(!OugaFlashPlanner::build(ps, device, opts, &plan, &error));
+    QVERIFY2(error.contains("双槽逻辑分区容量"), qPrintable(error));
+  }
+  void afterSuperReconfirmationAndResume() {
+    FakeRunner runner;
+    runner.device.userspace = false;
+    runner.after = [&](const QStringList &args) {
+      if (args.value(0) == "flash" && args.value(1) == "super")
+        runner.device.sizes["system_b"] += 1024 * 1024;
+    };
+    QVector<Partition> ps;
+    for (const QString &name : criticalImages(Platform::Qualcomm))
+      ps << image(name);
+    ps << image("system") << image("vendor") << image("super", superBytes());
+    OugaFlashService service(&runner);
+    configure(service);
+    Plan preview;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, runner.device,
+                                     options(FlashMode::AfterSalesBootloader),
+                                     &preview, &error),
+             qPrintable(error));
+    QCOMPARE(preview.options.targetSlot, QString("a"));
+    QSignalSpy checkpoint(&service, &OugaFlashService::checkpoint);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(preview);
+    QTRY_COMPARE_WITH_TIMEOUT(checkpoint.count(), 1, 3000);
+    const Plan tail = qvariant_cast<Plan>(checkpoint[0][0]);
+    QCOMPARE(tail.options.targetSlot, QString("b"));
+    QVERIFY(service.paused());
+    QVERIFY(!runner.trace.join('\n').contains("flash boot_"));
+    service.confirmCheckpoint(true);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    const QStringList sessions =
+        QDir(dir + "/logs").entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(sessions.size(), 1);
+    const QString session = dir + "/logs/" + sessions[0];
+    QVERIFY(QFileInfo(session + "/plan-1.json").exists());
+    const auto result =
+        QJsonDocument::fromJson(read(session + "/result.json")).object();
+    QVERIFY(result["success"].toBool());
+    QCOMPARE(result["completedWrites"].toInt(), preview.flashCount);
+    QCOMPARE(result["totalWrites"].toInt(), preview.flashCount);
+    int writes = 0;
+    for (const QString &cmd : runner.trace)
+      writes += cmd.startsWith("flash ");
+    QCOMPARE(writes, preview.flashCount);
+    QVERIFY(!runner.trace.join('\n').contains("flash system_"));
+    QVERIFY(runner.trace.join('\n').contains("flash vendor_b "));
   }
   void payloadFailureNeverPrepared() {
     QString f = dir + "/payload.bin", output = dir + "-out";

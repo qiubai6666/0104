@@ -4,7 +4,7 @@
 
 界面和操作入口参考 `D:\Downloads\smt\WpfApp1\MainWindow.xaml` 的欧加页面，并静态核对 `D:\Downloads\~8160665324498448780` 中的发行资源。使用 Qt 原生控件复刻原版两栏卡片、分区表、选项、快捷方案和按钮，不增加独立设备读取、计划生成、工具配置、Super 或救砖按钮。
 
-核心流程参考 MainWindow.xaml.cs 和 OPFlashTool.Services 的 SuperMaker、Partition、Group、BlockDevice、SuperDef；不运行参考发行程序，不执行包内脚本。它仍是 Fastboot / FastbootD 工具，不是 EDL、9008、BROM、解锁或授权绕过工具。镜像须与设备机型、地区和固件版本匹配；平台判定不能代替机型兼容性认证。先备份资料，保持稳定供电和连接。
+核心流程参考 MainWindow.xaml.cs 和 OPFlashTool.Services 的 SuperMaker、Partition、Group、BlockDevice、SuperDef；本轮另核对 `D:\源码\VioletToolBox-main\VioletToolBox\oujiaflash.cs` 的计划、目标归一化、强力预刷与 modem 流程；不运行参考发行程序，不执行包内脚本。它仍是 Fastboot / FastbootD 工具，不是 EDL、9008、BROM、解锁或授权绕过工具。镜像须与设备机型、地区和固件版本匹配；平台判定不能代替机型兼容性认证。先备份资料，保持稳定供电和连接。
 
 **不是无差别的逐行复制。** 保留此前约定的安全边界，远程 Payload 采用完整下载后本地提取；不声称免整包下载或已认证所有真机。
 
@@ -80,11 +80,21 @@ ROM 服务适配 SMT 的 /series、/devices、/versions（GET）与 /download-li
 
 不迁移 FRP 擦除、未知来源 misc 自动刷入、自动解锁 / 重锁 / 解除验证、作者服务默认地址、原包删除、共享 ADB Server 停止及全局同名进程终止。远程 Payload 完整下载后本地提取，不实现按需远程取块。真实分区表 / 容量 / 文件校验、最终确认、互斥和失败边界仍保留，但不新增原版以外的顶层功能按钮。
 
+## 代码结构与参考优化
+
+本轮不增加按钮、选项或刷写模式，保持原有界面布局。参考源码只作为流程资料，不执行其中的命令，也不照搬失败后继续刷写的行为。
+
+- `ougaflashwindow.cpp` 负责控件、布局和进度；`ougaflashworkflow.cpp` 负责包准备、设备发现与任务衔接；`ougaflashdialogs.cpp` 负责确认、ARB 和救砖选择。私有控件工厂与进度封装共享，不复制样式实现。
+- 分区归一化、真实目标解析、逻辑分类、关键镜像集合、附加镜像需求及设备快照比较集中在 `ougaflashtypes`。快捷提取、修复和售后计划使用同一关键镜像集合。删除无消费者的包模式、ARB 输入和分区计数草稿字段。
+- 纯计划生成器共享单目标、双槽、镜像列表及关键镜像步骤。强力 B 槽物理预刷只安排一次；MTK modem 延后但不离开 FastbootD；售后关键镜像和已合入 Super 的镜像不进入重复刷写尾部。输入顺序变化不会改变小镜像优先的确定性顺序，双槽次数和总大小按实际命令计算并检查溢出。
+- 执行器共享异步复检和确认后的恢复入口。稳定快照包含 has-slot 属性，每次写入前仍核对镜像摘要；无安全保证的摘要缓存不引入。格式化依赖统一校验，并在首次写入前再次检查。
+- 命令的流式输出和结束返回使用同一原始输出记录，避免重复记日志。最终日志或结果持久化失败不报告成功，不显示全部完成。
+
 ## 回归与交付验证
 
 正式测试：
 
-- tests/ougatests.pro：包 / Payload / ARB / Super、平台和槽位命令矩阵、故障注入、停止 / 租约、原版控件与最小尺寸布局、表格缓存 / 拖入、内部开始线刷、模态期间停止。
+- tests/ougatests.pro：包 / Payload / ARB / Super、平台和槽位命令矩阵、共享规则、确定性排序与实际刷写计数、has-slot 稳定性、Super 后重新确认、格式化依赖复检、命令输出去重、结果落盘失败、故障注入、停止 / 租约、原版控件与最小尺寸布局、表格缓存 / 拖入、内部开始线刷、模态期间停止。
 - tests/ouganetworktests.pro：仅 loopback 的服务、Range、摘要 / 长度、跨站凭证隔离、取消 / 续传。
 - tests/deviceoperationtests.pro：旧功能互斥、单窗口、关闭 / 最小化保护，使用假工具。
 - tests/processmanagertests.pro、tests/readabilitytests.pro：既有进程与界面回归。

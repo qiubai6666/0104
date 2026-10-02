@@ -8,7 +8,9 @@ SOURCES += \
     $$PWD/src/services/ougaflashservice.cpp \
     $$PWD/src/services/ougapreparation.cpp \
     $$PWD/src/services/ougaromservice.cpp \
-    $$PWD/src/ui/ougaflashwindow.cpp
+    $$PWD/src/ui/ougaflashwindow.cpp \
+    $$PWD/src/ui/ougaflashworkflow.cpp \
+    $$PWD/src/ui/ougaflashdialogs.cpp
 HEADERS += \
     $$PWD/src/services/ougaflashtypes.h \
     $$PWD/src/services/ougapackage.h \

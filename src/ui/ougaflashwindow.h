@@ -3,10 +3,12 @@
 #include "ougaflashtypes.h"
 #include <QElapsedTimer>
 #include <QWidget>
+#include <functional>
 class QLineEdit;
 class QComboBox;
 class QCheckBox;
 class QGroupBox;
+class QIcon;
 class QTableWidget;
 class QTableWidgetItem;
 class QPlainTextEdit;
@@ -90,6 +92,17 @@ private:
   QString m_currentArb, m_currentArbSerial, m_logDirectory, m_adbTool;
   QElapsedTimer m_transferClock;
   qint64 m_lastBytes = 0;
+  static QIcon referenceIcon(const QString &name);
+  static QPushButton *button(const QString &text, const QString &name,
+                             QWidget *parent, const QString &tone = {});
+  static QLineEdit *entry(const QString &placeholder, const QString &name,
+                          QWidget *parent);
+  void initializeServices(OugaCommandRunner *runner);
+  void inspectPath(const QString &name, const QString &file,
+                   std::function<void(Ouga::Partition, const QString &)> ready);
+  void setExecutionOverlay(bool active);
+  void executionProgress(int writes, int total, const QString &stage);
+  void transferProgress(qint64 bytes, qint64 total);
   void buildPage(int index);
   void selectPackage(bool afterSales);
   void layoutCards();

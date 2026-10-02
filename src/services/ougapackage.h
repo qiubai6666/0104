@@ -16,7 +16,6 @@ public:
   static qint64 expandedSize(const QString &file, QString *error);
   static bool readArb(const QString &file, quint32 *index, QString *error);
   static QStringList parsePayloadList(const QString &output);
-  static QStringList repairNames(Ouga::Platform platform);
   static QString findPayload(const QString &directory);
   static bool payloadManifest(const QString &file,
                               QVector<OugaPayloadEntry> *entries, bool *delta,

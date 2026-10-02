@@ -1,4 +1,5 @@
 #include "ougacommandrunner.h"
+#include <QDir>
 #include <QFileInfo>
 OugaProcessRunner::OugaProcessRunner(QObject *p) : OugaCommandRunner(p) {
   // Not registered with stopAllProcesses: an in-flight flash must never be
@@ -55,4 +56,13 @@ void OugaProcessRunner::finish(int c, bool normal) {
   m_watchdog.stop();
   m_readDeadline.stop();
   emit completed(c, normal, m_output);
+}
+QString OugaProcessRunner::formatToolsError(const QString &fastbootPath) {
+  const QDir directory(QFileInfo(fastbootPath).absolutePath());
+  for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"}) {
+    const QFileInfo file(directory.filePath(name));
+    if (!file.isFile() || !file.isReadable() || file.size() == 0)
+      return "格式化依赖缺失/不可读：" + name;
+  }
+  return {};
 }

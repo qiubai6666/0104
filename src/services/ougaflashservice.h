@@ -38,10 +38,10 @@ signals:
 private:
   OugaCommandRunner *m_runner;
   Timing m_timing;
-  QString m_tool, m_logBase, m_logDir, m_serial, m_lastSignature;
+  QString m_tool, m_logBase, m_logDir, m_serial, m_streamedOutput;
   QFile m_log;
   Ouga::Plan m_plan;
-  Ouga::Device m_expected;
+  Ouga::Device m_expected, m_lastSnapshot;
   int m_index = 0, m_completed = 0, m_stable = 0, m_checkpointCount = 0;
   bool m_busy = false, m_stop = false, m_paused = false, m_expectedMode = true;
   QElapsedTimer m_modeClock, m_stableClock;
@@ -63,7 +63,9 @@ private:
   bool compatible(const Ouga::Device &device, bool initial,
                   QString *error) const;
   void next();
+  void checkAsync(std::function<QString()> check, std::function<void()> ready);
   void verifyImages(std::function<void()> ready);
+  void validateAndResume();
   bool savePlan(const Ouga::Plan &plan);
 };
 #endif

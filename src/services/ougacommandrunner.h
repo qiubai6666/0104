@@ -22,6 +22,7 @@ public:
   void run(const QString &program, const QStringList &arguments,
            int readTimeoutMs = 0) override;
   bool running() const override;
+  static QString formatToolsError(const QString &fastbootPath);
 
 private:
   QProcess m_process;
