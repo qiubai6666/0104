@@ -25,8 +25,10 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QShowEvent>
 #include <QStyle>
 #include <QStyleOptionButton>
 #include <QStyledItemDelegate>
@@ -287,8 +289,9 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   setWindowFlags(Qt::Window);
   setWindowTitle("秋白工作室 · 欧加线刷");
   setObjectName("OujiaFlashView");
-  setMinimumSize(866, 729);
-  resize(866, 729);
+  const QSize initialSize(qRound(866 * 0.9), qRound(729 * 0.9));
+  setMinimumSize(initialSize);
+  resize(initialSize);
   setAcceptDrops(true);
   QFont font("Microsoft YaHei UI");
   font.setPixelSize(12);
@@ -335,7 +338,7 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   auto rootLayout = new QVBoxLayout(this);
   rootLayout->setContentsMargins(10, 10, 10, 10);
   m_canvas = new QWidget(this);
-  m_canvas->setMinimumSize(846, 709);
+  m_canvas->setMinimumSize(minimumSize() - QSize(20, 20));
   rootLayout->addWidget(m_canvas);
   buildPage(0);
   buildPage(1);
@@ -343,15 +346,15 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   auto settings = cardLayout(m_settings);
   auto modeRow = new QHBoxLayout;
   modeRow->setSpacing(0);
-  modeRow->setContentsMargins(8, 0, 0, 0);
+  modeRow->setContentsMargins(0, 0, 0, 0);
   auto label = new QLabel("刷写模式：");
   label->setStyleSheet("font-weight:600;");
   modeRow->addWidget(label);
-  modeRow->addSpacing(14);
+  modeRow->addSpacing(6);
   m_full = option("全量包模式", "FullPackageModeCheckBox", m_settings);
   m_sales = option("售后包模式", "AfterSalesPackageModeCheckBox", m_settings);
   modeRow->addWidget(m_full);
-  modeRow->addSpacing(18);
+  modeRow->addSpacing(8);
   modeRow->addWidget(m_sales);
   modeRow->addStretch();
   settings->addLayout(modeRow, 0, 0);
@@ -360,18 +363,18 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   m_validation->setToolTip("分区表校验仅适用于全量包模式；关闭后仍检查所选镜像"
                            "、目标、容量和设备状态");
   auto validation = new QHBoxLayout(m_validation);
-  validation->setContentsMargins(8, 0, 0, 0);
+  validation->setContentsMargins(0, 0, 0, 0);
   validation->setSpacing(0);
   label = new QLabel("分区表校验（实验性功能）：");
   label->setStyleSheet("font-weight:600;");
   validation->addWidget(label);
-  validation->addSpacing(14);
+  validation->addSpacing(6);
   m_validateOn =
       option("开启", "PartitionTableValidationEnabledCheckBox", m_validation);
   m_validateOff =
       option("关闭", "PartitionTableValidationDisabledCheckBox", m_validation);
   validation->addWidget(m_validateOn);
-  validation->addSpacing(18);
+  validation->addSpacing(8);
   validation->addWidget(m_validateOff);
   validation->addStretch();
   settings->addWidget(m_validation, 1, 0);
@@ -552,6 +555,9 @@ void OugaFlashWindow::buildPage(int index) {
   auto actions = cardLayout(page.actions);
   auto choices = new QWidget(page.actions);
   choices->setFixedHeight(26);
+  auto choiceLayout = new QHBoxLayout(choices);
+  choiceLayout->setContentsMargins(0, 0, 0, 0);
+  choiceLayout->setSpacing(0);
   auto named = [sales](const char *full, const char *after) {
     return QString::fromLatin1(sales ? after : full);
   };
@@ -563,15 +569,15 @@ void OugaFlashWindow::buildPage(int index) {
       named("AutoRebootOugaCheckBox", "AfterSalesAutoRebootCheckBox"), choices);
   page.wipe->setChecked(true);
   page.reboot->setChecked(true);
-  page.wipe->setGeometry(0, 0, 78, 26);
-  page.reboot->setGeometry(78, 0, 78, 26);
+  choiceLayout->addWidget(page.wipe);
+  choiceLayout->addWidget(page.reboot);
   if (!sales) {
     page.ab = option("AB通刷", "FlashABCheckBox", choices);
     page.force = option("强力线刷", "FixSuperCheckBox", choices);
     page.onlyFbd = option("仅FBD", "PureFBDCheckBox", choices);
-    page.ab->setGeometry(156, 0, 67, 26);
-    page.force->setGeometry(223, 0, 77, 26);
-    page.onlyFbd->setGeometry(300, 0, 65, 26);
+    choiceLayout->addWidget(page.ab);
+    choiceLayout->addWidget(page.force);
+    choiceLayout->addWidget(page.onlyFbd);
     page.ab->setToolTip("同时刷入物理分区A/B两槽，逻辑分区写入所选启动槽");
     page.force->setToolTip("部分大分区刷不进去时修复super，默认刷A槽位");
     page.onlyFbd->setToolTip("没有Fastboot的机型使用；联发科设备请勿勾选");
@@ -582,9 +588,10 @@ void OugaFlashWindow::buildPage(int index) {
     page.rescue = new MarqueeCheckBox(choices);
     page.rescue->setObjectName("AfterSalesAutoBrickRecoveryModeToggle");
     page.rescue->setCursor(Qt::PointingHandCursor);
-    page.fbd->setGeometry(156, 0, 75, 26);
-    page.fb->setGeometry(231, 0, 63, 26);
-    page.rescue->setGeometry(294, 0, 72, 26);
+    choiceLayout->addWidget(page.fbd);
+    choiceLayout->addWidget(page.fb);
+    page.rescue->setFixedWidth(72);
+    choiceLayout->addWidget(page.rescue);
     exclusiveOptions({page.fbd, page.fb, page.rescue}, this);
     page.fbd->setChecked(true);
   }
@@ -593,7 +600,9 @@ void OugaFlashWindow::buildPage(int index) {
              named("FixFastbootDButton", "AfterSalesFixFastbootDButton"),
              choices, "repair");
   page.repair->setFixedHeight(26);
-  page.repair->setGeometry(370, 0, 105, 26);
+  page.repair->setFixedWidth(96);
+  choiceLayout->addStretch();
+  choiceLayout->addWidget(page.repair);
   actions->addWidget(choices, 0, 0);
   auto buttons = new QHBoxLayout;
   buttons->setSpacing(8);
@@ -635,8 +644,9 @@ void OugaFlashWindow::selectPackage(bool afterSales) {
   display(m_pages[m_page].images, m_pages[m_page].directory);
 }
 void OugaFlashWindow::layoutCards() {
-  const int extraWidth = qMax(0, m_canvas->width() - 846);
-  const int extraHeight = qMax(0, m_canvas->height() - 709);
+  // Shrink the table/log area with the window, without clipping the controls.
+  const int extraWidth = m_canvas->width() - 846;
+  const int extraHeight = m_canvas->height() - 709;
   const int left = 497 + extraWidth * 59 / 100;
   const int rightX = left + 7, right = m_canvas->width() - rightX;
   for (auto &page : m_pages) {
@@ -652,6 +662,22 @@ void OugaFlashWindow::layoutCards() {
   m_stop->setGeometry(m_canvas->width() - 80, 671 + extraHeight, 80, 32);
   m_overlay->setGeometry(11, 18, left - 22, m_partitions->height() - 29);
   m_selectAll->raise();
+}
+void OugaFlashWindow::showEvent(QShowEvent *event) {
+  QWidget::showEvent(event);
+  if (event->spontaneous())
+    return;
+  // Wait for native frame margins before centering on the launcher's screen.
+  QTimer::singleShot(0, this, [this] {
+    if (!isVisible() || isMinimized() || isMaximized())
+      return;
+    QScreen *targetScreen = parentWidget() ? parentWidget()->screen() : screen();
+    if (!targetScreen)
+      return;
+    QRect frame = frameGeometry();
+    frame.moveCenter(targetScreen->availableGeometry().center());
+    move(frame.topLeft());
+  });
 }
 void OugaFlashWindow::resizeEvent(QResizeEvent *event) {
   QWidget::resizeEvent(event);

@@ -24,6 +24,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScreen>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTabWidget>
@@ -1493,6 +1494,86 @@ private slots:
     delete owner;
     QCOMPARE(changes.count(), 8);
     QVERIFY(!DeviceOperationLease::owner());
+  }
+  void widgetDefaultGeometryAndCentering_data() {
+    QTest::addColumn<bool>("withParent");
+    QTest::newRow("launcher-screen") << true;
+    QTest::newRow("standalone-screen") << false;
+  }
+  void widgetDefaultGeometryAndCentering() {
+    QFETCH(bool, withParent);
+    FakeRunner runner;
+    QWidget launcher;
+    auto targetScreen = QApplication::primaryScreen();
+    QVERIFY(targetScreen);
+    const QRect available = targetScreen->availableGeometry();
+    launcher.resize(200, 100);
+    launcher.move(available.topLeft() + QPoint(20, 30));
+    if (withParent)
+      launcher.show();
+    OugaFlashWindow window(withParent ? &launcher : nullptr, &runner,
+                           dir + "/logs");
+    QCOMPARE(window.minimumSize(), QSize(779, 656));
+    window.show();
+    QTRY_COMPARE(window.size(), QSize(779, 656));
+    auto centered = [&] {
+      const QPoint delta = window.frameGeometry().center() -
+                           (withParent ? launcher.screen() : window.screen())
+                               ->availableGeometry().center();
+      return qAbs(delta.x()) <= 1 && qAbs(delta.y()) <= 1;
+    };
+    QTRY_VERIFY(centered());
+    window.hide();
+    window.move(available.topLeft() + QPoint(30, 40));
+    window.show();
+    QTRY_VERIFY(centered());
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(!window.isBusy());
+  }
+  void widgetCompactLayout_data() {
+    QTest::addColumn<bool>("afterSales");
+    QTest::addColumn<QSize>("windowSize");
+    QTest::newRow("compact-full") << false << QSize(779, 656);
+    QTest::newRow("compact-sales") << true << QSize(779, 656);
+    QTest::newRow("expanded-full") << false << QSize(866, 729);
+    QTest::newRow("expanded-sales") << true << QSize(866, 729);
+  }
+  void widgetCompactLayout() {
+    QFETCH(bool, afterSales);
+    QFETCH(QSize, windowSize);
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.resize(windowSize);
+    window.show();
+    window.findChild<QCheckBox *>("AfterSalesPackageModeCheckBox")
+        ->setChecked(afterSales);
+    QCoreApplication::processEvents();
+    QCOMPARE(window.size(), windowSize);
+    QVERIFY(window.grab().save(dir + "/layout.png"));
+    for (auto control : window.findChildren<QWidget *>()) {
+      if (!control->isVisible() ||
+          !(qobject_cast<QPushButton *>(control) ||
+            qobject_cast<QLineEdit *>(control) ||
+            qobject_cast<QComboBox *>(control) ||
+            qobject_cast<QCheckBox *>(control) ||
+            qobject_cast<QProgressBar *>(control) ||
+            control->inherits("QGroupBox")))
+        continue;
+      auto parent = control->parentWidget();
+      const QRect geometry = control->geometry();
+      const QString message =
+          QString("%1 extends beyond %2: child=(%3,%4 %5x%6), parent=%7x%8")
+              .arg(control->objectName(),
+                   parent ? parent->objectName() : QString())
+              .arg(geometry.x()).arg(geometry.y())
+              .arg(geometry.width()).arg(geometry.height())
+              .arg(parent ? parent->width() : 0)
+              .arg(parent ? parent->height() : 0);
+      QVERIFY2(parent && parent->rect().contains(control->geometry()),
+               qPrintable(message));
+    }
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(!window.isBusy());
   }
   void widgetIsInert() {
     FakeRunner runner;
