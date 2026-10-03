@@ -345,6 +345,11 @@ void OugaFlashWindow::runPayload() {
     }
     m_extractNames = matched;
   }
+  // A selected full partition does not need the baseline of an unselected one.
+  delta = false;
+  for (const auto &entry : entries)
+    if (m_extractNames.isEmpty() || m_extractNames.contains(entry.name))
+      delta |= entry.requiresOldImage;
   QString oldDirectory;
   if (delta) {
     oldDirectory = QFileDialog::getExistingDirectory(

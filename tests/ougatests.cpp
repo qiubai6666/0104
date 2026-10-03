@@ -109,22 +109,39 @@ QByteArray vi(quint64 v) {
 QByteArray pb(int n, const QByteArray &v) {
   return vi((n << 3) | 2) + vi(v.size()) + v;
 }
-QByteArray payloadBytes(bool delta = false) {
-  QByteArray contents(512, 'p'),
-      info =
-          vi(8) + vi(contents.size()) +
-          pb(2, QCryptographicHash::hash(contents, QCryptographicHash::Sha256));
-  QByteArray part = pb(1, "boot") + pb(7, info);
-  if (delta)
+// Manifest-only fixtures; extraction is performed by this test executable.
+QByteArray payloadPartition(const QByteArray &name, int type,
+                            bool oldMetadata = false,
+                            const QByteArray &operationExtras = {}) {
+  const QByteArray contents(512, 'p');
+  const QByteArray info =
+      vi(8) + vi(contents.size()) +
+      pb(2, QCryptographicHash::hash(contents, QCryptographicHash::Sha256));
+  QByteArray operation = type < 0 ? QByteArray() : vi(8) + vi(quint64(type));
+  operation += operationExtras;
+  QByteArray part = pb(1, name) + pb(7, info) + pb(8, operation);
+  if (oldMetadata)
     part += pb(6, info);
-  QByteArray manifest =
-      pb(13, part) + (delta ? vi(12 << 3) + vi(1) : QByteArray());
+  return pb(13, part);
+}
+QByteArray payloadContainer(const QByteArray &manifest) {
   QByteArray h(24, 0);
   h.replace(0, 4, "CrAU");
   qToBigEndian<quint64>(2, reinterpret_cast<uchar *>(h.data() + 4));
   qToBigEndian<quint64>(manifest.size(),
                         reinterpret_cast<uchar *>(h.data() + 12));
   return h + manifest;
+}
+QByteArray payloadBytes(bool delta = false, quint64 minorVersion = 0,
+                        bool oldMetadata = false) {
+  return payloadContainer(payloadPartition("boot", delta ? 4 : 0,
+                                           delta || oldMetadata) +
+                          vi(12 << 3) + vi(minorVersion));
+}
+QByteArray mixedPayloadBytes() {
+  return payloadContainer(payloadPartition("boot", 0) +
+                          payloadPartition("system", 4, true) +
+                          vi(12 << 3) + vi(9));
 }
 QByteArray superBytes() {
   QByteArray b(2 * 1024 * 1024, 0), g(52, 0);
@@ -560,6 +577,68 @@ private slots:
     QCOMPARE(v, quint32(9));
     QVERIFY(put(f, QByteArray(64, 0)));
     QVERIFY(!OugaPackage::readArb(f, &v, &e));
+  }
+  void payloadClassification_data() {
+    QTest::addColumn<int>("type");
+    QTest::addColumn<quint64>("minorVersion");
+    QTest::addColumn<bool>("oldMetadata");
+    QTest::addColumn<QByteArray>("operationExtras");
+    QTest::addColumn<bool>("requiresOldImage");
+    QTest::addColumn<bool>("valid");
+    for (int type : {0, 1, 6, 7, 8, 14})
+      QTest::newRow(qPrintable(QString("full-type-%1-minor9").arg(type)))
+          << type << quint64(9) << false << QByteArray() << false << true;
+    QTest::newRow("full-with-old-metadata")
+        << 8 << quint64(9) << true << QByteArray() << false << true;
+    for (int type : {2, 3, 4, 5, 9, 10, 11, 12, 13})
+      QTest::newRow(qPrintable(QString("source-type-%1-minor0").arg(type)))
+          << type << quint64(0) << true << QByteArray() << true << true;
+    QTest::newRow("source-without-old-metadata")
+        << 4 << quint64(0) << false << QByteArray() << true << true;
+    QTest::newRow("source-hash")
+        << 0 << quint64(0) << true << pb(9, QByteArray(32, 's')) << true << true;
+    QTest::newRow("source-extents")
+        << 0 << quint64(0) << true << pb(4, vi(8) + vi(0) + vi(16) + vi(1))
+        << true << true;
+    QTest::newRow("source-length")
+        << 0 << quint64(0) << true << (vi(5 << 3) + vi(512)) << true << true;
+    QTest::newRow("empty-source-metadata")
+        << 0 << quint64(9) << true << (pb(9, {}) + vi(5 << 3) + vi(0))
+        << false << true;
+    QTest::newRow("unknown-operation")
+        << 15 << quint64(9) << false << QByteArray() << false << false;
+    QTest::newRow("missing-operation-type")
+        << -1 << quint64(9) << false << QByteArray() << false << false;
+    QTest::newRow("wrong-type-wire")
+        << -1 << quint64(9) << false << pb(1, "not-an-enum") << false << false;
+    QTest::newRow("truncated-operation")
+        << 0 << quint64(9) << false << QByteArray(1, char(0x80)) << false << false;
+  }
+  void payloadClassification() {
+    QFETCH(int, type);
+    QFETCH(quint64, minorVersion);
+    QFETCH(bool, oldMetadata);
+    QFETCH(QByteArray, operationExtras);
+    QFETCH(bool, requiresOldImage);
+    QFETCH(bool, valid);
+    const QByteArray bytes = payloadContainer(
+        payloadPartition("boot", type, oldMetadata, operationExtras) +
+        vi(12 << 3) + vi(minorVersion));
+    const QString file = dir + "/payload.bin";
+    QVERIFY(put(file, bytes));
+    QVector<OugaPayloadEntry> entries;
+    bool delta = false;
+    QString error;
+    QCOMPARE(OugaPackage::payloadManifest(file, &entries, &delta, &error), valid);
+    if (valid) {
+      QCOMPARE(entries.size(), 1);
+      QCOMPARE(delta, requiresOldImage);
+      QCOMPARE(entries[0].requiresOldImage, requiresOldImage);
+      QCOMPARE(entries[0].oldSize, oldMetadata ? quint64(512) : quint64(0));
+    } else {
+      QVERIFY(!error.isEmpty());
+    }
+    QCOMPARE(read(file), bytes);
   }
   void superDefinition() {
     auto im = image("system");
@@ -1421,6 +1500,66 @@ private slots:
     QTRY_COMPARE(done.count(), 1);
     QVERIFY(!done[0][0].toBool());
     QCOMPARE(ready.count(), 0);
+  }
+  void payloadPreparationClassification_data() {
+    QTest::addColumn<bool>("sourceOperation");
+    QTest::addColumn<bool>("oldMetadata");
+    QTest::addColumn<bool>("provideOldImages");
+    QTest::addColumn<bool>("mixed");
+    QTest::addColumn<QStringList>("selected");
+    QTest::addColumn<bool>("success");
+    QTest::newRow("full-minor9-no-old-images")
+        << false << false << false << false << QStringList() << true;
+    QTest::newRow("full-old-metadata-no-old-images")
+        << false << true << false << false << QStringList() << true;
+    QTest::newRow("source-copy-needs-old-images")
+        << true << true << false << false << QStringList() << false;
+    QTest::newRow("source-copy-missing-baseline-metadata")
+        << true << false << true << false << QStringList() << false;
+    QTest::newRow("source-copy-matching-old-images")
+        << true << true << true << false << QStringList() << true;
+    QTest::newRow("selected-full-partition-in-mixed-payload")
+        << false << false << false << true << QStringList{"boot"} << true;
+    QTest::newRow("selected-source-partition-in-mixed-payload")
+        << false << false << false << true << QStringList{"system"} << false;
+  }
+  void payloadPreparationClassification() {
+    QFETCH(bool, sourceOperation);
+    QFETCH(bool, oldMetadata);
+    QFETCH(bool, provideOldImages);
+    QFETCH(bool, mixed);
+    QFETCH(QStringList, selected);
+    QFETCH(bool, success);
+    QByteArray bytes;
+    if (mixed)
+      bytes = mixedPayloadBytes();
+    else if (sourceOperation && !oldMetadata)
+      bytes = payloadContainer(payloadPartition("boot", 4) + vi(12 << 3) + vi(9));
+    else
+      bytes = payloadBytes(sourceOperation, 9, oldMetadata);
+    const QString file = dir + "/payload.bin", output = dir + "-out";
+    QVERIFY(put(file, bytes));
+    const QString oldDirectory = provideOldImages ? dir + "/old" : QString();
+    if (provideOldImages) {
+      QVERIFY(QDir().mkpath(oldDirectory));
+      QVERIFY(put(oldDirectory + "/boot.img", QByteArray(512, 'p')));
+    }
+    OugaPreparation prep;
+    QSignalSpy done(&prep, &OugaPreparation::finished),
+        ready(&prep, &OugaPreparation::prepared);
+    prep.payload(QCoreApplication::applicationFilePath(), file, output, selected,
+                 oldDirectory);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 10000);
+    QCOMPARE(done[0][0].toBool(), success);
+    QCOMPARE(ready.count(), success ? 1 : 0);
+    if (success)
+      QCOMPARE(read(output + "/boot.img"), QByteArray(512, 'p'));
+    else {
+      QVERIFY(done[0][1].toString().contains("旧镜像"));
+      QVERIFY(!QFileInfo::exists(output + "/boot.img"));
+    }
+    QCOMPARE(read(file), bytes);
+    QVERIFY(!DeviceOperationLease::owner());
   }
   void missingPreparationTools() {
     QString f = dir + "/package.zip";
@@ -2343,7 +2482,8 @@ int main(int argc, char **argv) {
       }
       if (output.isEmpty())
         return 2;
-      if (!put(output + "/payload.bin", payloadBytes()))
+      // Modern full Ouga packages can carry minor_version=9 without source ops.
+      if (!put(output + "/payload.bin", payloadBytes(false, 9)))
         return 3;
       std::printf("Everything is Ok\n");
       return 0;
@@ -2352,8 +2492,17 @@ int main(int argc, char **argv) {
         QString::fromLocal8Bit(argv[argc - 1]).endsWith("payload.bin")) {
       // Only this executable's fixture format is accepted; no real tools.
       const QString source = QString::fromLocal8Bit(argv[argc - 1]);
-      if (read(source) != payloadBytes())
+      const QByteArray bytes = read(source);
+      const bool sourceOperation = bytes == payloadBytes(true, 9);
+      if (bytes != payloadBytes() && bytes != payloadBytes(false, 9) &&
+          bytes != payloadBytes(false, 9, true) && !sourceOperation &&
+          bytes != mixedPayloadBytes())
         return 5;
+      bool diff = false;
+      for (int i = 2; i < argc - 1; ++i)
+        diff |= std::strcmp(argv[i], "--diff") == 0;
+      if (diff != sourceOperation)
+        return 7;
       const QString output = QDir::fromNativeSeparators(
           QString::fromLocal8Bit(argv[2]));
       const bool corrupt = output.contains("/corrupt-output/");

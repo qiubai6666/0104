@@ -5,6 +5,7 @@ struct OugaPayloadEntry {
   QString name;
   quint64 size = 0, oldSize = 0;
   QByteArray hash, oldHash;
+  bool requiresOldImage = false;
 };
 class OugaPackage {
 public:

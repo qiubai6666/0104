@@ -106,6 +106,66 @@ bool proto(const QByteArray &b, QVector<Field> *fields) {
   }
   return true;
 }
+// The minor version describes operation capabilities, not whether old images
+// are needed. Match VioletToolBox's operation-based distinction instead.
+bool payloadOperationNeedsOldImage(const QByteArray &data, bool *required,
+                                   QString *error) {
+  QVector<Field> operation;
+  if (!proto(data, &operation))
+    return fail(error, "Payload operation protobuf 损坏");
+  int type = -1;
+  bool source = false;
+  for (const Field &field : operation) {
+    if (field.n == 1) {
+      if (field.wire != 0 || field.value > 14)
+        return fail(error, "Payload operation 类型无效或不支持");
+      type = int(field.value);
+    } else if (field.n == 4) { // src_extents
+      QVector<Field> extent;
+      if (field.wire != 2 || !proto(field.data, &extent))
+        return fail(error, "Payload source extent 损坏");
+      quint64 blocks = 0;
+      for (const Field &part : extent) {
+        if ((part.n == 1 || part.n == 2) && part.wire != 0)
+          return fail(error, "Payload source extent 类型无效");
+        if (part.n == 2)
+          blocks = part.value;
+      }
+      source |= blocks > 0;
+    } else if (field.n == 5) { // src_length
+      if (field.wire != 0)
+        return fail(error, "Payload source length 类型无效");
+      source |= field.value > 0;
+    } else if (field.n == 9) { // src_sha256_hash
+      if (field.wire != 2)
+        return fail(error, "Payload source hash 类型无效");
+      source |= !field.data.isEmpty();
+    }
+  }
+  switch (type) {
+  case 0:  // REPLACE
+  case 1:  // REPLACE_BZ
+  case 6:  // ZERO
+  case 7:  // DISCARD
+  case 8:  // REPLACE_XZ
+  case 14: // REPLACE_ZSTD
+    *required |= source;
+    return true;
+  case 2:  // MOVE
+  case 3:  // BSDIFF
+  case 4:  // SOURCE_COPY
+  case 5:  // SOURCE_BSDIFF
+  case 9:  // PUFFDIFF
+  case 10: // BROTLI_BSDIFF
+  case 11: // ZUCCHINI
+  case 12: // LZ4DIFF_BSDIFF
+  case 13: // LZ4DIFF_PUFFDIFF
+    *required = true;
+    return true;
+  default:
+    return fail(error, "Payload operation 缺少有效类型");
+  }
+}
 } // namespace
 bool OugaPackage::inside(const QString &root, const QString &file) {
   QString r = QFileInfo(root).canonicalFilePath(),
@@ -429,43 +489,55 @@ bool OugaPackage::payloadManifest(const QString &file,
     return fail(error, "Payload protobuf 损坏");
   QSet<QString> names;
   for (const Field &v : fields) {
-    if (v.n == 12 && v.value)
-      *delta = true;
-    if (v.n != 13 || v.wire != 2)
+    if (v.n != 13)
       continue;
+    if (v.wire != 2)
+      return fail(error, "Payload partition 类型无效");
     QVector<Field> part;
     if (!proto(v.data, &part))
       return fail(error, "Payload partition 损坏");
     OugaPayloadEntry e;
     for (const Field &p : part) {
-      if (p.n == 1)
+      if (p.n == 1) {
+        if (p.wire != 2)
+          return fail(error, "Payload partition name 类型无效");
         e.name = QString::fromUtf8(p.data);
+      }
+      if (p.n == 8) {
+        if (p.wire != 2)
+          return fail(error, "Payload operation 类型无效");
+        if (!payloadOperationNeedsOldImage(p.data, &e.requiresOldImage, error))
+          return false;
+      }
       if (p.n == 6 || p.n == 7) {
         QVector<Field> info;
-        if (!proto(p.data, &info))
+        if (p.wire != 2 || !proto(p.data, &info))
           return fail(error, "Payload image info 损坏");
         for (const Field &i : info) {
           if (i.n == 1) {
+            if (i.wire != 0)
+              return fail(error, "Payload image size 类型无效");
             if (p.n == 6)
               e.oldSize = i.value;
             else
               e.size = i.value;
           }
           if (i.n == 2) {
+            if (i.wire != 2)
+              return fail(error, "Payload image hash 类型无效");
             if (p.n == 6)
               e.oldHash = i.data;
             else
               e.hash = i.data;
           }
         }
-        if (p.n == 6)
-          *delta = true;
       }
     }
     if (!Ouga::safeName(e.name) || names.contains(e.name) || !e.size ||
         e.hash.size() != 32)
       return fail(error, "Payload 分区名/大小/校验值无效");
     names.insert(e.name);
+    *delta |= e.requiresOldImage;
     entries->append(e);
   }
   return !entries->isEmpty() || fail(error, "Payload 无分区");

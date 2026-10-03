@@ -206,25 +206,20 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
         for (const QString &n : selected)
           if (!names.contains(n))
             return QString("Payload 没有分区：") + n;
-        if (*delta) {
-          bool baseline = false;
-          for (const auto &p : *entries)
-            baseline |= p.oldSize > 0;
-          if (!baseline)
-            return QString("增量 Payload 没有可信旧镜像信息，拒绝提取");
-          for (const auto &p : *entries) {
-            if (!selected.isEmpty() && !selected.contains(p.name))
-              continue;
-            if (!p.oldSize)
-              continue;
-            QString f = QDir(oldDirectory).filePath(p.name + ".img");
-            if (oldDirectory.isEmpty() ||
-                !OugaPackage::inside(oldDirectory, f) ||
-                quint64(QFileInfo(f).size()) != p.oldSize ||
-                p.oldHash.size() != 32 ||
-                OugaPackage::digest(f, &e) != p.oldHash)
-              return QString("增量 Payload 缺少匹配的旧镜像：") + p.name;
-          }
+        *delta = false;
+        for (const auto &p : *entries) {
+          if ((!selected.isEmpty() && !selected.contains(p.name)) ||
+              !p.requiresOldImage)
+            continue;
+          *delta = true;
+          if (!p.oldSize || p.oldHash.size() != 32)
+            return QString("增量 Payload 没有可信旧镜像信息，拒绝提取：") + p.name;
+          const QString f = QDir(oldDirectory).filePath(p.name + ".img");
+          if (oldDirectory.isEmpty() ||
+              !OugaPackage::inside(oldDirectory, f) ||
+              quint64(QFileInfo(f).size()) != p.oldSize ||
+              OugaPackage::digest(f, &e) != p.oldHash)
+            return QString("增量 Payload 缺少匹配的旧镜像：") + p.name;
         }
         return QString();
       },
