@@ -130,8 +130,13 @@ private slots:
       ++count;
     }
     QVERIFY(count >= 12);
-    QVERIFY(read(resources + "/fastboot.exe") !=
-            read(resources + "/bin/platform-tools/fastboot.exe"));
+    // Device tools are embedded/extracted once, never as a second bin copy.
+    for (const QString name :
+         {"adb.exe", "fastboot.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll"}) {
+      QVERIFY(!read(resources + "/" + name).isEmpty());
+      QVERIFY(!QFileInfo::exists(resources + "/bin/platform-tools/" + name));
+      QVERIFY(!QFileInfo::exists(":/qiubai/qiubai/bin/platform-tools/" + name));
+    }
     QVERIFY(!QFileInfo::exists(resources + "/7z.exe"));
   }
   void defaultPaths_data() {
@@ -139,9 +144,8 @@ private slots:
     QTest::addColumn<QString>("relative");
     QTest::newRow("7zip") << "7z" << "bin/7zip/7z.exe";
     QTest::newRow("lpmake") << "lpmake" << "bin/lpmake/lpmake.exe";
-    QTest::newRow("fastboot")
-        << "fastboot" << "bin/platform-tools/fastboot.exe";
-    QTest::newRow("adb") << "adb" << "bin/platform-tools/adb.exe";
+    QTest::newRow("fastboot") << "fastboot" << "fastboot.exe";
+    QTest::newRow("adb") << "adb" << "adb.exe";
     QTest::newRow("legacy-payload") << "payload" << "";
     QTest::newRow("unknown-key") << "rom" << "";
     QTest::newRow("path-not-a-tool-key") << "../fastboot" << "";
@@ -171,12 +175,24 @@ private slots:
     QCOMPARE(OugaProcessRunner::bundledToolPath(directory, "7z", "fallback"),
              QString("fallback"));
   }
+  void legacyBinDoesNotOverrideSharedTools() {
+    for (const QString key : {"adb", "fastboot"}) {
+      const QString shared = QDir(directory).absoluteFilePath(key + ".exe");
+      QVERIFY(
+          put(directory + "/bin/platform-tools/" + key + ".exe", "old-copy"));
+      QCOMPARE(OugaProcessRunner::bundledToolPath(directory, key, "fallback"),
+               QString("fallback"));
+      QVERIFY(put(shared, "shared-tool"));
+      QCOMPARE(OugaProcessRunner::bundledToolPath(directory, key, "fallback"),
+               shared);
+    }
+  }
   void formatterUsesMatchingDirectory() {
     const QString fastboot =
         OugaProcessRunner::bundledToolPath(resources, "fastboot");
     QVERIFY(OugaProcessRunner::formatToolsError(fastboot).isEmpty());
-    QVERIFY(!OugaProcessRunner::formatToolsError(resources + "/fastboot.exe")
-                 .isEmpty());
+    QCOMPARE(fastboot, QDir(resources).absoluteFilePath("fastboot.exe"));
+    // An explicitly configured external tool must bring its own formatters.
     QVERIFY(put(directory + "/fastboot.exe", "fake"));
     QVERIFY(put(directory + "/mke2fs.exe", "fake"));
     QVERIFY(put(directory + "/make_f2fs.exe", "fake"));
@@ -258,13 +274,14 @@ private slots:
     const auto document =
         QJsonDocument::fromJson(read(bin + "/manifest.json"), &error);
     QCOMPARE(error.error, QJsonParseError::NoError);
-    QCOMPARE(document.object()["schema"].toInt(), 1);
+    QCOMPARE(document.object()["schema"].toInt(), 2);
+    QCOMPARE(document.object()["pathBase"].toString(), QString("qiubai"));
     const auto files = document.object()["files"].toArray();
     QVERIFY(files.size() >= 18);
     for (const auto &value : files) {
       const auto entry = value.toObject();
-      const QString path = QDir(bin).filePath(entry["path"].toString());
-      QVERIFY2(OugaPackage::inside(bin, path), qPrintable(path));
+      const QString path = QDir(realTools).filePath(entry["path"].toString());
+      QVERIFY2(OugaPackage::inside(realTools, path), qPrintable(path));
       QCOMPARE(QFileInfo(path).size(), qint64(entry["bytes"].toDouble()));
       QCOMPARE(QString::fromLatin1(OugaPackage::digest(path, nullptr).toHex())
                    .toUpper(),

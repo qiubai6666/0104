@@ -1,16 +1,16 @@
 <!DOCTYPE RCC><RCC version="1.0">
 <qresource prefix="/qiubai">
-    <file alias="qiubai/adb.exe">legacy-tool.txt</file>
-    <file alias="qiubai/fastboot.exe">legacy-tool.txt</file>
+    <file alias="qiubai/adb.exe">bundled-tool.txt</file>
+    <file alias="qiubai/fastboot.exe">bundled-tool.txt</file>
+    <file alias="qiubai/AdbWinApi.dll">bundled-tool.txt</file>
+    <file alias="qiubai/AdbWinUsbApi.dll">bundled-tool.txt</file>
     <file alias="qiubai/payload.exe">legacy-tool.txt</file>
     <file alias="qiubai/Neil.jpg">legacy-tool.txt</file>
     <file alias="qiubai/bin/7zip/7z.exe">bundled-tool.txt</file>
     <file alias="qiubai/bin/7zip/7z.dll">bundled-tool.txt</file>
     <file alias="qiubai/bin/lpmake/lpmake.exe">bundled-tool.txt</file>
-    <file alias="qiubai/bin/platform-tools/adb.exe">bundled-tool.txt</file>
-    <file alias="qiubai/bin/platform-tools/fastboot.exe">bundled-tool.txt</file>
-    <file alias="qiubai/bin/platform-tools/mke2fs.exe">bundled-tool.txt</file>
-    <file alias="qiubai/bin/platform-tools/make_f2fs.exe">bundled-tool.txt</file>
-    <file alias="qiubai/bin/platform-tools/mke2fs.conf">bundled-tool.txt</file>
+    <file alias="qiubai/mke2fs.exe">bundled-tool.txt</file>
+    <file alias="qiubai/make_f2fs.exe">bundled-tool.txt</file>
+    <file alias="qiubai/mke2fs.conf">bundled-tool.txt</file>
 </qresource>
 </RCC>

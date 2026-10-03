@@ -24,7 +24,7 @@
     <file>qiubai/swresample-6.dll</file>
     <file>qiubai/usb.sh</file>
     <file>qiubai/app_icon.ico</file>
-    <!-- 欧加依赖保留子目录，不能覆盖根目录的旧功能工具 -->
+    <!-- adb/fastboot 及匹配辅助工具在根目录共用，bin 仅提供解压与 Super 工具 -->
     <file>qiubai/bin/7zip/7z.dll</file>
     <file>qiubai/bin/7zip/7z.exe</file>
     <file>qiubai/bin/7zip/License.txt</file>
@@ -32,19 +32,15 @@
     <file>qiubai/bin/lpmake/LICENSE-AOSP.txt</file>
     <file>qiubai/bin/lpmake/lpmake.exe</file>
     <file>qiubai/bin/manifest.json</file>
-    <file>qiubai/bin/platform-tools/AdbWinApi.dll</file>
-    <file>qiubai/bin/platform-tools/AdbWinUsbApi.dll</file>
-    <file>qiubai/bin/platform-tools/NOTICE.txt</file>
-    <file>qiubai/bin/platform-tools/adb.exe</file>
-    <file>qiubai/bin/platform-tools/etc1tool.exe</file>
-    <file>qiubai/bin/platform-tools/fastboot.exe</file>
-    <file>qiubai/bin/platform-tools/hprof-conv.exe</file>
-    <file>qiubai/bin/platform-tools/libwinpthread-1.dll</file>
-    <file>qiubai/bin/platform-tools/make_f2fs.exe</file>
-    <file>qiubai/bin/platform-tools/make_f2fs_casefold.exe</file>
-    <file>qiubai/bin/platform-tools/mke2fs.conf</file>
-    <file>qiubai/bin/platform-tools/mke2fs.exe</file>
-    <file>qiubai/bin/platform-tools/source.properties</file>
-    <file>qiubai/bin/platform-tools/sqlite3.exe</file>
+    <file>qiubai/NOTICE.txt</file>
+    <file>qiubai/etc1tool.exe</file>
+    <file>qiubai/hprof-conv.exe</file>
+    <file>qiubai/libwinpthread-1.dll</file>
+    <file>qiubai/make_f2fs.exe</file>
+    <file>qiubai/make_f2fs_casefold.exe</file>
+    <file>qiubai/mke2fs.conf</file>
+    <file>qiubai/mke2fs.exe</file>
+    <file>qiubai/source.properties</file>
+    <file>qiubai/sqlite3.exe</file>
 </qresource>
 </RCC>

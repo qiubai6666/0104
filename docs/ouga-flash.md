@@ -40,7 +40,7 @@ AB、强力、仅 FBD 必须具有匹配的 my_company / my_preload。来自包�
 
 ## 工具与包准备
 
-复用应用内 payload；欧加优先使用 qiubai/bin 内随应用提供的 7-Zip、lpmake 和完整 platform-tools。资源提取保留子目录，不覆盖旧功能在 qiubai 根目录使用的 adb/fastboot。原版页面没有新增工具配置入口；用户已配置路径仍优先，缺失时通过文件选择配置，使用应用 QSettings 的 Ouga 分组持久保存。
+复用应用内 payload；欧加和其他设备操作共用 qiubai 根目录的 adb/fastboot、配套 DLL 及格式化辅助工具，统一来自同一份 platform-tools 37.0.1。qiubai/bin 仅提供 7-Zip 和 lpmake；资源提取保留这两个工具的子目录，不再嵌入或提取 bin/platform-tools 的重复副本。原版页面没有新增工具配置入口；用户已配置路径仍优先，缺失时通过文件选择配置，使用应用 QSettings 的 Ouga 分组持久保存。
 
 - 应用组织名为 QiuBai，应用名为 Orange Tools；Windows 默认设置位于 HKCU\Software\QiuBai\Orange Tools\Ouga。工具键为 adb、fastboot、payload、7z、lpmake，ROM 服务键为 rom。ROM 服务地址默认为空，不预填作者地址。
 - 高通清除数据在首次写入前检查 fastboot 同目录的 mke2fs.exe、make_f2fs.exe、mke2fs.conf。缺失时提示选择可信完整 platform-tools；仍缺失则阻止。文件存在检查不是签名或版本一致性认证。

@@ -1,2 +1,9 @@
 # Preserve bundled dependency bytes so manifest SHA-256 survives checkout.
 /qiubai/bin/** -text
+
+# The shared platform-tools files are also checksum-preserved build inputs.
+/qiubai/*.exe -text
+/qiubai/*.dll -text
+/qiubai/NOTICE.txt -text
+/qiubai/mke2fs.conf -text
+/qiubai/source.properties -text

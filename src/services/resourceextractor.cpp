@@ -85,7 +85,7 @@ bool ResourceExtractor::extractResources(const QString &targetPath, const QStrin
                 outputPath = targetDir.filePath(resourceRoot.relativeFilePath(resourcePath));
             }
 
-            // 保留 bin/ 内布局，完整 platform-tools 不与旧版同名文件混用。
+            // 保留 bin/ 中解压及 Super 工具布局；设备工具在根目录共用一套。
             if (dir.mkpath(QFileInfo(outputPath).absolutePath()) &&
                 extractFile(resourcePath, outputPath)) {
                 successCount++;

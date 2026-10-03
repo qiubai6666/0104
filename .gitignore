@@ -35,17 +35,6 @@ Makefile.*
 !/qiubai/bin/7zip/7z.dll
 !/qiubai/bin/7zip/7z.exe
 !/qiubai/bin/lpmake/lpmake.exe
-!/qiubai/bin/platform-tools/AdbWinApi.dll
-!/qiubai/bin/platform-tools/AdbWinUsbApi.dll
-!/qiubai/bin/platform-tools/adb.exe
-!/qiubai/bin/platform-tools/etc1tool.exe
-!/qiubai/bin/platform-tools/fastboot.exe
-!/qiubai/bin/platform-tools/hprof-conv.exe
-!/qiubai/bin/platform-tools/libwinpthread-1.dll
-!/qiubai/bin/platform-tools/make_f2fs.exe
-!/qiubai/bin/platform-tools/make_f2fs_casefold.exe
-!/qiubai/bin/platform-tools/mke2fs.exe
-!/qiubai/bin/platform-tools/sqlite3.exe
 
 # MOC 生成的文件
 moc_*.cpp

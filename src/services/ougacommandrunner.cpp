@@ -68,20 +68,21 @@ QString OugaProcessRunner::formatToolsError(const QString &fastbootPath) {
 }
 
 QString OugaProcessRunner::bundledToolPath(const QString &resourceDirectory,
-                                          const QString &key,
-                                          const QString &fallback) {
+                                           const QString &key,
+                                           const QString &fallback) {
   if (resourceDirectory.isEmpty())
     return fallback;
   QString relative;
   if (key == "7z")
-    relative = "7zip/7z.exe";
+    relative = "bin/7zip/7z.exe";
   else if (key == "lpmake")
-    relative = "lpmake/lpmake.exe";
+    relative = "bin/lpmake/lpmake.exe";
   else if (key == "fastboot" || key == "adb")
-    relative = "platform-tools/" + key + ".exe";
+    // Share the root tools with all existing device operations.
+    relative = key + ".exe";
   else
     return fallback;
-  const QFileInfo file(QDir(resourceDirectory).filePath("bin/" + relative));
+  const QFileInfo file(QDir(resourceDirectory).filePath(relative));
   return file.isFile() && file.isReadable() && file.size() > 0
              ? file.absoluteFilePath()
              : fallback;
