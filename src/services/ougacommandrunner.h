@@ -26,6 +26,12 @@ public:
   static QString bundledToolPath(const QString &resourceDirectory,
                                  const QString &key,
                                  const QString &fallback = {});
+  // Explicit roots keep discovery independent of the selected ROM directory.
+  static QString resolveToolPath(const QString &resourceDirectory,
+                                 const QString &applicationDirectory,
+                                 const QString &key,
+                                 const QString &configured = {},
+                                 const QString &fallback = {});
 
 private:
   QProcess m_process;

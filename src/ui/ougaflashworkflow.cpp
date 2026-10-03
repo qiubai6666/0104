@@ -17,6 +17,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QProgressBar>
+#include <QCoreApplication>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
@@ -118,9 +119,9 @@ bool OugaFlashWindow::continueTask(quint64 generation) {
 QString OugaFlashWindow::toolPath(const QString &key,
                                   const QString &fallback) const {
   QSettings settings;
-  const QString bundled = OugaProcessRunner::bundledToolPath(
-      ResourceExtractor::getResourcePath(), key, fallback);
-  return settings.value("Ouga/" + key, bundled).toString().trimmed();
+  return OugaProcessRunner::resolveToolPath(
+      ResourceExtractor::getResourcePath(), QCoreApplication::applicationDirPath(),
+      key, settings.value("Ouga/" + key).toString(), fallback);
 }
 QString OugaFlashWindow::requireTool(const QString &key, const QString &label,
                                      const QString &fallback) {
@@ -134,7 +135,7 @@ QString OugaFlashWindow::requireTool(const QString &key, const QString &label,
   if (generation != m_generation || m_stopRequested)
     return {};
   QFileInfo selected(path);
-  if (!selected.isFile() || !selected.isReadable())
+  if (!selected.isFile() || !selected.isReadable() || selected.size() == 0)
     return {};
   QSettings settings;
   settings.setValue("Ouga/" + key, selected.absoluteFilePath());

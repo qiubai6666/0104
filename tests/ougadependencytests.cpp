@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QUuid>
 #include <QtTest>
 #include <cstdio>
@@ -81,7 +82,7 @@ class OugaDependencyTests : public QObject {
 
 private slots:
   void initTestCase() {
-    root = qEnvironmentVariable("ORANGE_TEST_ARTIFACTS");
+    root = QDir::fromNativeSeparators(qEnvironmentVariable("ORANGE_TEST_ARTIFACTS"));
     QVERIFY2(
         !root.isEmpty() && QFileInfo(root).isAbsolute(),
         "Set ORANGE_TEST_ARTIFACTS to a new project-external TEMP directory");
@@ -146,7 +147,7 @@ private slots:
     QTest::newRow("lpmake") << "lpmake" << "bin/lpmake/lpmake.exe";
     QTest::newRow("fastboot") << "fastboot" << "fastboot.exe";
     QTest::newRow("adb") << "adb" << "adb.exe";
-    QTest::newRow("legacy-payload") << "payload" << "";
+    QTest::newRow("payload") << "payload" << "payload.exe";
     QTest::newRow("unknown-key") << "rom" << "";
     QTest::newRow("path-not-a-tool-key") << "../fastboot" << "";
   }
@@ -158,6 +159,130 @@ private slots:
              relative.isEmpty() ? fallback
                                 : QDir(resources).absoluteFilePath(relative));
     QCOMPARE(OugaProcessRunner::bundledToolPath({}, key, fallback), fallback);
+  }
+  void resolvedToolsFollowRuntimeLayout_data() {
+    QTest::addColumn<QString>("key");
+    QTest::addColumn<QString>("layout");
+    QTest::addColumn<bool>("staleConfiguration");
+    for (const QString key : {"7z", "lpmake", "payload", "fastboot", "adb"})
+      for (const QString layout : {"extracted", "app-qiubai", "beside-exe",
+                                   "sibling-qiubai"})
+        for (const bool stale : {false, true}) {
+          const QString row = key + "-" + layout + (stale ? "-stale" : "-empty");
+          QTest::newRow(qPrintable(row)) << key << layout << stale;
+        }
+  }
+  void resolvedToolsFollowRuntimeLayout() {
+    QFETCH(QString, key);
+    QFETCH(QString, layout);
+    QFETCH(bool, staleConfiguration);
+    const QString extracted = directory + "/extracted";
+    const QString application = directory + "/发布 中文/OrangeToolsApp";
+    const QString toolRoot = layout == "extracted" ? extracted
+                           : layout == "app-qiubai" ? application + "/qiubai"
+                           : layout == "beside-exe" ? application
+                           : directory + "/发布 中文/qiubai";
+    const QString relative = key == "7z" ? "bin/7zip/7z.exe"
+                           : key == "lpmake" ? "bin/lpmake/lpmake.exe"
+                           : key + ".exe";
+    const QString expected = toolRoot + "/" + relative;
+    QVERIFY(put(expected, "inert tool fixture"));
+    if (key == "7z")
+      QVERIFY(put(toolRoot + "/bin/7zip/7z.dll", "inert library fixture"));
+    const QString configured = staleConfiguration
+                                   ? directory + "/removed/selected.exe"
+                                   : QString();
+    QCOMPARE(OugaProcessRunner::resolveToolPath(extracted, application, key,
+                                                configured), expected);
+  }
+  void invalidConfiguredPathUsesBundle_data() {
+    QTest::addColumn<int>("kind");
+    QTest::newRow("empty-setting") << 0;
+    QTest::newRow("whitespace-setting") << 1;
+    QTest::newRow("missing-file") << 2;
+    QTest::newRow("empty-file") << 3;
+    QTest::newRow("directory-not-executable") << 4;
+    QTest::newRow("relative-path") << 5;
+  }
+  void invalidConfiguredPathUsesBundle() {
+    QFETCH(int, kind);
+    const QString extracted = directory + "/extracted";
+    const QString expected = extracted + "/bin/7zip/7z.exe";
+    QVERIFY(put(expected, "inert executable"));
+    QVERIFY(put(extracted + "/bin/7zip/7z.dll", "inert library"));
+    QString configured;
+    if (kind == 1)
+      configured = "   ";
+    else if (kind >= 2)
+      configured = directory + "/configured.exe";
+    if (kind == 3)
+      QVERIFY(put(configured, {}));
+    if (kind == 4)
+      QVERIFY(QDir().mkpath(configured));
+    if (kind == 5)
+      configured = "configured.exe";
+    QCOMPARE(OugaProcessRunner::resolveToolPath(extracted, {}, "7z", configured),
+             expected);
+  }
+  void explicitConfigurationHasPriority() {
+    const QString custom = directory + "/custom/7za.exe";
+    const QString extracted = directory + "/extracted";
+    const QString application = directory + "/app";
+    QVERIFY(put(custom, "explicit standalone tool"));
+    for (const QString root : {extracted, application + "/qiubai", application,
+                               directory + "/qiubai"}) {
+      QVERIFY(put(root + "/bin/7zip/7z.exe", "bundled executable"));
+      QVERIFY(put(root + "/bin/7zip/7z.dll", "bundled library"));
+    }
+    QCOMPARE(OugaProcessRunner::resolveToolPath(extracted, application, "7z",
+                                                "  " + custom + "  "), custom);
+    QCOMPARE(OugaProcessRunner::resolveToolPath(extracted, application, "7z"),
+             extracted + "/bin/7zip/7z.exe");
+    QCOMPARE(OugaProcessRunner::resolveToolPath(directory + "/missing",
+                                                application, "7z"),
+             application + "/qiubai/bin/7zip/7z.exe");
+  }
+  void incompleteBundledSevenzipUsesCompleteCopy() {
+    const QString extracted = directory + "/extracted";
+    const QString application = directory + "/app";
+    const QString first = extracted + "/bin/7zip/7z.exe";
+    const QString second = application + "/qiubai/bin/7zip/7z.exe";
+    QVERIFY(put(first, "partial installation"));
+    QVERIFY(put(second, "complete installation"));
+    QVERIFY(put(application + "/qiubai/bin/7zip/7z.dll", "format library"));
+    for (const bool emptyLibrary : {false, true}) {
+      if (emptyLibrary)
+        QVERIFY(put(extracted + "/bin/7zip/7z.dll", {}));
+      QCOMPARE(OugaProcessRunner::bundledToolPath(extracted, "7z", "fallback"),
+               QString("fallback"));
+      QCOMPARE(OugaProcessRunner::resolveToolPath(extracted, application, "7z"),
+               second);
+    }
+    QVERIFY(put(extracted + "/bin/7zip/7z.dll", "format library"));
+    QCOMPARE(OugaProcessRunner::resolveToolPath(extracted, application, "7z"),
+             first);
+  }
+  void resolverDoesNotSearchRomWorkingDirectory() {
+    const QString previous = QDir::currentPath();
+    const auto restore = qScopeGuard([&] { QDir::setCurrent(previous); });
+    const QString rom = root + "/cwd-" + QUuid::createUuid().toString(QUuid::Id128);
+    QVERIFY(put(rom + "/bin/7zip/7z.exe", "untrusted ROM executable"));
+    QVERIFY(put(rom + "/bin/7zip/7z.dll", "untrusted ROM library"));
+    QVERIFY(put(rom + "/payload.exe", "untrusted ROM executable"));
+    QVERIFY(QDir::setCurrent(rom));
+    for (const QString key : {"7z", "lpmake", "payload", "fastboot", "adb"})
+      QVERIFY(OugaProcessRunner::resolveToolPath(
+                  directory + "/missing", directory + "/app", key).isEmpty());
+    QVERIFY(OugaProcessRunner::resolveToolPath({}, {}, "7z", "bin/7zip/7z.exe")
+                .isEmpty());
+    const QString explicitFallback = directory + "/fallback.exe";
+    QVERIFY(put(explicitFallback, "explicit absolute fallback"));
+    QCOMPARE(OugaProcessRunner::resolveToolPath({}, {}, "7z", {},
+                                                explicitFallback),
+             explicitFallback);
+    QVERIFY(OugaProcessRunner::resolveToolPath({}, {}, "7z", {},
+                                               directory + "/absent.exe")
+                .isEmpty());
   }
   void unavailableToolFallsBack_data() {
     QTest::addColumn<int>("kind");

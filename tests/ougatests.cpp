@@ -42,7 +42,7 @@
 #include <thread>
 using namespace Ouga;
 namespace {
-QString testRoot;
+QString testRoot, testResourceDirectory;
 QByteArray read(const QString &p) {
   QFile f(p);
   if (!f.open(QIODevice::ReadOnly))
@@ -304,7 +304,7 @@ public:
 };
 } // namespace
 QString ResourceExtractor::getResourcePath() {
-  return testRoot + "/nonexistent-tools";
+  return testResourceDirectory;
 }
 QString ResourceExtractor::getAdbPath() {
   return getResourcePath() + "/adb.exe";
@@ -371,6 +371,7 @@ private slots:
     dir = testRoot + "/" + QString::fromLatin1(QTest::currentTestFunction()) +
           "-" + QUuid::createUuid().toString(QUuid::Id128);
     QVERIFY(QDir().mkpath(dir));
+    testResourceDirectory = dir + "/nonexistent-tools";
     DeviceOperationLease::setIdleCheck({});
   }
   void cleanup() {
@@ -1909,13 +1910,18 @@ private slots:
   void widgetZipPayloadPreparation_data() {
     QTest::addColumn<bool>("imagesDirectory");
     QTest::addColumn<bool>("corruptOutput");
-    QTest::newRow("zip-output-folder") << false << false;
-    QTest::newRow("zip-existing-images-folder") << true << false;
-    QTest::newRow("zip-corrupt-extracted-image") << false << true;
+    QTest::addColumn<QString>("toolConfiguration");
+    QTest::newRow("zip-output-folder") << false << false << "configured";
+    QTest::newRow("zip-existing-images-folder") << true << false << "configured";
+    QTest::newRow("zip-corrupt-extracted-image") << false << true << "configured";
+    QTest::newRow("zip-bundled-tools-unconfigured") << false << false << "bundled";
+    QTest::newRow("zip-bundled-tools-empty-settings") << false << false << "empty";
+    QTest::newRow("zip-bundled-tools-stale-settings") << true << false << "stale";
   }
   void widgetZipPayloadPreparation() {
     QFETCH(bool, imagesDirectory);
     QFETCH(bool, corruptOutput);
+    QFETCH(QString, toolConfiguration);
     QSettings settings;
     const QVariant old7z = settings.value("Ouga/7z");
     const QVariant oldPayload = settings.value("Ouga/payload");
@@ -1929,8 +1935,24 @@ private slots:
       }
     });
     const QString helper = QCoreApplication::applicationFilePath();
-    settings.setValue("Ouga/7z", helper);
-    settings.setValue("Ouga/payload", helper);
+    if (toolConfiguration == "configured") {
+      settings.setValue("Ouga/7z", helper);
+      settings.setValue("Ouga/payload", helper);
+    } else {
+      // Only test executables are discoverable here, never installed tools.
+      const QString tools = ResourceExtractor::getResourcePath();
+      QVERIFY(QDir().mkpath(tools + "/bin/7zip"));
+      QVERIFY(QFile::copy(helper, tools + "/bin/7zip/7z.exe"));
+      QVERIFY(put(tools + "/bin/7zip/7z.dll", "inert format-library fixture"));
+      QVERIFY(QFile::copy(helper, tools + "/payload.exe"));
+      for (const QString key : {"7z", "payload"}) {
+        if (toolConfiguration == "bundled")
+          settings.remove("Ouga/" + key);
+        else
+          settings.setValue("Ouga/" + key, toolConfiguration == "empty"
+              ? QString() : dir + "/removed/" + key + ".exe");
+      }
+    }
     const QString sourceDirectory = dir + "/输入 ZIP";
     const QString output = dir + (imagesDirectory ? "/Images"
                                : corruptOutput ? "/corrupt-output" : "/解包 输出");
@@ -1947,8 +1969,27 @@ private slots:
     folder->setText(output);
     QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
     QVERIFY(!window.isBusy());
+    const bool previousDialogPolicy =
+        QApplication::testAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+    const auto restoreDialogs = qScopeGuard([&] {
+      QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, previousDialogPolicy);
+    });
+    int unexpectedFileDialogs = 0;
+    QTimer dialogGuard;
+    dialogGuard.setInterval(1);
+    connect(&dialogGuard, &QTimer::timeout, &window, [&] {
+      for (QWidget *widget : QApplication::topLevelWidgets())
+        if (auto dialog = qobject_cast<QFileDialog *>(widget))
+          if (dialog->isVisible()) {
+            ++unexpectedFileDialogs;
+            dialog->reject();
+          }
+    });
+    dialogGuard.start();
     window.findChild<QPushButton *>("UnpackPayloadButton")->click();
     QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 10000);
+    QCOMPARE(unexpectedFileDialogs, 0);
     const QString images = imagesDirectory ? output : output + "/images";
     QVERIFY(QFileInfo::exists(images + "/boot.img"));
     QVERIFY(!QFileInfo::exists(images + "/images"));

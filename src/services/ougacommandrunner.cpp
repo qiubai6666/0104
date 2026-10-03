@@ -77,13 +77,50 @@ QString OugaProcessRunner::bundledToolPath(const QString &resourceDirectory,
     relative = "bin/7zip/7z.exe";
   else if (key == "lpmake")
     relative = "bin/lpmake/lpmake.exe";
-  else if (key == "fastboot" || key == "adb")
-    // Share the root tools with all existing device operations.
+  else if (key == "fastboot" || key == "adb" || key == "payload")
+    // Share the root tools with all existing device/package operations.
     relative = key + ".exe";
   else
     return fallback;
   const QFileInfo file(QDir(resourceDirectory).filePath(relative));
-  return file.isFile() && file.isReadable() && file.size() > 0
-             ? file.absoluteFilePath()
-             : fallback;
+  if (!file.isFile() || !file.isReadable() || file.size() == 0)
+    return fallback;
+  if (key == "7z") {
+    // The bundled 7z.exe requires its matching format library beside it.
+    const QFileInfo library(file.dir().filePath("7z.dll"));
+    if (!library.isFile() || !library.isReadable() || library.size() == 0)
+      return fallback;
+  }
+  return file.absoluteFilePath();
+}
+
+QString OugaProcessRunner::resolveToolPath(
+    const QString &resourceDirectory, const QString &applicationDirectory,
+    const QString &key, const QString &configured, const QString &fallback) {
+  auto available = [](const QString &path) {
+    const QFileInfo file(path.trimmed());
+    return file.isAbsolute() && file.isFile() && file.isReadable() &&
+                   file.size() > 0
+               ? file.absoluteFilePath()
+               : QString();
+  };
+  const QString selected = available(configured);
+  if (!selected.isEmpty())
+    return selected;
+
+  QStringList roots;
+  if (QFileInfo(resourceDirectory).isAbsolute())
+    roots << resourceDirectory;
+  if (QFileInfo(applicationDirectory).isAbsolute()) {
+    const QDir application(applicationDirectory);
+    roots << application.filePath("qiubai") << application.absolutePath()
+          << QDir::cleanPath(application.absoluteFilePath("../qiubai"));
+  }
+  roots.removeDuplicates();
+  for (const QString &root : roots) {
+    const QString tool = bundledToolPath(root, key);
+    if (!tool.isEmpty())
+      return tool;
+  }
+  return available(fallback);
 }
