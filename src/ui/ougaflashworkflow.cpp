@@ -158,6 +158,22 @@ void OugaFlashWindow::load(const QString &path) {
   m_pages[m_page].directory.clear();
   m_pages[m_page].folder->setText(path);
   display({}, path);
+  const QFileInfo directory(path);
+  if (!m_page && directory.isDir() && directory.isReadable() &&
+      !directory.isSymLink() && !directory.isJunction() &&
+      !OugaPackage::hasImageCandidates(path)) {
+    // The full-package field also selects an extraction destination. Choosing
+    // it must not claim a scan failure or keep the previous package's images.
+    m_task = Task::None;
+    m_progress->setValue(0);
+    m_progress->setProperty("rate", "待解包");
+    m_progress->update();
+    updateBusy();
+    log("已选择解包输出目录：" + path +
+        "；请选择Payload.bin或全量包ZIP，再点击“解包Payload”。"
+        "提取和校验完成后才加载分区表；尚未写入设备。");
+    return;
+  }
   updateBusy();
   m_prepare->scan(path);
 }
@@ -239,7 +255,11 @@ void OugaFlashWindow::extractPayload(bool all) {
     endTask(false, "用户取消了输出目录选择");
     return;
   }
-  m_payloadOutput = all ? QDir(output).filePath("images") : output;
+  const QDir outputDirectory(output);
+  m_payloadOutput =
+      all && outputDirectory.dirName().compare("images", Qt::CaseInsensitive) != 0
+          ? outputDirectory.filePath("images")
+          : output;
   QUrl url(m_payloadSource);
   if (url.scheme() == "https" || url.scheme() == "http") {
     if (!OugaRomService::safeUrl(url)) {

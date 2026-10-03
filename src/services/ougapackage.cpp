@@ -45,6 +45,21 @@ quint64 number(const QJsonValue &v, bool *ok) {
   s.remove('_');
   return s.toULongLong(ok, s.startsWith("0x") ? 16 : 10);
 }
+QStringList imageDirectories(const QDir &root) {
+  QStringList dirs = {root.absolutePath()};
+  for (const QString n : {"images", "IMAGES", "RADIO"}) {
+    const QString d = root.filePath(n);
+    if (QDir(d).exists() && !dirs.contains(d, Qt::CaseInsensitive))
+      dirs << d;
+  }
+  return dirs;
+}
+const QStringList &afterSalesDirectories() {
+  static const QStringList names = {
+      "my_bigball", "my_carrier", "my_company", "my_heytap", "my_manifest",
+      "my_preload", "my_region", "my_stock"};
+  return names;
+}
 struct Field {
   int n = 0, wire = 0;
   quint64 value = 0;
@@ -192,6 +207,20 @@ bool OugaPackage::inspect(const QString &name, const QString &file,
   p->sha256 = digest(file, error);
   return p->sha256.size() == 32;
 }
+bool OugaPackage::hasImageCandidates(const QString &directory) {
+  const QDir root(directory);
+  if (!root.exists())
+    return false;
+  for (const QString &d : imageDirectories(root)) {
+    if (!QDir(d).entryList({"*.img", "rawprogram*.xml"}, QDir::Files).isEmpty())
+      return true;
+    // Even an empty/ambiguous recognized folder must go through strict scan().
+    for (const QString &name : afterSalesDirectories())
+      if (QDir(QDir(d).filePath(name)).exists())
+        return true;
+  }
+  return false;
+}
 QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
                                            QString *error) {
   if (error)
@@ -202,12 +231,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
     fail(error, "目录不存在");
     return {};
   }
-  QStringList dirs = {root.absolutePath()};
-  for (const QString n : {"images", "IMAGES", "RADIO"}) {
-    QString d = root.filePath(n);
-    if (QDir(d).exists() && !dirs.contains(d, Qt::CaseInsensitive))
-      dirs << d;
-  }
+  const QStringList dirs = imageDirectories(root);
   QMap<QString, QString> files;
   QSet<QString> usedFiles;
   auto add = [&](const QString &name, const QString &file) {
@@ -295,9 +319,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
     }
     // SMT's eight named after-sales directories: never arbitrarily pick a
     // candidate.
-    for (const QString n :
-         {"my_bigball", "my_carrier", "my_company", "my_heytap", "my_manifest",
-          "my_preload", "my_region", "my_stock"}) {
+    for (const QString &n : afterSalesDirectories()) {
       QDir sub(QDir(d).filePath(n));
       if (!sub.exists())
         continue;

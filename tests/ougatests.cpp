@@ -25,6 +25,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScreen>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTabWidget>
@@ -423,6 +424,37 @@ private slots:
       QCOMPARE(n, 512);
     else
       QVERIFY2(n < 0, qPrintable(e));
+  }
+  void imageCandidates_data() {
+    QTest::addColumn<QString>("subdirectory");
+    QTest::addColumn<QString>("file");
+    QTest::addColumn<bool>("candidate");
+    QTest::newRow("empty") << "" << "" << false;
+    QTest::newRow("empty-images") << "images" << "" << false;
+    QTest::newRow("payload-not-an-image") << "" << "payload.bin" << false;
+    QTest::newRow("arbitrary-bin") << "" << "script.bin" << false;
+    QTest::newRow("root-image") << "" << "boot.img" << true;
+    QTest::newRow("images") << "images" << "boot.img" << true;
+    QTest::newRow("IMAGES") << "IMAGES" << "boot.img" << true;
+    QTest::newRow("RADIO") << "RADIO" << "modem.img" << true;
+    QTest::newRow("rawprogram-needs-validation")
+        << "RADIO" << "rawprogram0.xml" << true;
+    QTest::newRow("empty-after-sales-needs-validation")
+        << "IMAGES/my_company" << "" << true;
+    QTest::newRow("after-sales-image")
+        << "my_preload" << "candidate.img" << true;
+    QTest::newRow("unsupported-nesting") << "unknown" << "boot.img" << false;
+  }
+  void imageCandidates() {
+    QFETCH(QString, subdirectory);
+    QFETCH(QString, file);
+    QFETCH(bool, candidate);
+    const QString directory = QDir(dir).filePath(subdirectory);
+    QVERIFY(QDir().mkpath(directory));
+    if (!file.isEmpty())
+      QVERIFY(put(QDir(directory).filePath(file), "candidate, not validated"));
+    QCOMPARE(OugaPackage::hasImageCandidates(dir), candidate);
+    QVERIFY(!OugaPackage::hasImageCandidates(dir + "/missing"));
   }
   void scanBoundaries() {
     QString e;
@@ -1736,6 +1768,213 @@ private slots:
     QVERIFY(window.grab().save(dir + "/loaded-table.png"));
     QVERIFY(window.close());
   }
+  void widgetOutputDirectoryWaitsForPayload_data() {
+    QTest::addColumn<bool>("drop");
+    QTest::addColumn<bool>("imagesDirectory");
+    QTest::newRow("typed-output") << false << false;
+    QTest::newRow("dropped-output") << true << false;
+    QTest::newRow("typed-images") << false << true;
+    QTest::newRow("dropped-images") << true << true;
+  }
+  void widgetOutputDirectoryWaitsForPayload() {
+    QFETCH(bool, drop);
+    QFETCH(bool, imagesDirectory);
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    const QString source = dir + "/OTA.zip";
+    const QString output = dir + (imagesDirectory ? "/Images" : "/解包 输出");
+    QVERIFY(put(source, "PK test archive"));
+    QVERIFY(QDir().mkpath(output));
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    if (drop) {
+      QMimeData mime;
+      mime.setUrls({QUrl::fromLocalFile(output)});
+      QDragEnterEvent drag(QPoint(30, 120), Qt::CopyAction, &mime, Qt::LeftButton,
+                           Qt::NoModifier);
+      QApplication::sendEvent(&window, &drag);
+      QVERIFY(drag.isAccepted());
+      QDropEvent event(QPointF(30, 120), Qt::CopyAction, &mime, Qt::LeftButton,
+                       Qt::NoModifier);
+      QApplication::sendEvent(&window, &event);
+      QVERIFY(event.isAccepted());
+    } else {
+      folder->setText(output);
+      QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    }
+    QTRY_VERIFY(!window.isBusy());
+    QCOMPARE(folder->text(), output);
+    QCOMPARE(window.findChild<QTableWidget *>("OugaPartitionTableDataGrid")
+                 ->rowCount(), 0);
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                            ->toPlainText();
+    QVERIFY(log.contains("解包Payload"));
+    QVERIFY(!log.contains("没有可确定用途") && !log.contains("已停止/失败"));
+    auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+    QCOMPARE(progress->value(), 0);
+    QCOMPARE(progress->property("rate").toString(), QString("待解包"));
+    QVERIFY(QDir(output).entryList(QDir::AllEntries | QDir::NoDotAndDotDot)
+                .isEmpty());
+    QVERIFY(window.grab().save(dir + "/waiting-for-payload.png"));
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    QVERIFY(!window.isBusy());
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(window.close());
+  }
+  void widgetOutputClearsPreviousImages() {
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    const QString ready = dir + "/ready", output = dir + "/output";
+    QVERIFY(QDir().mkpath(ready));
+    QVERIFY(QDir().mkpath(output));
+    QVERIFY(put(ready + "/boot.img", QByteArray(512, 'b')));
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    auto table = window.findChild<QTableWidget *>("OugaPartitionTableDataGrid");
+    folder->setText(ready);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    QCOMPARE(table->rowCount(), 1);
+    window.findChild<QProgressBar *>("FlashProgressBar")->setValue(100);
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QVERIFY(!window.isBusy());
+    QCOMPARE(table->rowCount(), 0);
+    window.findChild<QCheckBox *>("AfterSalesPackageModeCheckBox")->setChecked(true);
+    window.findChild<QCheckBox *>("FullPackageModeCheckBox")->setChecked(true);
+    QCOMPARE(table->rowCount(), 0);
+    QCOMPARE(folder->text(), output);
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(!window.isBusy());
+  }
+  void widgetOutputStillValidatesCandidates_data() {
+    QTest::addColumn<QString>("kind");
+    QTest::addColumn<bool>("valid");
+    for (const QString kind : {"root", "images", "IMAGES", "RADIO"})
+      QTest::newRow(qPrintable(kind)) << kind << true;
+    for (const QString kind : {"bad-sparse", "bad-rawprogram", "ambiguous-sales"})
+      QTest::newRow(qPrintable(kind)) << kind << false;
+  }
+  void widgetOutputStillValidatesCandidates() {
+    QFETCH(QString, kind);
+    QFETCH(bool, valid);
+    const QString output = dir + "/包 中文路径";
+    QString contents = output;
+    if (kind == "images" || kind == "IMAGES" || kind == "RADIO")
+      contents += "/" + kind;
+    if (kind == "ambiguous-sales")
+      contents += "/IMAGES/my_company";
+    QVERIFY(QDir().mkpath(contents));
+    if (kind == "bad-rawprogram")
+      QVERIFY(put(contents + "/rawprogram0.xml", "<data><program"));
+    else if (kind == "ambiguous-sales") {
+      QVERIFY(put(contents + "/first.img", "1"));
+      QVERIFY(put(contents + "/second.img", "2"));
+    } else {
+      auto bytes = kind == "bad-sparse" ? ::sparse() : QByteArray(512, 'b');
+      if (kind == "bad-sparse")
+        bytes.chop(1);
+      QVERIFY(put(contents + "/boot.img", bytes));
+    }
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    QCOMPARE(window.findChild<QTableWidget *>("OugaPartitionTableDataGrid")
+                 ->rowCount(), valid ? 1 : 0);
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                            ->toPlainText();
+    QCOMPARE(log.contains("已停止/失败"), !valid);
+    QVERIFY(!log.contains("已选择解包输出目录"));
+    QVERIFY(runner.trace.isEmpty());
+  }
+  void widgetSalesEmptyDirectoryStillFails() {
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.findChild<QCheckBox *>("AfterSalesPackageModeCheckBox")->setChecked(true);
+    auto folder = window.findChild<QLineEdit *>("AfterSalesFlashPackTextBox");
+    folder->setText(dir);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                            ->toPlainText();
+    QVERIFY(log.contains("没有可确定用途") && log.contains("已停止/失败"));
+    QVERIFY(!log.contains("已选择解包输出目录"));
+    QVERIFY(runner.trace.isEmpty());
+  }
+  void widgetZipPayloadPreparation_data() {
+    QTest::addColumn<bool>("imagesDirectory");
+    QTest::addColumn<bool>("corruptOutput");
+    QTest::newRow("zip-output-folder") << false << false;
+    QTest::newRow("zip-existing-images-folder") << true << false;
+    QTest::newRow("zip-corrupt-extracted-image") << false << true;
+  }
+  void widgetZipPayloadPreparation() {
+    QFETCH(bool, imagesDirectory);
+    QFETCH(bool, corruptOutput);
+    QSettings settings;
+    const QVariant old7z = settings.value("Ouga/7z");
+    const QVariant oldPayload = settings.value("Ouga/payload");
+    const auto restore = qScopeGuard([&] {
+      for (const auto &entry : {qMakePair(QString("Ouga/7z"), old7z),
+                                qMakePair(QString("Ouga/payload"), oldPayload)}) {
+        if (entry.second.isValid())
+          settings.setValue(entry.first, entry.second);
+        else
+          settings.remove(entry.first);
+      }
+    });
+    const QString helper = QCoreApplication::applicationFilePath();
+    settings.setValue("Ouga/7z", helper);
+    settings.setValue("Ouga/payload", helper);
+    const QString sourceDirectory = dir + "/输入 ZIP";
+    const QString output = dir + (imagesDirectory ? "/Images"
+                               : corruptOutput ? "/corrupt-output" : "/解包 输出");
+    QVERIFY(QDir().mkpath(sourceDirectory));
+    QVERIFY(QDir().mkpath(output));
+    const QString source = sourceDirectory + "/OTA.mock-archive";
+    const QByteArray sourceBytes("PK test-only archive");
+    QVERIFY(put(source, sourceBytes));
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QVERIFY(!window.isBusy());
+    window.findChild<QPushButton *>("UnpackPayloadButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 10000);
+    const QString images = imagesDirectory ? output : output + "/images";
+    QVERIFY(QFileInfo::exists(images + "/boot.img"));
+    QVERIFY(!QFileInfo::exists(images + "/images"));
+    auto table = window.findChild<QTableWidget *>("OugaPartitionTableDataGrid");
+    QCOMPARE(table->rowCount(), corruptOutput ? 0 : 1);
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                            ->toPlainText();
+    if (corruptOutput) {
+      QVERIFY(log.contains("SHA-256 不符"));
+      QVERIFY(!log.contains("文件已准备"));
+      window.findChild<QPushButton *>("StartFlashButton")->click();
+    } else {
+      QCOMPARE(folder->text(), images);
+      QCOMPARE(table->item(0, 1)->text(), QString("boot"));
+      QCOMPARE(QFileInfo(table->item(0, 3)->text()).canonicalFilePath(),
+               QFileInfo(images + "/boot.img").canonicalFilePath());
+      QCOMPARE(read(images + "/boot.img"), QByteArray(512, 'p'));
+      QVERIFY(log.contains("Payload 已提取并重新校验"));
+      QVERIFY(!log.contains("已停止/失败"));
+      QVERIFY(window.grab().save(dir + "/payload-loaded.png"));
+    }
+    QCOMPARE(read(source), sourceBytes);
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(window.close());
+  }
   void widgetDropOnlyPrepares() {
     FakeRunner runner;
     OugaFlashWindow window(nullptr, &runner, dir + "/logs");
@@ -2051,6 +2290,20 @@ int main(int argc, char **argv) {
       if (!put(output + "/payload.bin", payloadBytes()))
         return 3;
       std::printf("Everything is Ok\n");
+      return 0;
+    }
+    if (command == "--out" && argc >= 6 &&
+        QString::fromLocal8Bit(argv[argc - 1]).endsWith("payload.bin")) {
+      // Only this executable's fixture format is accepted; no real tools.
+      const QString source = QString::fromLocal8Bit(argv[argc - 1]);
+      if (read(source) != payloadBytes())
+        return 5;
+      const QString output = QDir::fromNativeSeparators(
+          QString::fromLocal8Bit(argv[2]));
+      const bool corrupt = output.contains("/corrupt-output/");
+      if (!put(output + "/boot.img", QByteArray(512, corrupt ? 'x' : 'p')))
+        return 6;
+      std::printf("Payload fixture extracted\n");
       return 0;
     }
     if (command == "devices" && argc == 2) {

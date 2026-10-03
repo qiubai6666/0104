@@ -8,6 +8,8 @@ struct OugaPayloadEntry {
 };
 class OugaPackage {
 public:
+  // A lightweight presence check only; scan() remains the validation gate.
+  static bool hasImageCandidates(const QString &directory);
   static QVector<Ouga::Partition> scan(const QString &directory,
                                        QString *error);
   static bool inspect(const QString &name, const QString &file,
