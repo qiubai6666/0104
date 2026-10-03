@@ -15,6 +15,7 @@
 #include <QDropEvent>
 #include <QFile>
 #include <QFileDialog>
+#include <QGroupBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -28,6 +29,7 @@
 #include <QScopeGuard>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QStyle>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QUuid>
@@ -1609,6 +1611,7 @@ private slots:
     QVERIFY(!window.isBusy());
   }
   void widgetIsInert() {
+    auto applicationStyle = QApplication::style();
     FakeRunner runner;
     OugaFlashWindow window(nullptr, &runner, dir + "/logs");
     window.show();
@@ -1621,6 +1624,18 @@ private slots:
     QCOMPARE(table->rowCount(), 0);
     QCOMPARE(table->columnCount(), 4);
     QVERIFY(!table->wordWrap());
+    QCOMPARE(QApplication::style(), applicationStyle);
+    auto referenceStyle = window.findChild<QStyle *>(
+        "OugaReferenceCheckboxStyle", Qt::FindDirectChildrenOnly);
+    QVERIFY(referenceStyle);
+    QCOMPARE(window.font().family(), QString("Microsoft YaHei UI"));
+    for (auto card : window.findChildren<QGroupBox *>())
+      QCOMPARE(card->font().family(), QString("Microsoft YaHei UI"));
+    for (auto box : window.findChildren<QCheckBox *>()) {
+      QCOMPARE(box->font().family(), QString("Microsoft YaHei UI"));
+      QCOMPARE(box->style()->pixelMetric(QStyle::PM_IndicatorWidth),
+               referenceStyle->pixelMetric(QStyle::PM_IndicatorWidth));
+    }
     QCOMPARE(table->horizontalHeaderItem(1)->text(), QString("名称"));
     QCOMPARE(table->horizontalHeaderItem(2)->text(), QString("大小"));
     QCOMPARE(table->horizontalHeaderItem(3)->text(), QString("文件路径"));

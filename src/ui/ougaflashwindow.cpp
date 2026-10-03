@@ -30,6 +30,7 @@
 #include <QSignalBlocker>
 #include <QShowEvent>
 #include <QStyle>
+#include <QStyleFactory>
 #include <QStyleOptionButton>
 #include <QStyledItemDelegate>
 #include <QSvgRenderer>
@@ -297,6 +298,7 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   font.setPixelSize(12);
   setFont(font);
   setStyleSheet(R"(
+    QWidget { font-family:"Microsoft YaHei UI"; }
     OugaFlashWindow { background:#F7F8FC; }
     QGroupBox { background:white; border:1px solid #E2E6ED; border-radius:8px;
       margin-top:8px; color:#263142; font-weight:600; font-size:12px; }
@@ -458,6 +460,15 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
       "当前写入结束后停止，不回滚已写内容，不杀死正在刷写的进程");
   connect(m_stop, &QPushButton::clicked, this, &OugaFlashWindow::requestStop);
   initializeServices(runner);
+  // Keep checkbox geometry and painting independent of the Windows theme.
+  // The style belongs only to this window, not the rest of the application.
+  if (auto style = QStyleFactory::create("Fusion")) {
+    style->setObjectName("OugaReferenceCheckboxStyle");
+    style->setParent(this);
+    m_table->setStyle(style);
+    for (auto box : findChildren<QCheckBox *>())
+      box->setStyle(style);
+  }
   selectPackage(false);
   layoutCards();
   updateBusy();
