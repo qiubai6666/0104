@@ -465,6 +465,8 @@ private slots:
              0);
     QVERIFY(put(directory + "/archive-create.txt", output));
     OugaPreparation preparation;
+    QSignalSpy progress(&preparation, &OugaPreparation::archiveProgress);
+    QSignalSpy logs(&preparation, &OugaPreparation::log);
     QSignalSpy done(&preparation, &OugaPreparation::finished);
     preparation.extractArchive(tool, archive, directory + "/解压 输出");
     QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 15000);
@@ -472,6 +474,19 @@ private slots:
     QCOMPARE(read(directory + "/解压 输出/boot.img"), bytes);
     QCOMPARE(read(source + "/boot.img"), bytes);
     QVERIFY(QFileInfo::exists(archive));
+    QVERIFY(progress.count() >= 2);
+    QCOMPARE(progress.first()[0].toInt(), 0);
+    QCOMPARE(progress.last()[0].toInt(), 100);
+    int previous = -1;
+    for (const auto &args : progress) {
+      const int percent = args[0].toInt();
+      QVERIFY(percent > previous && percent <= 100);
+      previous = percent;
+    }
+    QString text;
+    for (const auto &args : logs)
+      text += args[0].toString();
+    QVERIFY(text.contains("Everything is Ok"));
   }
   void realSuperGeneration() {
     if (realTools.isEmpty())

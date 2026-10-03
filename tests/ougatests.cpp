@@ -2141,9 +2141,32 @@ private slots:
           }
     });
     dialogGuard.start();
+    auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+    auto preparation = window.findChild<OugaPreparation *>();
+    QVERIFY(progress && preparation);
+    QList<int> archiveValues;
+    bool extractionReset = false;
+    connect(preparation, &OugaPreparation::archiveProgress, &window,
+            [&](int percent) {
+              archiveValues << percent;
+              QCOMPARE(progress->value(), percent);
+              QCOMPARE(progress->property("rate").toString(),
+                       QString("解压中..."));
+              if (percent == 42)
+                QVERIFY(window.grab().save(dir + "/archive-progress.png"));
+            });
+    connect(preparation, &OugaPreparation::busyChanged, &window, [&](bool busy) {
+      if (busy && progress->property("rate").toString() == "提取中...") {
+        QCOMPARE(progress->value(), 0);
+        extractionReset = true;
+      }
+    });
     window.findChild<QPushButton *>("UnpackPayloadButton")->click();
     QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 10000);
     QCOMPARE(unexpectedFileDialogs, 0);
+    QCOMPARE(archiveValues, (QList<int>{0, 12, 42, 64, 80, 99, 100}));
+    QVERIFY(extractionReset);
+    QCOMPARE(progress->value(), corruptOutput ? 0 : 100);
     const QString images = imagesDirectory ? output : output + "/images";
     QVERIFY(QFileInfo::exists(images + "/boot.img"));
     QVERIFY(!QFileInfo::exists(images + "/images"));
@@ -2437,6 +2460,94 @@ private slots:
     if (!scanImages)
       QCOMPARE(extracted[0][0].toString(), dir + "/output");
   }
+  void archiveProgress_data() {
+    QTest::addColumn<QString>("outcome");
+    QTest::addColumn<bool>("scanImages");
+    QTest::addColumn<bool>("success");
+    QTest::newRow("fragmented-cr-backspace-two-streams")
+        << "success" << false << true;
+    QTest::newRow("zero-exit-with-failed-output")
+        << "failed-marker" << false << false;
+    QTest::newRow("nonzero-exit") << "nonzero" << false << false;
+    QTest::newRow("validation-fails-after-tool-100")
+        << "scan-failure" << true << false;
+    QTest::newRow("cancel-midway") << "cancel" << false << false;
+    QTest::newRow("cancel-before-process-start")
+        << "cancel-start" << false << false;
+    QTest::newRow("failed-to-start") << "start-failure" << false << false;
+    QTest::newRow("no-progress-output") << "silent" << false << true;
+    QTest::newRow("listing-fails") << "list-failure" << false << false;
+  }
+  void archiveProgress() {
+    QFETCH(QString, outcome);
+    QFETCH(bool, scanImages);
+    QFETCH(bool, success);
+    const QString source = dir + "/input/progress.mock-archive";
+    const QString output = dir + "/output";
+    QVERIFY(QDir().mkpath(dir + "/input"));
+    QVERIFY(put(source, "archive-progress-" + outcome.toUtf8()));
+    OugaPreparation prep;
+    QSignalSpy progress(&prep, &OugaPreparation::archiveProgress);
+    QSignalSpy extracted(&prep, &OugaPreparation::archiveExtracted);
+    QSignalSpy done(&prep, &OugaPreparation::finished);
+    connect(&prep, &OugaPreparation::archiveProgress, &prep, [&](int percent) {
+      if ((outcome == "cancel" && percent == 42) ||
+          (outcome == "cancel-start" && percent == 0))
+        prep.cancel();
+      if (percent == 100) {
+        QVERIFY(QFileInfo::exists(output + "/payload.bin"));
+        QCOMPARE(read(output + "/payload.bin"), payloadBytes(false, 9));
+        QCOMPARE(done.count(), 0);
+      }
+    });
+    const QString tool = outcome == "start-failure"
+        ? dir + "/missing-7z.exe" : QCoreApplication::applicationFilePath();
+    prep.extractArchive(tool, source, output, scanImages);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 5000);
+    QCOMPARE(done[0][0].toBool(), success);
+    QCOMPARE(extracted.count(), success ? 1 : 0);
+    QList<int> values;
+    for (const auto &args : progress)
+      values << args[0].toInt();
+    QList<int> expected;
+    if (outcome == "cancel-start")
+      expected = {0};
+    else if (outcome == "cancel")
+      expected = {0, 12, 42};
+    else if (outcome == "silent")
+      expected = {0, 100};
+    else if (outcome != "start-failure" && outcome != "list-failure")
+      expected = {0, 12, 42, 64, 80, 99};
+    if (success && outcome != "silent")
+      expected << 100;
+    QCOMPARE(values, expected);
+    if (outcome == "failed-marker")
+      QVERIFY(done[0][1].toString().contains("FAILED"));
+    QVERIFY(!prep.busy());
+  }
+  void archiveProgressResetsBetweenRuns() {
+    QVERIFY(QDir().mkpath(dir + "/input"));
+    const QString source = dir + "/input/reuse.mock-archive";
+    OugaPreparation prep;
+    QSignalSpy progress(&prep, &OugaPreparation::archiveProgress);
+    QSignalSpy done(&prep, &OugaPreparation::finished);
+    for (int i = 0; i < 2; ++i) {
+      QVERIFY(put(source, i == 0 ? "archive-progress-failed-marker"
+                                : "archive-progress-success"));
+      progress.clear();
+      prep.extractArchive(QCoreApplication::applicationFilePath(), source,
+                          dir + "/output-" + QString::number(i), false);
+      QTRY_COMPARE_WITH_TIMEOUT(done.count(), i + 1, 5000);
+      QCOMPARE(done[i][0].toBool(), i == 1);
+      QList<int> values;
+      for (const auto &args : progress)
+        values << args[0].toInt();
+      QList<int> expected{0, 12, 42, 64, 80, 99};
+      if (i == 1)
+        expected << 100;
+      QCOMPARE(values, expected);
+    }
+  }
   void authorizedAdbDiscoveryAndRead() {
     OugaPreparation prep;
     QSignalSpy devices(&prep, &OugaPreparation::adbDevicesFound);
@@ -2469,23 +2580,62 @@ int main(int argc, char **argv) {
     const QString command = QString::fromLocal8Bit(argv[1]);
     if (command == "l" &&
         QString::fromLocal8Bit(argv[argc - 1]).endsWith(".mock-archive")) {
-      std::printf("Path = payload.bin\nSize = 100\nAttributes = A\n\n");
+      const QByteArray scenario = read(QString::fromLocal8Bit(argv[argc - 1]));
+      if (scenario == "archive-progress-list-failure") {
+        std::fprintf(stderr, "FAILED (injected listing error)\n");
+        return 0;
+      }
+      // Percent-looking listing text must never become extraction progress.
+      std::printf("87%% \nPath = payload.bin\nSize = 100\nAttributes = A\n\n");
       return 0;
     }
     if (command == "x" &&
         QString::fromLocal8Bit(argv[argc - 1]).endsWith(".mock-archive")) {
       QString output;
+      bool progressOutput = false, ordinaryOutput = false;
       for (int i = 2; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg.startsWith("-o"))
           output = arg.mid(2);
+        progressOutput |= arg == "-bsp1";
+        ordinaryOutput |= arg == "-bso2";
       }
-      if (output.isEmpty())
+      if (output.isEmpty() || !progressOutput || !ordinaryOutput)
         return 2;
+      const QByteArray scenario = read(QString::fromLocal8Bit(argv[argc - 1]));
+      const auto writeChunk = [](FILE *stream, const QByteArray &bytes) {
+        std::fwrite(bytes.constData(), 1, size_t(bytes.size()), stream);
+        std::fflush(stream);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      };
+      if (scenario != "archive-progress-silent") {
+        writeChunk(stdout, "\r  0%\b\b\b 1");
+        writeChunk(stdout, "2");
+        writeChunk(stdout, "% ");
+        writeChunk(stdout, "\r4");
+        writeChunk(stderr, "8% \n");
+        writeChunk(stdout, "2%\b");
+        writeChunk(stderr, "\r6");
+        writeChunk(stdout, "1% \n");
+        writeChunk(stderr, "4% \r");
+        // Reject out-of-range, signed, decimal, filenames and embedded tokens.
+        writeChunk(stdout, "101% \r1234% \r-9% \r1.5% \r41% \r42% "
+                           "\r98%name\nprefix 97%\nfile96%.img\n");
+        writeChunk(stdout, "filename " + QByteArray(8192, 'x') + "95% \n");
+        writeChunk(stdout, "\r 80% \b\b\b\b\b 100%");
+      }
+      if (scenario == "archive-progress-failed-marker") {
+        std::fprintf(stderr, "FAILED (injected extraction error)\n");
+        return 0;
+      }
+      if (scenario == "archive-progress-nonzero") {
+        std::fprintf(stderr, "Injected extraction error\n");
+        return 9;
+      }
       // Modern full Ouga packages can carry minor_version=9 without source ops.
       if (!put(output + "/payload.bin", payloadBytes(false, 9)))
         return 3;
-      std::printf("Everything is Ok\n");
+      std::fprintf(stderr, "Everything is Ok\n");
       return 0;
     }
     if (command == "--out" && argc >= 6 &&

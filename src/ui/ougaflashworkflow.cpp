@@ -39,6 +39,13 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
   m_rom = new OugaRomService(this);
   connect(m_service, &OugaFlashService::log, this, &OugaFlashWindow::log);
   connect(m_prepare, &OugaPreparation::log, this, &OugaFlashWindow::log);
+  connect(m_prepare, &OugaPreparation::archiveProgress, this, [this](int percent) {
+    if (!m_stopRequested &&
+        (m_task == Task::PayloadArchive || m_task == Task::RescueArchive)) {
+      m_progress->setValue(percent);
+      m_progress->update();
+    }
+  });
   connect(m_rom, &OugaRomService::log, this, &OugaFlashWindow::log);
   connect(m_service, &OugaFlashService::busyChanged, this,
           &OugaFlashWindow::updateBusy);
@@ -311,6 +318,7 @@ void OugaFlashWindow::preparePayloadSource() {
     m_archiveRoot = uniqueWork(QFileInfo(m_payloadOutput).absolutePath(),
                                "ouga-payload-source");
     m_task = Task::PayloadArchive;
+    m_progress->setValue(0);
     m_progress->setProperty("rate", "解压中...");
     updateBusy();
     m_prepare->extractArchive(sevenZip, m_payloadSource, m_archiveRoot, false);
@@ -371,6 +379,7 @@ void OugaFlashWindow::runPayload() {
     return;
   }
   m_task = Task::PayloadExtract;
+  m_progress->setValue(0);
   m_progress->setProperty("rate", "提取中...");
   updateBusy();
   m_prepare->payload(tool, m_payloadSource, m_payloadOutput, m_extractNames,
@@ -490,6 +499,7 @@ void OugaFlashWindow::networkFinished(bool success, const QString &message) {
         return;
       }
       m_task = Task::RescueArchive;
+      m_progress->setValue(0);
       m_progress->setProperty("rate", "解压中...");
       m_prepare->extractArchive(tool, m_downloaded, output);
     }

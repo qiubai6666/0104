@@ -27,6 +27,7 @@ signals:
   void prepared(const QVector<Ouga::Partition> &images,
                 const QString &directory);
   void archiveExtracted(const QString &directory);
+  void archiveProgress(int percent);
   void payloadListed(const QStringList &partitions);
   void adbDevicesFound(const QStringList &serials);
   void arbRead(const QString &file, quint32 index);
@@ -38,12 +39,24 @@ private:
   bool m_busy = false, m_cancel = false, m_lease = false;
   QProcess m_process;
   QString m_output;
+  struct ArchiveProgressState {
+    enum Phase { LeadingSpace, Digits, Percent, Ignore };
+    Phase phase = LeadingSpace;
+    int percent = 0, digits = 0;
+  };
+  ArchiveProgressState m_archiveProgressStreams[2];
+  bool m_reportArchiveProgress = false;
+  int m_lastArchiveProgress = -1;
   std::function<void(bool, const QString &)> m_callback;
   bool begin();
   void end(bool ok, const QString &message);
   bool newOutput(const QString &source, const QString &output, QString *error);
   void run(const QString &tool, const QStringList &args, const QString &cwd,
-           std::function<void(bool, const QString &)> done);
+           std::function<void(bool, const QString &)> done,
+           bool reportArchiveProgress = false);
+  void consumeOutput(const QByteArray &bytes, bool standardError,
+                     bool final = false);
+  void publishArchiveProgress(int percent);
   void work(std::function<QString()> job, std::function<void()> done);
 };
 #endif
