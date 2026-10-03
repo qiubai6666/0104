@@ -1,6 +1,7 @@
 #ifndef OUGAPREPARATION_H
 #define OUGAPREPARATION_H
 #include "ougapackage.h"
+#include "ougapayloadprocess.h"
 #include <QFutureWatcher>
 #include <QObject>
 #include <QProcess>
@@ -28,6 +29,9 @@ signals:
                 const QString &directory);
   void archiveExtracted(const QString &directory);
   void archiveProgress(int percent);
+  void payloadProgress(int percent);
+  void payloadPartitionStarted(const QString &name);
+  void payloadPartitionFinished(const QString &name, bool success);
   void payloadListed(const QStringList &partitions);
   void adbDevicesFound(const QStringList &serials);
   void arbRead(const QString &file, quint32 index);
@@ -38,6 +42,17 @@ signals:
 private:
   bool m_busy = false, m_cancel = false, m_lease = false;
   QProcess m_process;
+  OugaPayloadProcess m_payloadProcess;
+  QMap<QString, quint64> m_payloadOperations, m_payloadDone;
+  QMap<QString, int> m_payloadRows;
+  QByteArray m_payloadLine;
+  enum TerminalState { Text, Escape, Csi, Osc, OscEscape };
+  TerminalState m_terminalState = Text;
+  bool m_payloadActive = false, m_quietOutput = false;
+  int m_lastPayloadProgress = -1;
+  void consumePayloadOutput(const QByteArray &bytes);
+  void parsePayloadCounter();
+  void startPayloadRow(const QString &name);
   QString m_output;
   struct ArchiveProgressState {
     enum Phase { LeadingSpace, Digits, Percent, Ignore };
@@ -53,7 +68,7 @@ private:
   bool newOutput(const QString &source, const QString &output, QString *error);
   void run(const QString &tool, const QStringList &args, const QString &cwd,
            std::function<void(bool, const QString &)> done,
-           bool reportArchiveProgress = false);
+           bool reportArchiveProgress = false, bool quietOutput = false);
   void consumeOutput(const QByteArray &bytes, bool standardError,
                      bool final = false);
   void publishArchiveProgress(int percent);

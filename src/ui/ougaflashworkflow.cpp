@@ -43,9 +43,27 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
     if (!m_stopRequested &&
         (m_task == Task::PayloadArchive || m_task == Task::RescueArchive)) {
       m_progress->setValue(percent);
+      m_progress->setProperty("rate", QString("解压中 %1%").arg(percent));
       m_progress->update();
     }
   });
+  connect(m_prepare, &OugaPreparation::payloadProgress, this, [this](int percent) {
+    if (!m_stopRequested && m_task == Task::PayloadExtract) {
+      m_progress->setValue(percent);
+      m_progress->setProperty("rate", QString(m_unpackPayload ? "解包中 %1%" : "提取中 %1%").arg(percent));
+      m_progress->update();
+    }
+  });
+  connect(m_prepare, &OugaPreparation::payloadListed, this, [this](const QStringList &names) {
+    if (m_task != Task::PayloadExtract || m_stopRequested) return;
+    log(QString(m_unpackPayload ? "发现 %1 个分区: %2" : "本次将提取 %1 个分区: %2")
+            .arg(names.size()).arg(names.join(", ")));
+    if (m_unpackPayload) log("开始解包分区...");
+  });
+  connect(m_prepare, &OugaPreparation::payloadPartitionStarted, this,
+          &OugaFlashWindow::payloadLogStart);
+  connect(m_prepare, &OugaPreparation::payloadPartitionFinished, this,
+          &OugaFlashWindow::payloadLogFinish);
   connect(m_rom, &OugaRomService::log, this, &OugaFlashWindow::log);
   connect(m_service, &OugaFlashService::busyChanged, this,
           &OugaFlashWindow::updateBusy);
@@ -102,15 +120,27 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
 
 void OugaFlashWindow::endTask(bool success, const QString &message) {
   ++m_generation;
-  log((success ? "完成：" : "已停止/失败：") + message);
+  if (success && m_task == Task::PayloadExtract) {
+    if (m_unpackPayload) {
+      log("Payload解包成功！");
+      log("解包完成，文件保存在: " + m_payloadOutput);
+    } else {
+      log(m_extractNames.size() == 1
+              ? "分区 " + m_extractNames.first() + " 提取完成！" : "镜像提取完成！");
+    }
+    log(QString("已加载 %1 个镜像文件").arg(m_pages[m_page].images.size()));
+  } else {
+    log((success ? "完成：" : "已停止/失败：") + message);
+  }
   if (m_session && !m_service->busy()) {
     DeviceOperationLease::release(m_service);
     m_session = false;
   }
+  const bool payloadComplete = success && m_task == Task::PayloadExtract;
   m_task = Task::None;
   m_stopRequested = false;
   setExecutionOverlay(false);
-  m_progress->setProperty("rate", success ? "阶段完成" : "已停止");
+  m_progress->setProperty("rate", success ? (payloadComplete ? "完成" : "阶段完成") : "已停止");
   m_progress->update();
   updateBusy();
 }
@@ -213,6 +243,7 @@ void OugaFlashWindow::extractPayload(bool all) {
     return;
   Page &page = m_pages[m_page];
   const int preset = page.preset->currentIndex();
+  m_unpackPayload = all;
   m_extractNames.clear();
   if (!all) {
     QString selection = page.preset->currentText().trimmed();
@@ -298,6 +329,11 @@ void OugaFlashWindow::preparePayloadSource() {
   const quint64 generation = m_generation;
   if (!continueTask(generation))
     return;
+  log(m_unpackPayload ? "开始解包，输出将实时显示在日志窗口中。"
+                      : m_extractNames.isEmpty() ? "开始提取镜像..."
+                                               : "开始提取分区: " + m_extractNames.join(", "));
+  log("源文件: " + m_payloadSource);
+  log("输出目录: " + m_payloadOutput);
   QFile file(m_payloadSource);
   if (!file.open(QIODevice::ReadOnly)) {
     endTask(false, "源文件无法读取");
@@ -379,8 +415,9 @@ void OugaFlashWindow::runPayload() {
     return;
   }
   m_task = Task::PayloadExtract;
+  m_payloadLogBlocks.clear();
   m_progress->setValue(0);
-  m_progress->setProperty("rate", "提取中...");
+  m_progress->setProperty("rate", m_unpackPayload ? "解包中..." : "提取中...");
   updateBusy();
   m_prepare->payload(tool, m_payloadSource, m_payloadOutput, m_extractNames,
                      oldDirectory);
@@ -389,7 +426,10 @@ void OugaFlashWindow::preparationFinished(bool success,
                                           const QString &message) {
   if (m_task == Task::None)
     return;
-  log(message);
+  // Successful Payload stages have the reference-style messages above; keep
+  // validation diagnostics on failures without adding duplicate success lines.
+  if (!success || (m_task != Task::PayloadArchive && m_task != Task::PayloadExtract))
+    log(message);
   if (!success || m_stopRequested) {
     endTask(false,
             m_stopRequested ? "用户已请求停止；准备输出予以保留" : message);

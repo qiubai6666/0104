@@ -8,12 +8,14 @@ SOURCES += $$PWD/ougadependencytests.cpp \
     $$PWD/../src/services/resourceextractor.cpp \
     $$PWD/../src/services/ougacommandrunner.cpp \
     $$PWD/../src/services/ougapreparation.cpp \
+    $$PWD/../src/services/ougapayloadprocess.cpp \
     $$PWD/../src/services/ougapackage.cpp \
     $$PWD/../src/services/ougaflashtypes.cpp \
     $$PWD/../src/services/deviceoperationlease.cpp
 HEADERS += $$PWD/../src/services/resourceextractor.h \
     $$PWD/../src/services/ougacommandrunner.h \
     $$PWD/../src/services/ougapreparation.h \
+    $$PWD/../src/services/ougapayloadprocess.h \
     $$PWD/../src/services/ougapackage.h \
     $$PWD/../src/services/ougaflashtypes.h \
     $$PWD/../src/services/deviceoperationlease.h

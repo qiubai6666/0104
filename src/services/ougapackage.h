@@ -3,7 +3,7 @@
 #include "ougaflashtypes.h"
 struct OugaPayloadEntry {
   QString name;
-  quint64 size = 0, oldSize = 0;
+  quint64 size = 0, oldSize = 0, operations = 0;
   QByteArray hash, oldHash;
   bool requiresOldImage = false;
 };

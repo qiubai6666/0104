@@ -5,6 +5,8 @@
 #include "resourceextractor.h"
 #include <QCoreApplication>
 #include <QDir>
+#include <QCryptographicHash>
+#include <QtEndian>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
@@ -486,7 +488,102 @@ private slots:
     QString text;
     for (const auto &args : logs)
       text += args[0].toString();
-    QVERIFY(text.contains("Everything is Ok"));
+    QVERIFY(!text.contains("Everything is Ok"));
+    QVERIFY(!text.contains("Path = "));
+    QVERIFY(text.contains("正在解压售后包"));
+  }
+  void realPayloadProgress_data() {
+    QTest::addColumn<bool>("parallel");
+    QTest::newRow("single-partition") << false;
+    QTest::newRow("parallel-partitions") << true;
+  }
+  void realPayloadProgress() {
+    QFETCH(bool, parallel);
+    if (realTools.isEmpty()) QSKIP("Real payload tool must be supplied explicitly");
+    // 256 actual REPLACE_BZ operations; no image-size-derived progress. The
+    // embedded BZip2 stream expands to one MiB of 'p'. Entire fixture is synthetic.
+    const QByteArray packed = QByteArray::fromHex("425a683931415926535953c3a50500080a4080800440000008200030cc0549ea71060140601e2ee48a70a120a7874a0a");
+    const int operations = 256, blockBytes = 1024 * 1024;
+    const auto varint = [](quint64 value) {
+      QByteArray result;
+      do { result += char((value & 127) | (value > 127 ? 128 : 0)); value >>= 7; } while (value);
+      return result;
+    };
+    const auto number = [&](int field, quint64 value) { return varint(field * 8) + varint(value); };
+    const auto message = [&](int field, const QByteArray &value) {
+      return varint(field * 8 + 2) + varint(value.size()) + value;
+    };
+    const QByteArray data(blockBytes, 'p');
+    int offset = 0;
+    const auto partition = [&](const QByteArray &name, int count) {
+      QCryptographicHash hash(QCryptographicHash::Sha256);
+      for (int i = 0; i < count; ++i) hash.addData(data);
+      QByteArray result = message(1, name) + message(7,
+          number(1, quint64(count) * blockBytes) + message(2, hash.result()));
+      for (int i = 0; i < count; ++i)
+        result += message(8, number(1, 1) + number(2, offset++ * packed.size()) +
+            number(3, packed.size()) + message(6, number(1, i * 256) + number(2, 256)) +
+            number(7, blockBytes));
+      return message(13, result);
+    };
+    const int bootOperations = parallel ? 192 : operations;
+    QByteArray manifest = number(3, 4096) + partition("boot", bootOperations);
+    if (parallel) manifest += partition("vendor", operations - bootOperations);
+    QByteArray header(24, 0);
+    header.replace(0, 4, "CrAU");
+    qToBigEndian<quint64>(2, reinterpret_cast<uchar *>(header.data() + 4));
+    qToBigEndian<quint64>(manifest.size(), reinterpret_cast<uchar *>(header.data() + 12));
+    const QString source = directory + "/输入 中文/payload.bin";
+    QVERIFY(put(source, header + manifest + packed.repeated(operations)));
+    const QString archive = directory + "/输入 中文/全量 包.zip";
+    QVERIFY(put(directory + "/输入 中文/unrelated.img", QByteArray(4096, 'x')));
+    QByteArray zipOutput;
+    const QString sevenZip = OugaProcessRunner::bundledToolPath(realTools, "7z");
+    QCOMPARE(localCommand(sevenZip, {"a", "-tzip", "-y", "-sccUTF-8", archive,
+                                    "payload.bin", "unrelated.img"}, QFileInfo(source).absolutePath(), &zipOutput), 0);
+    OugaPreparation prep;
+    QSignalSpy done(&prep, &OugaPreparation::finished);
+    QSignalSpy progress(&prep, &OugaPreparation::payloadProgress);
+    QSignalSpy rows(&prep, &OugaPreparation::payloadPartitionFinished);
+    QSignalSpy logs(&prep, &OugaPreparation::log);
+    const QString unpacked = directory + "/unpacked";
+    prep.extractArchive(sevenZip, archive, unpacked, false);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 15000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    QCOMPARE(read(unpacked + "/payload.bin"), read(source));
+    QVERIFY(!QFileInfo::exists(unpacked + "/unrelated.img"));
+    const QString tool = OugaProcessRunner::bundledToolPath(realTools, "payload");
+    prep.payload(tool, unpacked + "/payload.bin", directory + "/镜像 输出");
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 2, 60000);
+    QVERIFY2(done[1][0].toBool(), qPrintable(done[1][1].toString()));
+    QCOMPARE(progress.first()[0].toInt(), 0);
+    QCOMPARE(progress.last()[0].toInt(), 100);
+    bool intermediate = false;
+    QStringList percentages;
+    for (const auto &row : progress) {
+      percentages << row[0].toString();
+      intermediate |= row[0].toInt() > 0 && row[0].toInt() < 99;
+    }
+    QVERIFY2(intermediate, qPrintable("No real intermediate operation counters: " + percentages.join(",")));
+    QCOMPARE(rows.count(), parallel ? 2 : 1);
+    QSet<QString> finished;
+    for (const auto &row : rows) {
+      QVERIFY(row[1].toBool());
+      finished.insert(row[0].toString());
+    }
+    QVERIFY(finished.contains("boot"));
+    QCOMPARE(QFileInfo(directory + "/镜像 输出/boot.img").size(), qint64(bootOperations) * blockBytes);
+    if (parallel) {
+      QVERIFY(finished.contains("vendor"));
+      QCOMPARE(QFileInfo(directory + "/镜像 输出/vendor.img").size(),
+               qint64(operations - bootOperations) * blockBytes);
+    }
+    QString text;
+    for (const auto &row : logs) text += row[0].toString();
+    QVERIFY(!text.contains("Everything is Ok"));
+    QVERIFY(!text.contains("Path = "));
+    QVERIFY(text.contains("payload.bin 解压完成"));
+    qInfo() << "Bundled tool operation progress:" << percentages;
   }
   void realSuperGeneration() {
     if (realTools.isEmpty())

@@ -504,6 +504,7 @@ bool OugaPackage::payloadManifest(const QString &file,
         e.name = QString::fromUtf8(p.data);
       }
       if (p.n == 8) {
+        ++e.operations;
         if (p.wire != 2)
           return fail(error, "Payload operation 类型无效");
         if (!payloadOperationNeedsOldImage(p.data, &e.requiresOldImage, error))

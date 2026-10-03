@@ -3,6 +3,8 @@
 #include "ougaflashtypes.h"
 #include <QElapsedTimer>
 #include <QWidget>
+#include <QTextBlock>
+#include <QMap>
 #include <functional>
 class QLineEdit;
 class QComboBox;
@@ -90,6 +92,7 @@ private:
   Ouga::Plan m_plan;
   QStringList m_serials, m_extractNames;
   QString m_payloadSource, m_payloadOutput, m_archiveRoot, m_downloaded;
+  bool m_unpackPayload = false;
   QString m_currentArb, m_currentArbSerial, m_logDirectory, m_adbTool;
   QElapsedTimer m_transferClock;
   qint64 m_lastBytes = 0;
@@ -110,6 +113,9 @@ private:
   void updateBusy();
   void updateSelection();
   void log(const QString &message);
+  void payloadLogStart(const QString &name);
+  void payloadLogFinish(const QString &name, bool success);
+  QMap<QString, QTextBlock> m_payloadLogBlocks;
   void endTask(bool success, const QString &message);
   bool continueTask(quint64 generation);
   void load(const QString &path);

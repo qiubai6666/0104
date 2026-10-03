@@ -5,9 +5,26 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTimer>
+#include <QRegularExpression>
+#include <QLocale>
 #include <QUuid>
 #include <QtConcurrent>
 OugaPreparation::OugaPreparation(QObject *parent) : QObject(parent) {
+  connect(&m_payloadProcess, &OugaPayloadProcess::output, this,
+          &OugaPreparation::consumePayloadOutput);
+  connect(&m_payloadProcess, &OugaPayloadProcess::finished, this,
+          [this](int code, bool normal, const QString &error) {
+    parsePayloadCounter();
+    auto callback = std::move(m_callback);
+    m_callback = {};
+    if (m_cancel) {
+      end(false, "准备已取消；保留生成的文件，不自动删除");
+      return;
+    }
+    if (callback)
+      callback(error.isEmpty() && Ouga::commandSucceeded(code, normal, m_output),
+               error.isEmpty() ? m_output : error);
+  });
   connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] {
     consumeOutput(m_process.readAllStandardOutput(), false);
   });
@@ -58,7 +75,14 @@ bool OugaPreparation::begin() {
   return true;
 }
 void OugaPreparation::end(bool ok, const QString &s) {
+  if (m_payloadActive) {
+    for (auto i = m_payloadRows.cbegin(); i != m_payloadRows.cend(); ++i)
+      if (i.value() == 1)
+        emit payloadPartitionFinished(i.key(), false);
+    m_payloadActive = false;
+  }
   m_busy = false;
+  m_quietOutput = false;
   m_reportArchiveProgress = false;
   m_process.setStandardOutputFile(
       QString()); // Also reset redirection after a cancelled ARB read.
@@ -71,13 +95,15 @@ void OugaPreparation::end(bool ok, const QString &s) {
 }
 void OugaPreparation::cancel() {
   m_cancel = true;
+  if (m_payloadActive) m_payloadProcess.cancel();
   if (m_process.state() != QProcess::NotRunning)
     m_process.kill();
 }
 void OugaPreparation::run(const QString &tool, const QStringList &args,
                           const QString &cwd,
                           std::function<void(bool, const QString &)> done,
-                          bool reportArchiveProgress) {
+                          bool reportArchiveProgress, bool quietOutput) {
+  m_quietOutput = quietOutput || reportArchiveProgress;
   m_output.clear();
   m_reportArchiveProgress = reportArchiveProgress;
   for (auto &stream : m_archiveProgressStreams)
@@ -106,9 +132,8 @@ void OugaPreparation::consumeOutput(const QByteArray &bytes, bool standardError,
                                     bool final) {
   const QString text = QString::fromLocal8Bit(bytes);
   m_output += text;
-  // During extraction, -bso2 keeps ordinary 7z output on stderr. Preserve
-  // both raw streams, but do not log stdout's in-place terminal progress.
-  if (!text.isEmpty() && (!m_reportArchiveProgress || standardError))
+  // Retain raw diagnostics for failure, without listing/banner/terminal noise.
+  if (!text.isEmpty() && !m_quietOutput)
     emit log(text);
   if (!m_reportArchiveProgress)
     return;
@@ -153,6 +178,73 @@ void OugaPreparation::consumeOutput(const QByteArray &bytes, bool standardError,
   }
   if (final && stream.phase == ArchiveProgressState::Percent)
     publishArchiveProgress(stream.percent);
+}
+void OugaPreparation::startPayloadRow(const QString &name) {
+  if (m_payloadRows.value(name) == 0) {
+    m_payloadRows[name] = 1;
+    emit payloadPartitionStarted(name);
+  }
+}
+void OugaPreparation::parsePayloadCounter() {
+  // Read completed/total operation counts, NOT rounded terminal percentages,
+  // output-file lengths, elapsed time, or preallocated/sparse extents.
+  static const QRegularExpression row(
+      R"(^([A-Za-z0-9_]+) +[0-9]{1,3}%\|.*\| *([0-9]+) */ *([0-9]+)(?: |$))");
+  const auto match = row.match(QString::fromUtf8(m_payloadLine));
+  if (!match.hasMatch() || m_cancel) return;
+  const QString name = match.captured(1);
+  bool a = false, b = false;
+  const quint64 done = match.captured(2).toULongLong(&a);
+  const quint64 total = match.captured(3).toULongLong(&b);
+  if (!a || !b || !total || !m_payloadOperations.contains(name) ||
+      total != m_payloadOperations.value(name) || done > total ||
+      done < m_payloadDone.value(name)) return;
+  startPayloadRow(name);
+  m_payloadDone[name] = done;
+  quint64 all = 0, completed = 0;
+  for (auto i = m_payloadOperations.cbegin(); i != m_payloadOperations.cend(); ++i) {
+    all += i.value();
+    completed += m_payloadDone.value(i.key());
+  }
+  const int percent = all ? qMin(99, int(completed * 100 / all)) : 0;
+  if (percent > m_lastPayloadProgress) {
+    m_lastPayloadProgress = percent;
+    emit payloadProgress(percent);
+  }
+}
+void OugaPreparation::consumePayloadOutput(const QByteArray &bytes) {
+  m_output += QString::fromUtf8(bytes);
+  for (const char c : bytes) {
+    switch (m_terminalState) {
+    case Escape:
+      m_terminalState = c == '[' ? Csi : c == ']' ? Osc : Text;
+      break;
+    case Csi:
+      if (c >= '@' && c <= '~') {
+        m_terminalState = Text;
+        if (c != 'm') { parsePayloadCounter(); m_payloadLine.clear(); }
+      }
+      break;
+    case Osc:
+      if (c == '\a') m_terminalState = Text;
+      else if (c == '\x1b') m_terminalState = OscEscape;
+      break;
+    case OscEscape:
+      m_terminalState = c == '\\' ? Text : Osc;
+      break;
+    case Text:
+      if (c == '\x1b') m_terminalState = Escape;
+      else if (c == '\r' || c == '\n') {
+        parsePayloadCounter(); m_payloadLine.clear();
+      } else if (c == '\b') {
+        if (!m_payloadLine.isEmpty()) m_payloadLine.chop(1);
+      } else if (m_payloadLine.size() < 4096) {
+        m_payloadLine += c;
+        if (c == '[') parsePayloadCounter();
+      }
+      break;
+    }
+  }
 }
 void OugaPreparation::work(std::function<QString()> job,
                            std::function<void()> done) {
@@ -300,15 +392,34 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
         if (!selected.isEmpty())
           args << "--partitions" << selected.join(',');
         args << file;
-        run(tool, args, output,
-            [this, entries, output, selected](bool ok, const QString &out) {
+        m_payloadActive = true;
+        m_output.clear();
+        m_payloadOperations.clear();
+        m_payloadDone.clear();
+        m_payloadRows.clear();
+        m_payloadLine.clear();
+        m_terminalState = Text;
+        m_lastPayloadProgress = 0;
+        QStringList names;
+        for (const auto &p : *entries)
+          if (selected.isEmpty() || selected.contains(p.name)) {
+            m_payloadOperations.insert(p.name, p.operations);
+            names << p.name;
+          }
+        emit payloadListed(names);
+        emit payloadProgress(0);
+        if (m_cancel) { end(false, "准备已取消；保留输出文件"); return; }
+        m_callback = [this, entries, output, selected](bool ok, const QString &out) {
               if (!ok) {
                 end(false, "Payload 提取失败（未刷写）：" + out);
                 return;
               }
+              for (const auto &p : *entries)
+                if (selected.isEmpty() || selected.contains(p.name))
+                  startPayloadRow(p.name);
               auto images = std::make_shared<QVector<Ouga::Partition>>();
               work(
-                  [entries, output, selected, images] {
+                  [this, entries, output, selected, images] {
                     QString e;
                     for (const auto &p : *entries) {
                       if (!selected.isEmpty() && !selected.contains(p.name))
@@ -319,15 +430,23 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
                           OugaPackage::digest(f, &e) != p.hash)
                         return QString("Payload 输出缺失/长度/SHA-256 不符：") +
                                p.name;
+                      QMetaObject::invokeMethod(this, [this, name = p.name] {
+                        if (!m_cancel && m_payloadActive) {
+                          m_payloadRows[name] = 2;
+                          emit payloadPartitionFinished(name, true);
+                        }
+                      }, Qt::QueuedConnection);
                     }
                     *images = OugaPackage::scan(output, &e);
                     return e;
                   },
                   [this, images, output] {
+                    emit payloadProgress(100);
                     emit prepared(*images, output);
                     end(true, "Payload 已提取并重新校验；尚未写入设备");
                   });
-            });
+            };
+        m_payloadProcess.start(tool, args, output);
       });
 }
 void OugaPreparation::extractArchive(const QString &tool, const QString &file,
@@ -343,12 +462,39 @@ void OugaPreparation::extractArchive(const QString &tool, const QString &file,
       [this, tool, file, output, scanImages](bool ok, const QString &listing) {
         QString e;
         if (!ok || !OugaPackage::safeArchiveListing(listing, &e)) {
-          end(false, "解压前校验失败：" + e);
+          end(false, "解压前校验失败：" + (ok ? e : listing));
           return;
         }
-        run(tool,
-            {"x", "-y", "-aos", "-sccUTF-8", "-bsp1", "-bso2",
-             "-o" + output, file},
+        QStringList arguments = {"x", "-y", "-aos", "-sccUTF-8", "-bsp1", "-bso2", "-o" + output};
+        if (!scanImages) {
+          QStringList payloads;
+          quint64 payloadSize = 0;
+          for (const QString &block : listing.split(QRegularExpression("\\r?\\n\\r?\\n"))) {
+            QString path;
+            quint64 size = 0;
+            for (const QString &line : block.split('\n')) {
+              if (line.startsWith("Path = ")) path = line.mid(7).trimmed();
+              if (line.startsWith("Size = ")) size = line.mid(7).trimmed().toULongLong();
+            }
+            if (QFileInfo(QDir::fromNativeSeparators(path)).fileName().compare("payload.bin", Qt::CaseInsensitive) == 0) {
+              payloads << path;
+              payloadSize = size;
+            }
+          }
+          if (payloads.size() != 1) {
+            end(false, payloads.isEmpty() ? "ZIP中没有payload.bin" : "ZIP中有多个payload.bin，请消除歧义");
+            return;
+          }
+          emit log("正在预解压 payload.bin...");
+          emit log(QString("正在从 ZIP 解压 payload.bin (%1)，可能需要几分钟...")
+                       .arg(QLocale().formattedDataSize(payloadSize)));
+          // Exact member match, no wildcard/option interpretation of package paths.
+          arguments << "-spd" << ("-i!" + payloads.first());
+        } else {
+          emit log("正在解压售后包...");
+        }
+        arguments << file;
+        run(tool, arguments,
             output,
             [this, output, scanImages](bool success, const QString &out) {
               if (!success) {
@@ -387,12 +533,13 @@ void OugaPreparation::extractArchive(const QString &tool, const QString &file,
                     if (scanImages)
                       emit prepared(*images, *root);
                     emit archiveExtracted(*root);
+                    if (!scanImages) emit log("payload.bin 解压完成");
                     end(true, scanImages
                                   ? "解压及重新扫描成功，尚未写入设备"
                                   : "解压及路径校验成功，尚未提取或写入设备");
                   });
             }, true);
-      });
+      }, false, true);
 }
 void OugaPreparation::makeSuper(const QString &tool, const QString &directory,
                                 const QString &output) {

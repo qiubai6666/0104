@@ -7,6 +7,7 @@ SOURCES += \
     $$PWD/src/services/ougacommandrunner.cpp \
     $$PWD/src/services/ougaflashservice.cpp \
     $$PWD/src/services/ougapreparation.cpp \
+    $$PWD/src/services/ougapayloadprocess.cpp \
     $$PWD/src/services/ougaromservice.cpp \
     $$PWD/src/ui/ougaflashwindow.cpp \
     $$PWD/src/ui/ougaflashworkflow.cpp \
@@ -18,6 +19,7 @@ HEADERS += \
     $$PWD/src/services/ougacommandrunner.h \
     $$PWD/src/services/ougaflashservice.h \
     $$PWD/src/services/ougapreparation.h \
+    $$PWD/src/services/ougapayloadprocess.h \
     $$PWD/src/services/ougaromservice.h \
     $$PWD/src/ui/ougaflashwindow.h
 

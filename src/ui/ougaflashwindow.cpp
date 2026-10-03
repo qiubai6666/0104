@@ -744,7 +744,9 @@ void OugaFlashWindow::log(const QString &message) {
   else if (text.startsWith("警告") || text.contains("请求停止") ||
            text.contains("未验证") || text.contains("取消"))
     color = QColor("#D97706");
-  else if (text.startsWith("完成：") || text.contains("成功"))
+  else if (text.startsWith("完成：") || text.contains("成功") ||
+           text.startsWith("发现 ") || text.startsWith("解包完成") ||
+           text.startsWith("已加载 ") || text.endsWith("提取完成！"))
     color = QColor("#16A34A");
   else if (text.startsWith("开始") || text.startsWith("加载") ||
            text.startsWith("已选择"))
@@ -753,6 +755,33 @@ void OugaFlashWindow::log(const QString &message) {
   content.setForeground(color);
   cursor.insertText(text, content);
   m_log->setTextCursor(cursor);
+  m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
+}
+void OugaFlashWindow::payloadLogStart(const QString &name) {
+  if (m_payloadLogBlocks.contains(name)) return;
+  log("[提取] " + name + ".img...");
+  const auto block = m_log->document()->lastBlock();
+  m_payloadLogBlocks.insert(name, block);
+  QTextCursor cursor(block);
+  const int prefix = block.text().indexOf("[提取]");
+  if (prefix >= 0) {
+    cursor.setPosition(block.position() + prefix);
+    cursor.setPosition(block.position() + prefix + 4, QTextCursor::KeepAnchor);
+    QTextCharFormat format;
+    format.setForeground(QColor("#9333EA"));
+    format.setFontWeight(QFont::Bold);
+    cursor.mergeCharFormat(format);
+  }
+}
+void OugaFlashWindow::payloadLogFinish(const QString &name, bool success) {
+  const auto block = m_payloadLogBlocks.take(name);
+  if (!block.isValid()) return;
+  QTextCursor cursor(block);
+  cursor.movePosition(QTextCursor::EndOfBlock);
+  QTextCharFormat format;
+  format.setForeground(QColor(success ? "#16A34A" : "#DC2626"));
+  format.setFontWeight(QFont::Bold);
+  cursor.insertText(success ? " OK" : " 失败", format);
   m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
 }
 void OugaFlashWindow::display(const QVector<Partition> &images,

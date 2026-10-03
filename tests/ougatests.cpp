@@ -124,6 +124,13 @@ QByteArray payloadPartition(const QByteArray &name, int type,
     part += pb(6, info);
   return pb(13, part);
 }
+QByteArray payloadCounterPartition(const QByteArray &name, int operations) {
+  const QByteArray info = vi(8) + vi(512) +
+      pb(2, QCryptographicHash::hash(QByteArray(512, 'p'), QCryptographicHash::Sha256));
+  QByteArray part = pb(1, name) + pb(7, info);
+  for (int n = 0; n < operations; ++n) part += pb(8, vi(8) + vi(0));
+  return pb(13, part);
+}
 QByteArray payloadContainer(const QByteArray &manifest) {
   QByteArray h(24, 0);
   h.replace(0, 4, "CrAU");
@@ -2144,29 +2151,38 @@ private slots:
     auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
     auto preparation = window.findChild<OugaPreparation *>();
     QVERIFY(progress && preparation);
-    QList<int> archiveValues;
+    QList<int> archiveValues, payloadValues;
     bool extractionReset = false;
     connect(preparation, &OugaPreparation::archiveProgress, &window,
             [&](int percent) {
               archiveValues << percent;
               QCOMPARE(progress->value(), percent);
               QCOMPARE(progress->property("rate").toString(),
-                       QString("解压中..."));
+                       QString("解压中 %1%").arg(percent));
               if (percent == 42)
                 QVERIFY(window.grab().save(dir + "/archive-progress.png"));
             });
     connect(preparation, &OugaPreparation::busyChanged, &window, [&](bool busy) {
-      if (busy && progress->property("rate").toString() == "提取中...") {
+      if (busy && progress->property("rate").toString() == "解包中...") {
         QCOMPARE(progress->value(), 0);
         extractionReset = true;
       }
+    });
+    connect(preparation, &OugaPreparation::payloadProgress, &window, [&](int percent) {
+      payloadValues << percent;
+      QCOMPARE(progress->value(), percent);
+      QCOMPARE(progress->property("rate").toString(), QString("解包中 %1%").arg(percent));
+      if (percent == 99)
+        QVERIFY(window.grab().save(dir + "/payload-progress.png"));
     });
     window.findChild<QPushButton *>("UnpackPayloadButton")->click();
     QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 10000);
     QCOMPARE(unexpectedFileDialogs, 0);
     QCOMPARE(archiveValues, (QList<int>{0, 12, 42, 64, 80, 99, 100}));
     QVERIFY(extractionReset);
-    QCOMPARE(progress->value(), corruptOutput ? 0 : 100);
+    QCOMPARE(payloadValues, corruptOutput ? QList<int>({0, 99}) : QList<int>({0, 99, 100}));
+    QCOMPARE(progress->value(), corruptOutput ? 99 : 100);
+    QCOMPARE(progress->property("rate").toString(), corruptOutput ? QString("已停止") : QString("完成"));
     const QString images = imagesDirectory ? output : output + "/images";
     QVERIFY(QFileInfo::exists(images + "/boot.img"));
     QVERIFY(!QFileInfo::exists(images + "/images"));
@@ -2174,7 +2190,20 @@ private slots:
     QCOMPARE(table->rowCount(), corruptOutput ? 0 : 1);
     const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
                             ->toPlainText();
+    QVERIFY(log.contains("正在预解压 payload.bin..."));
+    QVERIFY(log.contains("正在从 ZIP 解压 payload.bin ("));
+    QVERIFY(log.contains("payload.bin 解压完成"));
+    QVERIFY(log.contains("开始解包，输出将实时显示在日志窗口中。"));
+    QVERIFY(log.contains("发现 1 个分区: boot"));
+    QVERIFY(log.contains("开始解包分区..."));
+    QVERIFY(!log.contains("解压及路径校验成功"));
+    QVERIFY(!log.contains("Path = "));
+    QVERIFY(!log.contains("Everything is Ok"));
+    QVERIFY(!log.contains("ops/s"));
+    QVERIFY(!log.contains(QChar(0x1b)));
     if (corruptOutput) {
+      QVERIFY(log.contains("[提取] boot.img... 失败"));
+      QVERIFY(!log.contains("[提取] boot.img... OK"));
       QVERIFY(log.contains("SHA-256 不符"));
       QVERIFY(!log.contains("文件已准备"));
       window.findChild<QPushButton *>("StartFlashButton")->click();
@@ -2184,7 +2213,10 @@ private slots:
       QCOMPARE(QFileInfo(table->item(0, 3)->text()).canonicalFilePath(),
                QFileInfo(images + "/boot.img").canonicalFilePath());
       QCOMPARE(read(images + "/boot.img"), QByteArray(512, 'p'));
-      QVERIFY(log.contains("Payload 已提取并重新校验"));
+      QVERIFY(log.contains("[提取] boot.img... OK"));
+      QVERIFY(log.contains("Payload解包成功！"));
+      QVERIFY(log.contains("解包完成，文件保存在: " + images));
+      QVERIFY(log.contains("已加载 1 个镜像文件"));
       QVERIFY(!log.contains("已停止/失败"));
       QVERIFY(window.grab().save(dir + "/payload-loaded.png"));
     }
@@ -2192,6 +2224,27 @@ private slots:
     QVERIFY(runner.trace.isEmpty());
     QVERIFY(!DeviceOperationLease::owner());
     QVERIFY(window.close());
+  }
+  void widgetPayloadPartitionLog() {
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    auto preparation = window.findChild<OugaPreparation *>();
+    auto log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox");
+    QVERIFY(preparation && log);
+    preparation->payloadPartitionStarted("boot");
+    preparation->payloadPartitionStarted("vendor");
+    preparation->payloadPartitionStarted("boot"); // repeated terminal frames
+    preparation->payloadPartitionFinished("boot", true);
+    preparation->payloadPartitionStarted("system");
+    preparation->payloadPartitionFinished("system", true);
+    preparation->payloadPartitionFinished("vendor", false);
+    const QString text = log->toPlainText();
+    QCOMPARE(text.count("[提取] boot.img... OK"), 1);
+    QCOMPARE(text.count("[提取] vendor.img... 失败"), 1);
+    QCOMPARE(text.count("[提取] system.img... OK"), 1);
+    QVERIFY(!text.contains("vendor.img... OK"));
+    QVERIFY(!text.contains("OK OK"));
+    QVERIFY(runner.trace.isEmpty());
   }
   void widgetDropOnlyPrepares() {
     FakeRunner runner;
@@ -2525,6 +2578,76 @@ private slots:
       QVERIFY(done[0][1].toString().contains("FAILED"));
     QVERIFY(!prep.busy());
   }
+  void payloadProgress_data() {
+    QTest::addColumn<QString>("outcome");
+    QTest::addColumn<bool>("success");
+    for (const auto &name : {"success", "silent", "corrupt", "cancel", "cancel-start",
+                             "failed-marker", "nonzero", "start-failure"})
+      QTest::newRow(name) << QString(name) << (QString(name) == "success" || QString(name) == "silent");
+  }
+  void payloadProgress() {
+    QFETCH(QString, outcome);
+    QFETCH(bool, success);
+    QVERIFY(QDir().mkpath(dir + "/input"));
+    const QString source = dir + "/input/payload.bin";
+    const QString output = dir + "/counter-" + outcome;
+    QVERIFY(put(source, payloadContainer(payloadCounterPartition("boot", 8) +
+                                        payloadCounterPartition("vendor", 2))));
+    OugaPreparation prep;
+    QSignalSpy progress(&prep, &OugaPreparation::payloadProgress);
+    QSignalSpy started(&prep, &OugaPreparation::payloadPartitionStarted);
+    QSignalSpy rows(&prep, &OugaPreparation::payloadPartitionFinished);
+    QSignalSpy prepared(&prep, &OugaPreparation::prepared);
+    QSignalSpy done(&prep, &OugaPreparation::finished);
+    QSignalSpy logs(&prep, &OugaPreparation::log);
+    connect(&prep, &OugaPreparation::payloadProgress, &prep, [&](int percent) {
+      if (done.isEmpty() && ((outcome == "cancel" && percent == 30) ||
+          (outcome == "cancel-start" && percent == 0))) prep.cancel();
+      if (percent == 100 && done.isEmpty()) {
+        QCOMPARE(rows.count(), 2);
+        QCOMPARE(done.count(), 0);
+        QCOMPARE(read(output + "/boot.img"), QByteArray(512, 'p'));
+      }
+    });
+    prep.payload(outcome == "start-failure" ? dir + "/absent.exe"
+                                            : QCoreApplication::applicationFilePath(), source, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 10000);
+    QCOMPARE(done[0][0].toBool(), success);
+    QCOMPARE(prepared.count(), success ? 1 : 0);
+    QList<int> values;
+    for (const auto &args : progress) values << args[0].toInt();
+    if (outcome == "cancel-start" || outcome == "start-failure")
+      QCOMPARE(values, QList<int>{0});
+    else if (outcome == "silent") QCOMPARE(values, (QList<int>{0,100}));
+    else if (outcome == "cancel") QCOMPARE(values, (QList<int>{0,20,30}));
+    else {
+      QList<int> expected{0,20,30,50,60,99};
+      if (success) expected << 100;
+      QCOMPARE(values, expected);
+    }
+    if (success) {
+      QCOMPARE(started.count(), 2);
+      QCOMPARE(rows.count(), 2);
+      for (const auto &row : rows) QVERIFY(row[1].toBool());
+    } else {
+      for (const auto &row : rows) QVERIFY(!row[1].toBool());
+      QVERIFY(!values.contains(100));
+    }
+    if (outcome == "failed-marker") QVERIFY(done[0][1].toString().contains("FAILED"));
+    if (outcome == "corrupt") QVERIFY(done[0][1].toString().contains("SHA-256"));
+    for (const auto &row : logs) {
+      QVERIFY(!row[0].toString().contains(QChar(0x1b)));
+      QVERIFY(!row[0].toString().contains("ops/s"));
+    }
+    QVERIFY(!prep.busy());
+    // A failed or cancelled terminal must release handles and reset all counters.
+    progress.clear();
+    prep.payload(QCoreApplication::applicationFilePath(), source, dir + "/retry");
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 2, 10000);
+    QVERIFY(done[1][0].toBool());
+    QCOMPARE(progress.first()[0].toInt(), 0);
+    QCOMPARE(progress.last()[0].toInt(), 100);
+  }
   void archiveProgressResetsBetweenRuns() {
     QVERIFY(QDir().mkpath(dir + "/input"));
     const QString source = dir + "/input/reuse.mock-archive";
@@ -2643,6 +2766,31 @@ int main(int argc, char **argv) {
       // Only this executable's fixture format is accepted; no real tools.
       const QString source = QString::fromLocal8Bit(argv[argc - 1]);
       const QByteArray bytes = read(source);
+      if (bytes == payloadContainer(payloadCounterPartition("boot", 8) +
+                                    payloadCounterPartition("vendor", 2))) {
+        const QString out = QDir::fromNativeSeparators(QString::fromLocal8Bit(argv[2]));
+        const auto chunk = [](const char *s) {
+          std::fputs(s, stdout); std::fflush(stdout);
+          std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        };
+        if (!out.endsWith("counter-silent")) {
+          chunk("\x1b]0;fake boot 99%|#| 8/8 [title]\a\r");
+          chunk("boot 25%|##| 2/"); chunk("8 [00:00 ops/s]\r\n");
+          chunk("\x1b[35mvendor 50%|##| 1/2 [00:00 ops/s]\x1b[0m\r\n");
+          chunk("unknown 100%|#| 1/1 [ignored]\r\n");
+          chunk("boot 99%|#| 99/8 [ignored]\r\n");
+          chunk("boot 99%|#| 8/9 [ignored]\r\n");
+          chunk("boot 0%|#| 0/8 [ignored]\r\n");
+          chunk("boot 50%|##| 4/8 [00:00 ops/s]\r\n");
+          chunk("vendor 100%|##| 2/2 [00:00 ops/s]\r\n");
+          chunk("boot 100%|##| 8/8 [00:00 ops/s]\r\n");
+        }
+        if (out.endsWith("counter-failed-marker")) { chunk("FAILED (injected)\n"); return 0; }
+        if (out.endsWith("counter-nonzero")) return 9;
+        if (!put(out + "/boot.img", QByteArray(512, out.endsWith("counter-corrupt") ? 'x' : 'p')) ||
+            !put(out + "/vendor.img", QByteArray(512, 'p'))) return 8;
+        return 0;
+      }
       const bool sourceOperation = bytes == payloadBytes(true, 9);
       if (bytes != payloadBytes() && bytes != payloadBytes(false, 9) &&
           bytes != payloadBytes(false, 9, true) && !sourceOperation &&
@@ -2658,7 +2806,8 @@ int main(int argc, char **argv) {
       const bool corrupt = output.contains("/corrupt-output/");
       if (!put(output + "/boot.img", QByteArray(512, corrupt ? 'x' : 'p')))
         return 6;
-      std::printf("Payload fixture extracted\n");
+      std::printf("boot 100%%|########| 1/1 [00:00 ops/s]\r\n");
+      std::fflush(stdout);
       return 0;
     }
     if (command == "devices" && argc == 2) {
