@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMutex>
+#include <QScopeGuard>
 #include <QThread>
 #include <QThreadPool>
 #include <QtConcurrentRun>
@@ -132,6 +133,55 @@ public:
     }
 #endif
     return QCryptographicHash::hash(data, QCryptographicHash::Sha256);
+  }
+  // Verify the bytes actually written, not the manifest's claimed digest. Use
+  // bounded reads and CNG acceleration; a failed CNG stream restarts from byte
+  // zero with Qt rather than accepting a partial hash. No extra image copy.
+  QByteArray fileHash(const QString &path, quint64 expectedSize,
+                      const std::atomic_bool &cancel) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || quint64(file.size()) != expectedSize)
+      return {};
+    QByteArray buffer(1024 * 1024, Qt::Uninitialized);
+    for (;;) {
+      if (!file.seek(0)) return {};
+      QCryptographicHash fallback(QCryptographicHash::Sha256);
+      quint64 consumed = 0;
+      bool retry = false;
+      while (consumed < expectedSize) {
+        if (cancel) return {};
+        const qint64 count = file.read(buffer.data(),
+            qint64(qMin<quint64>(quint64(buffer.size()), expectedSize - consumed)));
+        if (count <= 0) return {};
+#ifdef Q_OS_WIN
+        if (m_hash) {
+          if (BCryptHashData(m_hash, reinterpret_cast<PUCHAR>(buffer.data()),
+                            ULONG(count), 0) < 0) {
+            BCryptDestroyHash(m_hash);
+            m_hash = nullptr;
+            retry = true;
+            break;
+          }
+        } else
+#endif
+          fallback.addData(QByteArrayView(buffer.constData(), qsizetype(count)));
+        consumed += quint64(count);
+      }
+      if (retry) continue;
+      if (cancel || quint64(file.size()) != expectedSize) return {};
+#ifdef Q_OS_WIN
+      if (m_hash) {
+        QByteArray result(32, Qt::Uninitialized);
+        if (BCryptFinishHash(m_hash, reinterpret_cast<PUCHAR>(result.data()),
+                            ULONG(result.size()), 0) >= 0)
+          return result;
+        BCryptDestroyHash(m_hash);
+        m_hash = nullptr;
+        continue;
+      }
+#endif
+      return fallback.result();
+    }
   }
 private:
 #ifdef Q_OS_WIN
@@ -357,12 +407,19 @@ QString OugaPayloadExtractor::extract(const QString &file,
       return "Payload 输出已存在，拒绝覆盖：" + entry.name;
     if (callbacks.started)
       callbacks.started(entry.name);
+    bool ownsPartial = false;
+    const auto cleanup = qScopeGuard([&] {
+      // Never remove a pre-existing path, including when NewOnly lost a race.
+      if (ownsPartial) QFile::remove(partial);
+    });
     {
       // Preallocate; regions not written later (ZERO/DISCARD) read as zero.
       QFile out(partial);
-      if (!out.open(QIODevice::ReadWrite | QIODevice::NewOnly) ||
-          !out.resize(qint64(entry.size)))
+      if (!out.open(QIODevice::ReadWrite | QIODevice::NewOnly))
         return "无法创建 Payload 输出：" + partial;
+      ownsPartial = true;
+      if (!out.resize(qint64(entry.size)))
+        return "无法预分配 Payload 输出：" + partial;
     }
     std::atomic<qsizetype> next{0};
     std::atomic_bool failed{false};
@@ -441,14 +498,18 @@ QString OugaPayloadExtractor::extract(const QString &file,
       job.waitForFinished();
     if (!failed && cancel)
       error = "准备已取消；保留已完成的镜像";
-    if (!error.isEmpty() || cancel) {
-      QFile::remove(partial);
+    if (!error.isEmpty() || cancel)
       return error;
-    }
-    if (!QFile::rename(partial, target)) {
-      QFile::remove(partial);
+    // Hash after all writer handles have closed, before publishing .img or OK.
+    OperationHash imageHasher;
+    const QByteArray actual = imageHasher.fileHash(partial, entry.size, cancel);
+    if (cancel)
+      return "准备已取消；保留已完成的镜像";
+    if (actual.size() != 32 || actual != entry.hash)
+      return "Payload 镜像长度/SHA-256 校验失败：" + entry.name;
+    if (!QFile::rename(partial, target))
       return "Payload 输出重命名失败：" + entry.name;
-    }
+    ownsPartial = false;
     if (callbacks.finished)
       callbacks.finished(entry.name);
   }

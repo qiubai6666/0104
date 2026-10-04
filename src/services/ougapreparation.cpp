@@ -544,9 +544,9 @@ void OugaPreparation::nativePayload(const QString &file,
                                                   workers, m_abort, callbacks);
         if (!e.isEmpty())
           return e;
-        // Every byte came from hash-verified operations that tile the image
-        // exactly, so the manifest digest is this output's expected SHA-256;
-        // flashing still re-hashes the file before every write.
+        // The extractor has compared each completed on-disk image against its
+        // manifest digest before publishing it; reuse that verified result here.
+        // Flashing still re-hashes the file before every write.
         QMap<QString, QByteArray> known;
         for (const auto &p : chosen) {
           const QString f = QDir(output).filePath(p.name + ".img");
@@ -561,7 +561,7 @@ void OugaPreparation::nativePayload(const QString &file,
       [this, images, output] {
         emit payloadProgress(100);
         emit prepared(*images, output);
-        end(true, "Payload 已提取（逐操作 SHA-256 校验）；尚未写入设备");
+        end(true, "Payload 已提取（逐操作及镜像 SHA-256 校验）；尚未写入设备");
       });
 }
 void OugaPreparation::extractArchive(const QString &tool, const QString &file,

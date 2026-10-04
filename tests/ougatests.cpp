@@ -2061,6 +2061,100 @@ private slots:
     QVERIFY(!QFileInfo::exists(output + "/boot.img"));
     QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
   }
+  void nativePayloadRejectsWrongPartitionHash_data() {
+    QTest::addColumn<int>("type");
+    QTest::addColumn<QString>("name");
+    QTest::newRow("raw") << 0 << QString("vendor");
+    QTest::newRow("bz") << 1 << QString("vendor");
+    QTest::newRow("xz") << 8 << QString("vendor");
+    QTest::newRow("zstd") << 14 << QString("vendor");
+    QTest::newRow("zero") << 6 << QString("vendor");
+    QTest::newRow("discard") << 7 << QString("vendor");
+    QTest::newRow("excluded-misc") << 0 << QString("misc");
+  }
+  void nativePayloadRejectsWrongPartitionHash() {
+    QFETCH(int, type);
+    QFETCH(QString, name);
+    const QByteArray actual = type == 6 || type == 7
+        ? QByteArray(8192, 0) : nativeImage(2, 'z');
+    QByteArray declared = actual;
+    declared[0] ^= 1; // Only the final image hash is wrong; every operation is valid.
+    const QByteArray encoded = type == 0 ? actual : type == 1 ? bzBytes(actual)
+        : type == 8 ? xzBytes(actual) : type == 14 ? zstdCompressedBytes()
+        : QByteArray();
+    const QByteArray boot = nativeImage(1, 'b');
+    QByteArray blob, manifest = vi(3 << 3) + vi(4096);
+    manifest += nativePartition("boot", boot, {{0, 0, 1, boot}}, &blob);
+    manifest += nativePartition(name.toUtf8(), declared, {{type, 0, 2, encoded}}, &blob);
+    const QByteArray source = payloadContainer(manifest) + blob;
+    const QString file = dir + "/payload.bin", output = dir + "-wrong-partition-hash";
+    QVERIFY(put(file, source));
+    OugaPreparation prep;
+    QSignalSpy done(&prep, &OugaPreparation::finished),
+        ready(&prep, &OugaPreparation::prepared),
+        progress(&prep, &OugaPreparation::payloadProgress),
+        rows(&prep, &OugaPreparation::payloadPartitionFinished);
+    prep.payload({}, file, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 20000);
+    QVERIFY2(!done[0][0].toBool(), "A wrong partition digest must not report successful extraction");
+    QVERIFY(done[0][1].toString().contains("SHA-256"));
+    QCOMPARE(ready.count(), 0);
+    for (const auto &row : progress) QVERIFY(row[0].toInt() < 100);
+    QCOMPARE(read(output + "/boot.img"), boot); // Earlier verified output survives.
+    QVERIFY(!QFileInfo::exists(output + '/' + name + ".img"));
+    QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
+    QCOMPARE(rows.size(), 2);
+    QCOMPARE(rows[0][0].toString(), QString("boot"));
+    QVERIFY(rows[0][1].toBool());
+    QCOMPARE(rows[1][0].toString(), name);
+    QVERIFY(!rows[1][1].toBool());
+    QCOMPARE(read(file), source);
+  }
+  void nativePayloadValidatesWrittenBytes_data() {
+    QTest::addColumn<QString>("mutation");
+    QTest::newRow("unchanged-multichunk") << QString();
+    QTest::newRow("changed-byte") << QString("byte");
+    QTest::newRow("truncated-output") << QString("truncate");
+  }
+  void nativePayloadValidatesWrittenBytes() {
+    QFETCH(QString, mutation);
+    const QByteArray image = nativeImage(769, 'a');
+    QByteArray blob;
+    const QByteArray manifest = vi(3 << 3) + vi(4096) +
+        nativePartition("boot", image, {{0, 0, 769, image}}, &blob);
+    const QString file = dir + "/payload.bin", output = dir + "/images";
+    QVERIFY(put(file, payloadContainer(manifest) + blob));
+    QVERIFY(QDir().mkpath(output));
+    QVector<OugaPayloadEntry> entries;
+    OugaPayloadLayout layout;
+    bool delta = false;
+    QString error;
+    QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
+    std::atomic_bool cancel{false};
+    bool changed = false;
+    int finished = 0;
+    OugaPayloadExtractor::Callbacks callbacks;
+    callbacks.progress = [&](quint64 done, quint64 total) {
+      if (done != total || mutation.isEmpty()) return;
+      QFile partial(output + "/boot.img.partial");
+      if (!partial.open(QIODevice::ReadWrite | QIODevice::Unbuffered)) return;
+      changed = mutation == "truncate" ? partial.resize(4096)
+                                       : partial.seek(123) && partial.write("!", 1) == 1;
+    };
+    callbacks.finished = [&](const QString &) { ++finished; };
+    error = OugaPayloadExtractor::extract(file, layout, entries, output, 1, cancel, callbacks);
+    if (mutation.isEmpty()) {
+      QVERIFY2(error.isEmpty(), qPrintable(error));
+      QCOMPARE(finished, 1);
+      QCOMPARE(read(output + "/boot.img"), image);
+    } else {
+      QVERIFY(changed);
+      QVERIFY2(!error.isEmpty(), "Final on-disk bytes were modified but extraction reported success");
+      QCOMPARE(finished, 0);
+      QVERIFY(!QFileInfo::exists(output + "/boot.img"));
+    }
+    QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
+  }
   void nativePayloadEligibility() {
     QByteArray boot, vendor;
     const QByteArray payload = nativePayloadBytes(&boot, &vendor);
