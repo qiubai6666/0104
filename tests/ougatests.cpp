@@ -764,6 +764,9 @@ private slots:
     QTest::newRow("payload-not-an-image") << "" << "payload.bin" << false;
     QTest::newRow("arbitrary-bin") << "" << "script.bin" << false;
     QTest::newRow("root-image") << "" << "boot.img" << true;
+    QTest::newRow("root-raw") << "" << "boot.raw" << true;
+    QTest::newRow("radio-sparse") << "RADIO" << "modem.sparse" << true;
+    QTest::newRow("uppercase-sparse") << "" << "vendor.SPARSE" << true;
     QTest::newRow("images") << "images" << "boot.img" << true;
     QTest::newRow("IMAGES") << "IMAGES" << "boot.img" << true;
     QTest::newRow("RADIO") << "RADIO" << "modem.img" << true;
@@ -798,6 +801,67 @@ private slots:
     QVERIFY(put(dir + "/boot_b.img", "duplicate"));
     QVERIFY(OugaPackage::scan(dir, &e).isEmpty());
     QVERIFY(e.contains("多个"));
+  }
+  void referenceImageFormats_data() {
+    QTest::addColumn<QString>("subdirectory");
+    QTest::addColumn<QString>("filename");
+    QTest::addColumn<QString>("target");
+    QTest::addColumn<bool>("isSparse");
+    QTest::newRow("raw-root") << "" << "boot.raw" << "boot" << false;
+    QTest::newRow("sparse-root") << "" << "vendor.sparse" << "vendor" << true;
+    QTest::newRow("raw-images") << "IMAGES" << "init_boot.RAW" << "init_boot" << false;
+    QTest::newRow("sparse-radio") << "RADIO" << "modem.SPARSE" << "modem" << true;
+    QTest::newRow("sparse-after-sales") << "IMAGES/my_company" << "package.sparse" << "my_company" << true;
+  }
+  void referenceImageFormats() {
+    QFETCH(QString, subdirectory);
+    QFETCH(QString, filename);
+    QFETCH(QString, target);
+    QFETCH(bool, isSparse);
+    const QString folder = QDir(dir).filePath(subdirectory);
+    QVERIFY(QDir().mkpath(folder));
+    const QString file = QDir(folder).filePath(filename);
+    const QByteArray bytes = isSparse ? ::sparse() : QByteArray(512, 'r');
+    QVERIFY(put(file, bytes));
+    QString error;
+    const auto images = OugaPackage::scan(dir, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(images.size(), 1);
+    QCOMPARE(images[0].name, target);
+    // Windows canonical paths retain the spelling used to query the file.
+    QCOMPARE(images[0].path.toCaseFolded(),
+             QFileInfo(file).canonicalFilePath().toCaseFolded());
+    QCOMPARE(images[0].bytes, bytes.size());
+    QCOMPARE(images[0].expandedBytes, 512);
+    QCOMPARE(images[0].sha256, QCryptographicHash::hash(bytes, QCryptographicHash::Sha256));
+    QCOMPARE(Ouga::baseName(target + "_b." + QFileInfo(filename).suffix()), target);
+  }
+  void referenceImageFormatBoundaries() {
+    QString error;
+    QVERIFY(put(dir + "/boot.raw", QByteArray(512, 'b')));
+    QVERIFY(put(dir + "/boot.sparse", ::sparse()));
+    QVERIFY(OugaPackage::scan(dir, &error).isEmpty());
+    QVERIFY2(error.contains("多个来源"), qPrintable(error));
+    const QString damaged = dir + "/damaged";
+    QVERIFY(QDir().mkpath(damaged));
+    QVERIFY(put(damaged + "/vendor.sparse", ::sparse().left(40)));
+    QVERIFY(OugaPackage::scan(damaged, &error).isEmpty());
+    QVERIFY(!error.isEmpty());
+    const QString blocked = dir + "/blocked";
+    QVERIFY(QDir().mkpath(blocked));
+    QVERIFY(put(blocked + "/boot.raw", QByteArray(512, 'b')));
+    for (const QString name : {"misc.sparse", "frp.raw", "metadata.raw", "script.bin", "payload.bin"})
+      QVERIFY(put(blocked + "/" + name, QByteArray(512, 'x')));
+    const auto images = OugaPackage::scan(blocked, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(images.size(), 1);
+    QCOMPARE(images[0].name, "boot");
+    const QString ambiguous = dir + "/ambiguous/my_company";
+    QVERIFY(QDir().mkpath(ambiguous));
+    QVERIFY(put(ambiguous + "/candidate.img", QByteArray(512, 'a')));
+    QVERIFY(put(ambiguous + "/candidate.raw", QByteArray(512, 'b')));
+    QVERIFY(OugaPackage::scan(dir + "/ambiguous", &error).isEmpty());
+    QVERIFY2(error.contains("多个候选"), qPrintable(error));
   }
   void parallelScanKeepsHashesAndOrder() {
     const QStringList names = {"boot", "vendor", "system"};
@@ -3460,6 +3524,40 @@ private slots:
     QCOMPARE(text.count("[提取] system.img... OK"), 1);
     QVERIFY(!text.contains("vendor.img... OK"));
     QVERIFY(!text.contains("OK OK"));
+    QVERIFY(runner.trace.isEmpty());
+  }
+  void widgetDropReferenceImage_data() {
+    QTest::addColumn<QString>("extension");
+    QTest::addColumn<bool>("afterSales");
+    QTest::newRow("full-raw") << "raw" << false;
+    QTest::newRow("full-sparse") << "SPARSE" << false;
+    QTest::newRow("after-sales-raw") << "RAW" << true;
+    QTest::newRow("after-sales-sparse") << "sparse" << true;
+  }
+  void widgetDropReferenceImage() {
+    QFETCH(QString, extension);
+    QFETCH(bool, afterSales);
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    window.findChild<QCheckBox *>("AfterSalesPackageModeCheckBox")->setChecked(afterSales);
+    const QString source = dir + "/boot." + extension;
+    QVERIFY(put(source, extension.compare("sparse", Qt::CaseInsensitive) == 0
+                            ? ::sparse() : QByteArray(512, 'b')));
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(source)});
+    QDragEnterEvent drag(QPoint(30, 120), Qt::CopyAction, &mime, Qt::LeftButton,
+                         Qt::NoModifier);
+    QApplication::sendEvent(&window, &drag);
+    QVERIFY(drag.isAccepted());
+    QDropEvent drop(QPointF(30, 120), Qt::CopyAction, &mime, Qt::LeftButton,
+                    Qt::NoModifier);
+    QApplication::sendEvent(&window, &drop);
+    QVERIFY(drop.isAccepted());
+    QTRY_VERIFY(!window.isBusy());
+    auto table = window.findChild<QTableWidget *>("OugaPartitionTableDataGrid");
+    QCOMPARE(table->rowCount(), 1);
+    QCOMPARE(table->item(0, 1)->text(), "boot");
     QVERIFY(runner.trace.isEmpty());
   }
   void widgetDropOnlyPrepares() {

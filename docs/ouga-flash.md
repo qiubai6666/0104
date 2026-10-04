@@ -46,7 +46,7 @@ AB、强力、仅 FBD 必须具有匹配的 my_company / my_preload。来自包�
 - 高通清除数据在首次写入前检查 fastboot 同目录的 mke2fs.exe、make_f2fs.exe、mke2fs.conf。缺失时提示选择可信完整 platform-tools；仍缺失则阻止。文件存在检查不是签名或版本一致性认证。
 - 已提供 7-Zip 26.03 命令行及格式库、Google platform-tools 37.0.1 完整 Windows 包、用户 SMT 参考包内的 lpmake；不进行系统安装。qiubai/bin/README.md 与 manifest.json 保留版本、来源、许可及逐文件摘要。lpmake 为参考包的未签名二进制，构建版本未知，不能声称已验证其上游构建来源。缺失工具仍只阻止相应解压 / Super 生成。
 - lpmake --help 正常输出完整 AOSP 用法而退出 1 时，只将该能力查询视为有效；Super 生成及设备命令的非零退出、异常退出、FAILED/错误输出仍立即失败。USB 驱动及 ROM 服务地址不由放置这些文件完成。
-- 支持普通镜像目录、售后 IMAGES/RADIO 与可确定映像的 my_* 子目录。多候选、重复目标、冲突映射阻止；任意 bin、说明文件或包内脚本不作为分区。
+- 支持普通镜像目录、售后 IMAGES/RADIO 与可确定映像的 my_* 子目录；自动加载 `.img`、`.raw`、`.sparse`（扩展名不区分大小写），均经过相同的内容、展开大小和摘要校验。拖入这些镜像时加载所在目录，仅准备文件、不写入手机。多候选、重复目标、冲突映射阻止；`.bin` 仍须通过受校验的 rawprogram 确定用途，任意 bin、Payload、说明文件或包内脚本不作为分区。
 - rawprogram 只作受校验的完整映像映射资料；多段拼接、非零文件偏移等不支持格式明确停止，不执行其中的擦除或偏移写入。
 - 镜像检查可读性、Sparse 头 / 块边界、展开大小、路径边界和 SHA-256；执行前与每次写入前再核对文件未变化。
 - Payload 优先在应用内提取全部或指定分区（见下文“解包性能与校验边界”），其余情况使用现有工具；核对大小和可用摘要，再重新扫描。增量包缺少匹配旧镜像或不可验证的清单时停止。输出为用户选择的源目录以外独立空目录。
@@ -167,3 +167,14 @@ Release 使用 Qt 6.11.2 MinGW；成功后显式传本次 ExecutablePath、匹�
 - 最终仅使用发布副本和系统目录 PATH：欧加 394 项、设备操作 34 项、进程管理 16 项、界面资源及密码 11 项全部通过。测试设备工具均为隔离模拟，不回退真实 adb / fastboot。
 - Qt 6.11.2 MinGW Release 构建成功，显式传入本次可执行文件、匹配 Qt / codec 目录，使用 `PreserveExistingFiles` 更新 `OrangeToolsApp`。构建 / 正式发布 / TEMP 验证副本 EXE 的 SHA-256 均为 `E2804C62D9288A72ABD9A6F67517CE1EAD753011532AEE80C15A78AB5ECFAB6C`；发布副本的 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Qt Concurrent 及欧加 SVG Smoke 通过，Qt6Test.dll 仅加入 TEMP。
 - 未启动会提取用户资源的正式主程序、未操作真实手机、未重解用户真实 ROM；模拟回归及依赖验证不替代真机兼容验收，也不证明整体已完全复刻参考版。
+
+## 2026-10-04 镜像目录格式对照
+
+- 对照 SMT `MainWindow.xaml.cs::LoadImageFilesFromFolder` 与 VioletToolBox `oujiaflash.cs::LoadImageFilesFromFolder`，修复目录加载遗漏 `.raw/.sparse` 的差异，统一预检、目录扫描及售后候选过滤；名称归一化剥离正确扩展名及 A/B 后缀。没有新增按钮或页面。
+- 保留先前明确的差异：参考版按扩展名接受任意 `.bin`，本版只接受有受校验 rawprogram 映射的 `.bin`，不把 Payload、脚本和其他用途未知的二进制文件自动列为分区。
+- 新用例在旧代码上复现 13 项失败；修复后 Windows Qt 平台欧加完整模拟回归 407 项通过、0 失败。覆盖普通目录、IMAGES/RADIO、售后 `my_company`、扩展名大小写、Sparse 展开大小与摘要、重复目标、损坏文件、售后多候选、排除文件，以及全量/售后拖入仅准备、不发出设备命令。
+- 首次测试夹具的路径断言把 Windows 的 `images/IMAGES` 路径拼写差异当作失败；明确按 Windows 大小写语义比较路径后重新完整运行通过，没有改变生产路径校验或移除相关断言。
+- 不操作真实手机、不重解用户真实 ROM；格式夹具和模拟执行不等于真机刷写兼容性验证，仍不能宣称整体完全复刻。
+- 发布依赖隔离副本中补跑：欧加定向 35 项（含不置顶、独立任务栏、居中和生命周期）、设备操作 34 项、进程管理 16 项、界面资源/密码 11 项、仅本地回环服务的网络 24 项，全部通过。依赖默认夹具首次 74 项通过、9 个真实工具用例跳过；显式指向本任务 TEMP 的捆绑工具副本后完整重跑为 83 项通过、0 跳过。ADB/Fastboot 只查询版本，不启动 ADB Server、不操作设备；解压、Payload 和 Super 仅使用本任务的小型夹具。
+- Qt 6.11.2 MinGW Release 构建成功，`deploy.ps1` 显式指定本次 EXE、匹配 Qt/codec 路径和 `OrangeToolsApp`，采用 `PreserveExistingFiles` 保留已有文件。构建、发布、TEMP 副本 EXE 的 SHA-256 一致：`FC88B72B63B88B9878E6B1D9D832CD7F2EDBF25597C04947BBE9733C79CDB9BE`。
+- TEMP 副本通过 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Qt Concurrent、欧加 SVG Smoke；Qt6Test.dll 只加入 TEMP，不部署到正式程序。未启动会提取用户资源的正式主程序。构建和测试使用独立 TEMP 源码快照，已核对改动源码与工作区 SHA-256 一致；避免 MinGW 重建 Makefile 时对原项目中文路径的错误解析。

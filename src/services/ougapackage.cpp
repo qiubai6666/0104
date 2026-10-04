@@ -48,6 +48,12 @@ quint64 number(const QJsonValue &v, bool *ok) {
   s.remove('_');
   return s.toULongLong(ok, s.startsWith("0x") ? 16 : 10);
 }
+const QStringList &imageFilters() {
+  // Match reference directory formats, but unlabelled .bin files may be
+  // Payloads or executables. Only validated rawprogram maps those to targets.
+  static const QStringList filters = {"*.img", "*.raw", "*.sparse"};
+  return filters;
+}
 QStringList imageDirectories(const QDir &root) {
   QStringList dirs = {root.absolutePath()};
   for (const QString n : {"images", "IMAGES", "RADIO"}) {
@@ -305,7 +311,8 @@ bool OugaPackage::hasImageCandidates(const QString &directory) {
   if (!root.exists())
     return false;
   for (const QString &d : imageDirectories(root)) {
-    if (!QDir(d).entryList({"*.img", "rawprogram*.xml"}, QDir::Files).isEmpty())
+    if (!QDir(d).entryList(imageFilters() + QStringList{"rawprogram*.xml"},
+                           QDir::Files).isEmpty())
       return true;
     // Even an empty/ambiguous recognized folder must go through strict scan().
     for (const QString &name : afterSalesDirectories())
@@ -405,7 +412,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
     }
   for (const QString &d : dirs) {
     for (const QFileInfo &f :
-         QDir(d).entryInfoList({"*.img"}, QDir::Files, QDir::Name)) {
+         QDir(d).entryInfoList(imageFilters(), QDir::Files, QDir::Name)) {
       if (usedFiles.contains(f.canonicalFilePath()))
         continue;
       if (!add(f.completeBaseName().toLower(), f.absoluteFilePath()))
@@ -417,7 +424,7 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
       QDir sub(QDir(d).filePath(n));
       if (!sub.exists())
         continue;
-      auto candidates = sub.entryInfoList({"*.img"}, QDir::Files, QDir::Name);
+      auto candidates = sub.entryInfoList(imageFilters(), QDir::Files, QDir::Name);
       if (candidates.size() != 1) {
         fail(error, "售后子目录存在零个或多个候选：" + sub.path());
         return {};

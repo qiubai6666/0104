@@ -3,7 +3,9 @@
 namespace Ouga {
 QString baseName(const QString &name) {
   QString n = name.trimmed().toLower();
-  if (n.endsWith(".img") || n.endsWith(".bin"))
+  if (n.endsWith(".sparse"))
+    n.chop(7);
+  else if (n.endsWith(".img") || n.endsWith(".bin") || n.endsWith(".raw"))
     n.chop(4);
   if (n.endsWith("_a") || n.endsWith("_b"))
     n.chop(2);

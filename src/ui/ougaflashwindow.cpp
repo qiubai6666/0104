@@ -892,7 +892,9 @@ void OugaFlashWindow::dropEvent(QDropEvent *event) {
     m_pages[0].payloadFile->setText(file);
     log("已选择Payload/全量包文件，点击解包Payload准备文件；不会自动写入。");
   } else if (info.isFile() &&
-             info.suffix().compare("img", Qt::CaseInsensitive) == 0)
+             (info.suffix().compare("img", Qt::CaseInsensitive) == 0 ||
+              info.suffix().compare("raw", Qt::CaseInsensitive) == 0 ||
+              info.suffix().compare("sparse", Qt::CaseInsensitive) == 0))
     load(info.absolutePath());
   else {
     log("请拖入有效刷写文件夹，或在全量模式选择Payload.bin/ZIP文件");
