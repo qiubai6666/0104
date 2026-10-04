@@ -286,8 +286,11 @@ private:
 
 OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
                                  const QString &logDirectory)
-    : QWidget(parent), m_logDirectory(logDirectory) {
+    : QWidget(nullptr), m_launcher(parent), m_logDirectory(logDirectory) {
+  // Keep the always-on-top menu out of the native ownership/z-order chain.
   setWindowFlags(Qt::Window);
+  if (parent)
+    connect(parent, &QObject::destroyed, this, &QObject::deleteLater);
   setWindowTitle("秋白工作室 · 欧加线刷");
   setObjectName("OujiaFlashView");
   const QSize initialSize(qRound(866 * 0.9), qRound(729 * 0.9));
@@ -682,7 +685,7 @@ void OugaFlashWindow::showEvent(QShowEvent *event) {
   QTimer::singleShot(0, this, [this] {
     if (!isVisible() || isMinimized() || isMaximized())
       return;
-    QScreen *targetScreen = parentWidget() ? parentWidget()->screen() : screen();
+    QScreen *targetScreen = m_launcher ? m_launcher->screen() : screen();
     if (!targetScreen)
       return;
     QRect frame = frameGeometry();

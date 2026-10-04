@@ -39,6 +39,9 @@
 #include <QUuid>
 #include <QtEndian>
 #include <QtTest>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -2347,6 +2350,46 @@ private slots:
     delete owner;
     QCOMPARE(changes.count(), 8);
     QVERIFY(!DeviceOperationLease::owner());
+  }
+  void widgetIndependentTaskbarWindow() {
+    FakeRunner runner;
+    QWidget launcher;
+    launcher.setWindowFlags(Qt::Window | Qt::WindowStaysOnTopHint);
+    launcher.show();
+    OugaFlashWindow window(&launcher, &runner, dir + "/logs");
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(window.isWindow());
+    QVERIFY(!window.parentWidget());
+    QVERIFY(!window.windowFlags().testFlag(Qt::WindowStaysOnTopHint));
+    QVERIFY(window.windowFlags().testFlag(Qt::WindowMinimizeButtonHint));
+#ifdef Q_OS_WIN
+    const HWND handle = reinterpret_cast<HWND>(window.winId());
+    QVERIFY(GetWindow(handle, GW_OWNER) == nullptr);
+    const LONG_PTR styles = GetWindowLongPtr(handle, GWL_EXSTYLE);
+    QVERIFY(!(styles & WS_EX_TOPMOST));
+    QVERIFY(!(styles & WS_EX_TOOLWINDOW));
+#endif
+    window.showMinimized();
+    QTRY_VERIFY(window.isMinimized());
+#ifdef Q_OS_WIN
+    QVERIFY(IsIconic(handle));
+    QVERIFY(GetWindow(handle, GW_OWNER) == nullptr);
+#endif
+    window.showNormal();
+    QTRY_VERIFY(!window.isMinimized());
+    QVERIFY(window.isVisible());
+    QVERIFY(runner.trace.isEmpty());
+  }
+  void widgetLauncherLifetime() {
+    FakeRunner runner;
+    auto launcher = new QWidget;
+    QPointer<OugaFlashWindow> window =
+        new OugaFlashWindow(launcher, &runner, dir + "/logs");
+    window->show();
+    delete launcher;
+    QTRY_VERIFY(window.isNull());
+    QVERIFY(runner.trace.isEmpty());
   }
   void widgetDefaultGeometryAndCentering_data() {
     QTest::addColumn<bool>("withParent");

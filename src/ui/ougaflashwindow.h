@@ -3,6 +3,7 @@
 #include "ougaflashtypes.h"
 #include <QElapsedTimer>
 #include <QWidget>
+#include <QPointer>
 #include <QTextBlock>
 #include <QMap>
 #include <functional>
@@ -69,6 +70,8 @@ private:
     ArbDiscover,
     Arb
   };
+  // Logical launcher only: a native owner suppresses the Windows taskbar button.
+  QPointer<QWidget> m_launcher;
   OugaFlashService *m_service = nullptr;
   OugaPreparation *m_prepare = nullptr;
   OugaRomService *m_rom = nullptr;
