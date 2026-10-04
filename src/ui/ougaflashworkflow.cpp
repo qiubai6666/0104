@@ -31,6 +31,18 @@ QString uniqueWork(const QString &directory, const QString &name) {
   return QDir(directory).filePath(name + "-" +
                                   QUuid::createUuid().toString(QUuid::Id128));
 }
+// Only choose a new path here. Preparation still validates and creates an empty
+// destination, so a collision/race never authorizes overwriting existing files.
+QString availablePayloadOutput(const QString &preferred) {
+  const QFileInfo target(preferred);
+  if (target.isDir() && !target.isSymLink() && !target.isJunction() &&
+      !QDir(preferred)
+           .entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden |
+                      QDir::System)
+           .isEmpty())
+    return uniqueWork(target.absolutePath(), "images");
+  return preferred;
+}
 } // namespace
 
 void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
@@ -296,8 +308,14 @@ void OugaFlashWindow::extractPayload(bool all) {
     return;
   }
   const QDir outputDirectory(output);
+  // The field is updated to the actual result directory after extraction.
+  // Repeating Unpack must use a sibling, not append /images to that result.
+  const bool previousOutput = !m_payloadOutput.isEmpty() &&
+      outputDirectory.absolutePath().compare(QDir(m_payloadOutput).absolutePath(),
+                                             Qt::CaseInsensitive) == 0;
   m_payloadOutput =
-      all && outputDirectory.dirName().compare("images", Qt::CaseInsensitive) != 0
+      all && !previousOutput &&
+              outputDirectory.dirName().compare("images", Qt::CaseInsensitive) != 0
           ? outputDirectory.filePath("images")
           : output;
   QUrl url(m_payloadSource);
@@ -360,7 +378,7 @@ void OugaFlashWindow::runPayload() {
   if (!continueTask(generation))
     return;
   struct Inspection {
-    QString error;
+    QString error, output;
     QStringList selected, missing;
     bool archive = false, delta = false, native = false;
   };
@@ -380,6 +398,10 @@ void OugaFlashWindow::runPayload() {
     if (!result.error.isEmpty()) {
       endTask(false, result.error);
       return;
+    }
+    if (result.output != m_payloadOutput) {
+      m_payloadOutput = result.output;
+      log("输出目录已有文件，原文件保留；本次解包输出目录: " + m_payloadOutput);
     }
     for (const QString &name : result.missing)
       log("警告：未找到分区 '" + name + "'，该ROM可能不包含此分区");
@@ -419,8 +441,11 @@ void OugaFlashWindow::runPayload() {
   });
   const QString source = m_payloadSource;
   const QStringList requested = m_extractNames;
-  watcher->setFuture(QtConcurrent::run([source, requested] {
+  const QString preferredOutput = m_payloadOutput;
+  const bool unpack = m_unpackPayload;
+  watcher->setFuture(QtConcurrent::run([source, requested, preferredOutput, unpack] {
     Inspection result;
+    result.output = unpack ? availablePayloadOutput(preferredOutput) : preferredOutput;
     result.selected = requested;
     QFile file(source);
     if (!file.open(QIODevice::ReadOnly)) {

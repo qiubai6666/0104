@@ -2678,6 +2678,121 @@ private slots:
     QVERIFY(runner.trace.isEmpty());
     QVERIFY(window.close());
   }
+  void widgetUnpackPreservesExistingImages_data() {
+    QTest::addColumn<bool>("imagesDirectory");
+    QTest::addColumn<bool>("zip");
+    for (bool imagesDirectory : {false, true})
+      for (bool zip : {false, true})
+        QTest::newRow(qPrintable(QString("%1-%2")
+            .arg(imagesDirectory ? "images" : "parent")
+            .arg(zip ? "zip" : "payload"))) << imagesDirectory << zip;
+  }
+  void widgetUnpackPreservesExistingImages() {
+    QFETCH(bool, imagesDirectory);
+    QFETCH(bool, zip);
+    QByteArray boot, vendor;
+    const QByteArray payload = nativePayloadBytes(&boot, &vendor);
+    const QByteArray sourceBytes = zip ? zipBytes("payload.bin", payload) : payload;
+    const QString sourceDirectory = dir + "/输入 包";
+    const QString source = sourceDirectory + (zip ? "/ota.zip" : "/payload.bin");
+    const QString output = dir + "/解包 输出", existing = output + "/images";
+    QVERIFY(QDir().mkpath(sourceDirectory));
+    QVERIFY(QDir().mkpath(existing));
+    QVERIFY(put(source, sourceBytes));
+    const QByteArray oldImage = nativeImage(1, 's');
+    QVERIFY(put(existing + "/system.img", oldImage));
+    QVERIFY(put(existing + "/.settings.json", "preserve settings"));
+    QVERIFY(put(existing + "/vendor.img.partial", "preserve partial image"));
+    const QStringList oldFiles = QDir(existing).entryList(
+        QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(imagesDirectory ? existing : output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+    QString previous = existing;
+    // A second click must choose a sibling, not overwrite or nest in the result.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      window.findChild<QPushButton *>("UnpackPayloadButton")->click();
+      QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+      const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                              ->toPlainText();
+      QCOMPARE(log.count("Payload解包成功！"), attempt + 1);
+      const QString actual = QDir::cleanPath(folder->text());
+      QVERIFY2(actual != previous, qPrintable(actual));
+      QCOMPARE(QFileInfo(actual).absolutePath(), QDir(output).absolutePath());
+      QVERIFY2(QFileInfo(actual).fileName().startsWith("images-"), qPrintable(actual));
+      QCOMPARE(read(actual + "/boot.img"), boot);
+      QCOMPARE(read(actual + "/vendor.img"), vendor);
+      QCOMPARE(read(existing + "/system.img"), oldImage);
+      QCOMPARE(read(existing + "/.settings.json"), QByteArray("preserve settings"));
+      QCOMPARE(read(existing + "/vendor.img.partial"), QByteArray("preserve partial image"));
+      QCOMPARE(QDir(existing).entryList(
+          QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System), oldFiles);
+      QCOMPARE(window.findChild<QProgressBar *>("FlashProgressBar")->value(), 100);
+      QCOMPARE(window.findChild<QTableWidget *>("OugaPartitionTableDataGrid")->rowCount(), 2);
+      if (attempt)
+        QCOMPARE(read(previous + "/boot.img"), boot);
+      previous = actual;
+    }
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                            ->toPlainText();
+    QVERIFY(log.contains("输出目录已有文件"));
+    QCOMPARE(read(source), sourceBytes);
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
+  }
+  void widgetUnpackKeepsUnsafeOutputBlocked_data() {
+    QTest::addColumn<int>("kind");
+    QTest::newRow("output-is-file") << 0;
+    QTest::newRow("occupied-source-child") << 1;
+    QTest::newRow("empty-source-child") << 2;
+  }
+  void widgetUnpackKeepsUnsafeOutputBlocked() {
+    QFETCH(int, kind);
+    QByteArray boot, vendor;
+    const QByteArray bytes = nativePayloadBytes(&boot, &vendor);
+    const QString input = dir + "/input", source = input + "/payload.bin";
+    const QString output = kind == 0 ? dir + "/output" : input;
+    QVERIFY(QDir().mkpath(input));
+    QVERIFY(QDir().mkpath(output));
+    QVERIFY(put(source, bytes));
+    const QString preferred = output + "/images";
+    if (kind == 0)
+      QVERIFY(put(preferred, "not a directory"));
+    else {
+      QVERIFY(QDir().mkpath(preferred));
+      if (kind == 1)
+        QVERIFY(put(preferred + "/system.img", nativeImage(1, 's')));
+    }
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+    window.findChild<QPushButton *>("UnpackPayloadButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                            ->toPlainText();
+    QVERIFY2(log.contains("输出") && log.contains("已停止/失败"), qPrintable(log));
+    QVERIFY(!log.contains("Payload解包成功！"));
+    QCOMPARE(folder->text(), output);
+    QCOMPARE(read(source), bytes);
+    if (kind == 0)
+      QCOMPARE(read(preferred), QByteArray("not a directory"));
+    else if (kind == 1)
+      QCOMPARE(read(preferred + "/system.img"), nativeImage(1, 's'));
+    QVERIFY(QDir(output).entryList({"images-*"}, QDir::Dirs).isEmpty());
+    QVERIFY(!QFileInfo::exists(preferred + "/boot.img"));
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
+  }
   void widgetPayloadInspectionCanBeStopped() {
     QByteArray boot, vendor;
     const QString source = dir + "/payload.bin", output = dir + "/output";
