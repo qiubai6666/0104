@@ -4740,29 +4740,88 @@ private slots:
     QVERIFY(runner.trace.isEmpty());
     QVERIFY(window.close());
   }
-  void widgetUnpackKeepsUnsafeOutputBlocked_data() {
-    QTest::addColumn<int>("kind");
-    QTest::newRow("output-is-file") << 0;
-    QTest::newRow("occupied-source-child") << 1;
-    QTest::newRow("empty-source-child") << 2;
+  void widgetUnpackInsideSourceDirectory_data() {
+    QTest::addColumn<bool>("zip");
+    QTest::addColumn<int>("existing");
+    QTest::addColumn<bool>("imagesDirectory");
+    for (bool zip : {false, true})
+      for (int existing : {0, 1, 2})
+        for (bool imagesDirectory : {false, true})
+          QTest::newRow(qPrintable(QString("%1-%2-%3")
+              .arg(zip ? "zip" : "payload").arg(existing)
+              .arg(imagesDirectory ? "images" : "parent")))
+              << zip << existing << imagesDirectory;
+  }
+  void widgetUnpackInsideSourceDirectory() {
+    QFETCH(bool, zip);
+    QFETCH(int, existing);
+    QFETCH(bool, imagesDirectory);
+    QByteArray boot, vendor;
+    const QByteArray payload = nativePayloadBytes(&boot, &vendor);
+    const QByteArray bytes = zip ? zipBytes("payload.bin", payload) : payload;
+    const QString input = dir + "/中文 包目录";
+    const QString source = input + (zip ? "/全量 包.zip" : "/payload.bin");
+    const QString preferred = input + "/images";
+    QVERIFY(QDir().mkpath(input));
+    QVERIFY(put(source, bytes));
+    if (existing || imagesDirectory)
+      QVERIFY(QDir().mkpath(preferred));
+    if (existing == 2) {
+      QVERIFY(put(preferred + "/system.img", "existing image"));
+      QVERIFY(put(preferred + "/vendor.img.partial", "existing partial"));
+      QVERIFY(put(preferred + "/.settings.json", "existing settings"));
+    }
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(imagesDirectory ? preferred : input);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+    QString previous;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      window.findChild<QPushButton *>("UnpackPayloadButton")->click();
+      QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+      const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                              ->toPlainText();
+      QVERIFY2(log.contains("Payload解包成功！"), qPrintable(log));
+      const QString actual = folder->text();
+      QCOMPARE(QFileInfo(actual).absolutePath(), input);
+      if (!attempt && existing != 2)
+        QCOMPARE(actual, preferred);
+      else
+        QVERIFY(QFileInfo(actual).fileName().startsWith("images-"));
+      QVERIFY(actual != previous);
+      QCOMPARE(read(actual + "/boot.img"), boot);
+      QCOMPARE(read(actual + "/vendor.img"), vendor);
+      QCOMPARE(window.findChild<QProgressBar *>("FlashProgressBar")->value(), 100);
+      QCOMPARE(window.findChild<QTableWidget *>("OugaPartitionTableDataGrid")->rowCount(), 2);
+      if (attempt) {
+        QCOMPARE(read(previous + "/boot.img"), boot);
+        QCOMPARE(read(previous + "/vendor.img"), vendor);
+      }
+      previous = actual;
+    }
+    QCOMPARE(read(source), bytes);
+    if (existing == 2) {
+      QCOMPARE(read(preferred + "/system.img"), QByteArray("existing image"));
+      QCOMPARE(read(preferred + "/vendor.img.partial"), QByteArray("existing partial"));
+      QCOMPARE(read(preferred + "/.settings.json"), QByteArray("existing settings"));
+      QVERIFY(!QFileInfo::exists(preferred + "/boot.img"));
+    }
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
   }
   void widgetUnpackKeepsUnsafeOutputBlocked() {
-    QFETCH(int, kind);
     QByteArray boot, vendor;
     const QByteArray bytes = nativePayloadBytes(&boot, &vendor);
     const QString input = dir + "/input", source = input + "/payload.bin";
-    const QString output = kind == 0 ? dir + "/output" : input;
+    const QString output = input;
     QVERIFY(QDir().mkpath(input));
-    QVERIFY(QDir().mkpath(output));
     QVERIFY(put(source, bytes));
     const QString preferred = output + "/images";
-    if (kind == 0)
-      QVERIFY(put(preferred, "not a directory"));
-    else {
-      QVERIFY(QDir().mkpath(preferred));
-      if (kind == 1)
-        QVERIFY(put(preferred + "/system.img", nativeImage(1, 's')));
-    }
+    QVERIFY(put(preferred, "not a directory"));
     FakeRunner runner;
     OugaFlashWindow window(nullptr, &runner, dir + "/logs");
     window.show();
@@ -4779,14 +4838,51 @@ private slots:
     QVERIFY(!log.contains("Payload解包成功！"));
     QCOMPARE(folder->text(), output);
     QCOMPARE(read(source), bytes);
-    if (kind == 0)
-      QCOMPARE(read(preferred), QByteArray("not a directory"));
-    else if (kind == 1)
-      QCOMPARE(read(preferred + "/system.img"), nativeImage(1, 's'));
+    QCOMPARE(read(preferred), QByteArray("not a directory"));
     QVERIFY(QDir(output).entryList({"images-*"}, QDir::Dirs).isEmpty());
-    QVERIFY(!QFileInfo::exists(preferred + "/boot.img"));
     QVERIFY(runner.trace.isEmpty());
     QVERIFY(window.close());
+  }
+  void preparationOutputGuards_data() {
+    QTest::addColumn<int>("kind");
+    QTest::newRow("payload-output-is-source-parent") << 0;
+    QTest::newRow("payload-output-is-source-file") << 1;
+    QTest::newRow("payload-output-occupied") << 2;
+    QTest::newRow("super-output-inside-input") << 3;
+    QTest::newRow("super-output-is-input") << 4;
+  }
+  void preparationOutputGuards() {
+    QFETCH(int, kind);
+    const QString input = dir + "/input";
+    const QString source = input + "/payload.bin";
+    QByteArray boot, vendor;
+    const QByteArray bytes = nativePayloadBytes(&boot, &vendor);
+    QVERIFY(QDir().mkpath(input));
+    QVERIFY(put(source, bytes));
+    const QString output = kind == 0 || kind == 4 ? input
+                         : kind == 1 ? source : input + "/images";
+    if (kind == 2) {
+      QVERIFY(QDir().mkpath(output));
+      QVERIFY(put(output + "/.keep", "keep"));
+    }
+    OugaPreparation prep;
+    QSignalSpy done(&prep, &OugaPreparation::finished),
+        ready(&prep, &OugaPreparation::prepared);
+    if (kind >= 3)
+      prep.makeSuper(QString(), input, output);
+    else
+      prep.payload(QString(), source, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 10000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY2(done[0][1].toString().contains("输出"),
+             qPrintable(done[0][1].toString()));
+    QCOMPARE(ready.count(), 0);
+    QCOMPARE(read(source), bytes);
+    if (kind == 2)
+      QCOMPARE(read(output + "/.keep"), QByteArray("keep"));
+    else if (kind == 3)
+      QVERIFY(!QFileInfo::exists(output));
+    QVERIFY(!QFileInfo::exists(output + "/boot.img"));
   }
   void widgetPayloadInspectionCanBeStopped_data() {
     QTest::addColumn<bool>("manifestStage");

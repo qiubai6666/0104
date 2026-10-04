@@ -268,27 +268,32 @@ void OugaPreparation::work(std::function<QString()> job,
 bool OugaPreparation::newOutput(const QString &source, const QString &output,
                                 QString *error) {
   QFileInfo info(output);
+  const bool sourceIsDirectory = QFileInfo(source).isDir();
   QString parent = info.dir().canonicalPath(),
-          src = QFileInfo(source).isDir()
+          src = sourceIsDirectory
                     ? QFileInfo(source).canonicalFilePath()
                     : QFileInfo(source).dir().canonicalPath();
   QString clean =
       QDir::cleanPath(QDir::fromNativeSeparators(info.absoluteFilePath()));
   if (parent.isEmpty() || src.isEmpty() ||
       clean.compare(src, Qt::CaseInsensitive) == 0 ||
-      clean.startsWith(src + '/', Qt::CaseInsensitive) || info.isSymLink() ||
-      info.isJunction() ||
+      (sourceIsDirectory && clean.startsWith(src + '/', Qt::CaseInsensitive)) ||
+      info.isSymLink() || info.isJunction() ||
+      (info.exists() && !info.isDir()) ||
       (info.exists() &&
        !QDir(output)
             .entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden |
                        QDir::System)
             .isEmpty())) {
-    *error = "输出必须是源目录外的独立空目录，父目录必须存在，不能是链接";
+    *error = "输出必须是独立空目录，父目录必须存在，不能覆盖源目录或链接";
     return false;
   }
   QString actual = QDir(parent).filePath(info.fileName());
+  // File packages may produce <source parent>/images, as in the reference.
+  // Directory inputs (Super generation) still require an external output,
+  // including when an existing parent resolves through a link or junction.
   if (actual.compare(src, Qt::CaseInsensitive) == 0 ||
-      actual.startsWith(src + '/', Qt::CaseInsensitive)) {
+      (sourceIsDirectory && actual.startsWith(src + '/', Qt::CaseInsensitive))) {
     *error = "输出实际路径落入源目录";
     return false;
   }

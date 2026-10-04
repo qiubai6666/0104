@@ -242,3 +242,11 @@ Release 使用 Qt 6.11.2 MinGW；成功后显式传本次 ExecutablePath、匹�
 - 新增分组、路径、原生 lpmake、ISO 扫描/拖入回归。修复前定向用例为 45 通过、20 失败；修复后定向为 65 通过、0 失败；Windows 原生完整欧加回归为 989 通过、0 失败、0 跳过。
 - Qt 6.11.2 MinGW Release 已更新 `OrangeToolsApp`，构建与发布 EXE SHA-256 为 `C917736447E2A039C1CDB8283D8756DA0C44ACA2701F95315004DF0AA64D4F45`。部署目录原有 26 个文件全部保留，仅本次 EXE 摘要变化；TEMP 发布副本通过 Smoke、可读性 11 项及本轮 67 项定向回归。
 - 设备互斥 34、进程管理 16、网络 24、依赖 83 项回归均通过。未连接或刷写真实手机、未解包真实 ROM；上述证据只覆盖本轮售后包/Super 对照与模拟、部署验证，不宣称整体逐行复刻或完成真机兼容验收。
+
+## 2026-10-04 全量包输出目录与参考源码对齐
+
+- 对照 VioletToolBox 的 `oujiaflash.cs`，选择全量 ZIP 或 `payload.bin` 后，可将输出目录选为源包所在文件夹；解包写入其 `images` 子目录，不再要求文件包的输出位于源目录之外。中文和空格路径同样支持，已有空的 `images` 可直接使用。
+- 所选 `images` 已有内容或重复解包时，自动使用同级 `images-<uuid>`，保留已有镜像、隐藏文件和 `.partial`，不覆盖源包。输出目标为普通文件、链接或直接覆盖源目录时仍拒绝；Super 等目录输入仍要求输出位于源目录之外，防止修改源素材。
+- 此修改仅调整文件包输出路径限制，不改变解包线程、日志、窗口行为或刷写逻辑；回归使用独立 TEMP 夹具，不连接手机、不执行真实刷机。
+- 修复前定向红测为 8 通过、12 失败；修复后定向为 24 通过、0 失败。Windows 沙箱内首次完整测试出现伪终端子进程超时（976 通过、20 失败、8 跳过）；在沙箱外的独立 TEMP 发布副本、显式配置本地 lpmake 后，完整欧加回归为 1004 通过、0 失败、0 跳过。设备命令使用模拟工具，lpmake 只处理测试夹具。
+- Qt 6.11.2 MinGW Release 已以 PreserveExistingFiles 更新 OrangeToolsApp，构建、部署 EXE 与 TEMP 验证副本的 SHA-256 一致：CD2F7A7EE2A16CD321D7EA49FEDF58FAFA8FFE6EBAF974427573770EDE82AC23。移除开发 Qt/MinGW PATH 后，隔离副本通过 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Concurrent 与 SVG Smoke；本轮未解包真实 ROM，也未连接或刷写真实手机。
