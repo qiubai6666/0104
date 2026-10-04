@@ -233,3 +233,12 @@ Release 使用 Qt 6.11.2 MinGW；成功后显式传本次 ExecutablePath、匹�
 - 独立序列红测在旧实现上 2 通过、12 失败（含初始化/清理），修复后最终定向 99 通过、0 失败；Windows 原生完整欧加回归 951 通过、0 失败、0 跳过。现有设备操作互斥 34、进程管理 16、界面资源 11、本地回环网络 24、捆绑依赖 83 项全部通过且无跳过；依赖工具仅执行版本查询和本轮 TEMP 小型夹具，不启动共享 ADB Server 或操作手机。
 - Qt 6.11.2 MinGW Release 已以 PreserveExistingFiles 更新 OrangeToolsApp；构建、正式包及 TEMP 验证副本的 EXE SHA-256 一致：37B883DEC0EB3DF2D231A1AD8A41F070121EEBEE52F65364E979EAA24EC3BB28。26 个既有文件均保留，仅 EXE 摘要变化，17 个必需部署文件与验证副本逐项一致。Qt6Test.dll 与测试 EXE 只在 TEMP。
 - 移除开发 Qt/MinGW PATH 后，隔离副本 Smoke 的 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Concurrent、SVG 均通过，插件仅来自验证副本；修复及售后定向回归 241 通过、0 失败、0 跳过。未启动正式主程序、提取真实 ROM 或连接/刷写手机；此轮证明上述顺序修复和模拟/部署验证，不代表整体完全复刻或真机兼容验收完成。
+
+## 2026-10-04 售后包 Super 默认分组、路径与 ISO 镜像对照
+
+- 对照 SMT `SuperMaker` 与 VioletToolBox `SuperMaker`，修正售后 `super_def` 解析：分区组名按 `group_name → group → default` 回退；不为内置 `default` 传入 `--group` 参数，仍拒绝重复定义；命名分组的 `maximum_size=0` 按无分组上限处理，但仍受 Super 物理容量和对齐检查约束。
+- 正常优先解析 `IMAGES/...` 路径；仅在正常路径缺失时回退到售后包根目录的扁平镜像。支持 Windows 分隔符和元数据目录相对路径；越界路径、重复定义、多候选和容量超限仍会阻止生成，不修改源 JSON 或源镜像。
+- 售后目录扫描、分区名称归一化和拖入镜像入口补齐 `.iso`，未放宽任意 `.bin` 为镜像；ISO 与其他镜像一样继续经过文件、Sparse、容量、摘要和阻止分区检查。
+- 新增分组、路径、原生 lpmake、ISO 扫描/拖入回归。修复前定向用例为 45 通过、20 失败；修复后定向为 65 通过、0 失败；Windows 原生完整欧加回归为 989 通过、0 失败、0 跳过。
+- Qt 6.11.2 MinGW Release 已更新 `OrangeToolsApp`，构建与发布 EXE SHA-256 为 `C917736447E2A039C1CDB8283D8756DA0C44ACA2701F95315004DF0AA64D4F45`。部署目录原有 26 个文件全部保留，仅本次 EXE 摘要变化；TEMP 发布副本通过 Smoke、可读性 11 项及本轮 67 项定向回归。
+- 设备互斥 34、进程管理 16、网络 24、依赖 83 项回归均通过。未连接或刷写真实手机、未解包真实 ROM；上述证据只覆盖本轮售后包/Super 对照与模拟、部署验证，不宣称整体逐行复刻或完成真机兼容验收。

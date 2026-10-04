@@ -51,7 +51,7 @@ quint64 number(const QJsonValue &v, bool *ok) {
 const QStringList &imageFilters() {
   // Match reference directory formats, but unlabelled .bin files may be
   // Payloads or executables. Only validated rawprogram maps those to targets.
-  static const QStringList filters = {"*.img", "*.raw", "*.sparse"};
+  static const QStringList filters = {"*.img", "*.iso", "*.raw", "*.sparse"};
   return filters;
 }
 QStringList imageDirectories(const QDir &root) {
@@ -897,14 +897,22 @@ bool OugaPackage::lpmakeArguments(const QString &directory,
            "--sparse",
            "--output",
            output};
-  QMap<QString, quint64> groups, used;
+  // liblp provides the default group itself. A maximum of zero means no
+  // group-specific limit, not an empty group; physical capacity still applies.
+  QMap<QString, quint64> groups{{"default", 0}}, used;
+  QSet<QString> definedGroups;
   quint64 groupTotal = 0;
   for (const QJsonValue &v : root["groups"].toArray()) {
     auto g = v.toObject();
     QString n = g["name"].toString();
+    if (!Ouga::safeName(n) || definedGroups.contains(n))
+      return fail(error, "Super 分组无效/重复定义");
+    definedGroups.insert(n);
+    // Match SuperMaker: do not redefine the implicit default group.
+    if (n == "default")
+      continue;
     quint64 size = number(g["maximum_size"], &ok);
-    if (!ok || !size || !Ouga::safeName(n) || groups.contains(n) ||
-        size > capacity - groupTotal)
+    if (!ok || size > capacity - groupTotal)
       return fail(error, "Super 分组无效/总容量超限");
     groups[n] = size;
     groupTotal += size;
@@ -926,19 +934,32 @@ bool OugaPackage::lpmakeArguments(const QString &directory,
             g = d["group_name"].toString().isEmpty()
                     ? d["group"].toString()
                     : d["group_name"].toString(),
-            rel = d["path"].toString();
+            rel = QDir::fromNativeSeparators(d["path"].toString());
+    if (g.isEmpty())
+      g = "default";
     quint64 declared = number(d["size"], &ok);
     if (!ok || !declared || declared > quint64(LLONG_MAX) - block ||
         !Ouga::safeName(n) || names.contains(n) || !groups.contains(g))
       return fail(error, "Super 分区定义冲突：" + n);
     QStringList candidates;
     if (!rel.isEmpty()) {
-      for (const QString &dir : {directory, QFileInfo(defs[0]).absolutePath()}) {
-        QString file = QDir(dir).filePath(rel);
-        if (inside(directory, file) && QFileInfo(file).isFile() &&
-            !candidates.contains(QFileInfo(file).canonicalFilePath()))
-          candidates << QFileInfo(file).canonicalFilePath();
-      }
+      // A flattened IMAGES layout is a fallback only. Never mask a valid
+      // normal candidate or turn traversal/absolute paths into valid inputs.
+      if (QDir::isAbsolutePath(rel) || rel.contains(':') ||
+          rel.split('/').contains(".."))
+        return fail(error, "Super 镜像路径越界：" + n);
+      auto collect = [&](const QString &relative) {
+        for (const QString &dir : {directory, QFileInfo(defs[0]).absolutePath()}) {
+          QString file = QDir(dir).filePath(relative);
+          if (inside(directory, file) && QFileInfo(file).isFile())
+            candidates << QFileInfo(file).canonicalFilePath();
+        }
+        candidates.removeDuplicates();
+      };
+      collect(rel);
+      if (candidates.isEmpty() &&
+          rel.startsWith("IMAGES/", Qt::CaseInsensitive))
+        collect(rel.mid(7));
     } else
       for (const QString &dir :
            {directory, QDir(directory).filePath("IMAGES")}) {
@@ -953,7 +974,7 @@ bool OugaPackage::lpmakeArguments(const QString &directory,
     if (expanded <= 0 || quint64(expanded) > declared)
       return fail(error, "Super 镜像超过定义容量：" + n);
     quint64 allocation = ((declared + block - 1) / block) * block;
-    if (allocation > groups[g] - used[g])
+    if (groups[g] && allocation > groups[g] - used[g])
       return fail(error, "Super 分组容量不足：" + g);
     used[g] += allocation;
     total = ((total + align - 1) / align) * align;

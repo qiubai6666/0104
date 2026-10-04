@@ -845,6 +845,7 @@ private slots:
     QTest::newRow("arbitrary-bin") << "" << "script.bin" << false;
     QTest::newRow("root-image") << "" << "boot.img" << true;
     QTest::newRow("root-raw") << "" << "boot.raw" << true;
+    QTest::newRow("radio-iso") << "RADIO" << "modem.ISO" << true;
     QTest::newRow("radio-sparse") << "RADIO" << "modem.sparse" << true;
     QTest::newRow("uppercase-sparse") << "" << "vendor.SPARSE" << true;
     QTest::newRow("images") << "images" << "boot.img" << true;
@@ -888,6 +889,9 @@ private slots:
     QTest::addColumn<QString>("target");
     QTest::addColumn<bool>("isSparse");
     QTest::newRow("raw-root") << "" << "boot.raw" << "boot" << false;
+    QTest::newRow("iso-root") << "" << "boot.iso" << "boot" << false;
+    QTest::newRow("iso-radio") << "RADIO" << "modem.ISO" << "modem" << false;
+    QTest::newRow("sparse-iso-images") << "IMAGES" << "vendor.iso" << "vendor" << true;
     QTest::newRow("sparse-root") << "" << "vendor.sparse" << "vendor" << true;
     QTest::newRow("raw-images") << "IMAGES" << "init_boot.RAW" << "init_boot" << false;
     QTest::newRow("sparse-radio") << "RADIO" << "modem.SPARSE" << "modem" << true;
@@ -930,7 +934,7 @@ private slots:
     const QString blocked = dir + "/blocked";
     QVERIFY(QDir().mkpath(blocked));
     QVERIFY(put(blocked + "/boot.raw", QByteArray(512, 'b')));
-    for (const QString name : {"misc.sparse", "frp.raw", "metadata.raw", "script.bin", "payload.bin"})
+    for (const QString name : {"misc.sparse", "frp.raw", "metadata.raw", "misc.iso", "frp.iso", "script.bin", "payload.bin"})
       QVERIFY(put(blocked + "/" + name, QByteArray(512, 'x')));
     const auto images = OugaPackage::scan(blocked, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
@@ -1166,6 +1170,200 @@ private slots:
     QVERIFY(!OugaPackage::lpmakeArguments(dir, dir + "/out.img", &args, &merged,
                                           &e));
     QCOMPARE(hash, OugaPackage::digest(im.path, &e));
+  }
+  // Independent oracle: SMT/Violet SuperMaker skips the implicit default
+  // group, resolves group_name -> group -> default, and strips IMAGES only
+  // when the normal image path is missing.
+  void referenceSuperGroups_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::addColumn<bool>("accepted");
+    for (const QString value : {"implicit-default", "explicit-default",
+                               "default-without-size", "legacy-default",
+                               "named-unlimited", "named-bounded",
+                               "group-name-precedence", "mixed-default"})
+      QTest::newRow(qPrintable(value)) << value << true;
+    for (const QString value : {"duplicate-default", "duplicate-named",
+                               "unknown-group", "bad-group-size",
+                               "oversized-group", "insufficient-group"})
+      QTest::newRow(qPrintable(value)) << value << false;
+  }
+  void referenceSuperGroups() {
+    QFETCH(QString, scenario);
+    QFETCH(bool, accepted);
+    QVERIFY(put(dir + "/system.img", QByteArray(512, 's')));
+    QJsonArray groups;
+    QJsonObject part{{"name", "system_a"}, {"size", "4096"},
+                     {"path", "system.img"}};
+    if (scenario.contains("default") && scenario != "implicit-default") {
+      QJsonObject group{{"name", "default"}, {"maximum_size", "0"}};
+      if (scenario == "default-without-size") group.remove("maximum_size");
+      groups.append(group);
+      if (scenario == "duplicate-default") groups.append(group);
+      if (scenario == "legacy-default") part["group"] = "default";
+      else part["group_name"] = "default";
+    }
+    const bool named = scenario.startsWith("named-") ||
+        scenario == "group-name-precedence" || scenario == "mixed-default" ||
+        scenario == "duplicate-named" || scenario == "bad-group-size" ||
+        scenario == "oversized-group" || scenario == "insufficient-group";
+    QString maximum = scenario == "named-unlimited" ? "0" : "4194304";
+    if (scenario == "bad-group-size") maximum = "bad";
+    if (scenario == "oversized-group") maximum = "8388609";
+    if (scenario == "insufficient-group") maximum = "512";
+    if (named) {
+      QJsonObject group{{"name", "g"}, {"maximum_size", maximum}};
+      groups.append(group);
+      if (scenario == "duplicate-named") groups.append(group);
+      if (scenario != "mixed-default") part["group_name"] = "g";
+      if (scenario == "group-name-precedence") part["group"] = "default";
+    }
+    if (scenario == "unknown-group") part["group_name"] = "missing";
+    QJsonObject def{
+        {"block_devices", QJsonArray{QJsonObject{{"name", "super"},
+            {"size", "8388608"}, {"alignment", "4096"}}}},
+        {"groups", groups}, {"partitions", QJsonArray{part}}};
+    const QByteArray original = QJsonDocument(def).toJson();
+    const QString path = dir + "/super_def.json";
+    QVERIFY(put(path, original));
+    QStringList args;
+    QSet<QString> merged;
+    QString error;
+    QCOMPARE(OugaPackage::lpmakeArguments(dir, dir + "/out.img", &args,
+                                         &merged, &error), accepted);
+    QCOMPARE(read(path), original);
+    QCOMPARE(read(dir + "/system.img"), QByteArray(512, 's'));
+    if (!accepted) {
+      QVERIFY2(!error.isEmpty(), qPrintable(scenario));
+      return;
+    }
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QStringList expected{"--metadata-size", "65536", "--metadata-slots", "2",
+        "--block-size", "4096", "--super-name", "super", "--device",
+        "super:8388608:4096:0", "--sparse", "--output", dir + "/out.img"};
+    if (named) expected << "--group" << "g:" + maximum;
+    const QString group = named && scenario != "mixed-default" ? "g" : "default";
+    expected << "--partition" << "system_a:readonly:4096:" + group
+             << "--image" << "system_a=" + QFileInfo(dir + "/system.img").canonicalFilePath();
+    QCOMPARE(args, expected);
+    QCOMPARE(merged, QSet<QString>{"system"});
+  }
+  void referenceSuperPaths_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::addColumn<bool>("accepted");
+    for (const QString value : {"normal", "windows-separators", "flattened",
+                               "normal-wins", "meta-relative"})
+      QTest::newRow(qPrintable(value)) << value << true;
+    for (const QString value : {"missing", "outside", "duplicate-defs",
+                               "ambiguous-relative", "oversized-image"})
+      QTest::newRow(qPrintable(value)) << value << false;
+  }
+  void referenceSuperPaths() {
+    QFETCH(QString, scenario);
+    QFETCH(bool, accepted);
+    const QString root = dir + "/售后 包";
+    QVERIFY(QDir().mkpath(root + "/IMAGES"));
+    QVERIFY(QDir().mkpath(root + "/META"));
+    QString source = root + "/IMAGES/system.img";
+    QString relative = "IMAGES/system.img";
+    QString json = root + "/super_def.json";
+    if (scenario == "windows-separators") relative = "IMAGES\\system.img";
+    if (scenario == "flattened") source = root + "/system.img";
+    if (scenario == "meta-relative" || scenario == "ambiguous-relative") {
+      relative = "system.img";
+      json = root + "/META/super_def.json";
+      source = root + "/META/system.img";
+      if (scenario == "ambiguous-relative")
+        QVERIFY(put(root + "/system.img", QByteArray(512, 'a')));
+    }
+    if (scenario == "outside") {
+      relative = "../outside.img";
+      source = dir + "/outside.img";
+    }
+    if (scenario != "missing")
+      QVERIFY(put(source, QByteArray(scenario == "oversized-image" ? 8192 : 512, 's')));
+    if (scenario == "normal-wins")
+      QVERIFY(put(root + "/system.img", QByteArray(512, 'f')));
+    QJsonObject def{
+        {"block_devices", QJsonArray{QJsonObject{{"name", "super"},
+            {"size", "8388608"}, {"alignment", "4096"}}}},
+        {"groups", QJsonArray{QJsonObject{{"name", "g"}, {"maximum_size", "4194304"}}}},
+        {"partitions", QJsonArray{QJsonObject{{"name", "system_a"},
+            {"size", "4096"}, {"group_name", "g"}, {"path", relative}}}}};
+    const QByteArray bytes = QJsonDocument(def).toJson();
+    QVERIFY(put(json, bytes));
+    if (scenario == "duplicate-defs")
+      QVERIFY(put(root + "/META/super_def.json", bytes));
+    QStringList args;
+    QSet<QString> merged;
+    QString error;
+    QCOMPARE(OugaPackage::lpmakeArguments(root, dir + "/out.img", &args,
+                                         &merged, &error), accepted);
+    QCOMPARE(read(json), bytes);
+    if (!accepted) {
+      QVERIFY(!error.isEmpty());
+      return;
+    }
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(args.value(args.indexOf("--image") + 1),
+             "system_a=" + QFileInfo(source).canonicalFilePath());
+    QCOMPARE(merged, QSet<QString>{"system"});
+    QCOMPARE(read(source), QByteArray(512, 's'));
+  }
+  void referenceSuperNative_data() {
+    QTest::addColumn<QString>("group");
+    QTest::addColumn<bool>("flattened");
+    for (const QString group : {"implicit", "default", "bounded", "unlimited"})
+      for (bool flattened : {false, true})
+        QTest::newRow(qPrintable(group + (flattened ? "-flat" : "-images")))
+            << group << flattened;
+  }
+  void referenceSuperNative() {
+    // Opt-in local image construction only. Never substitute a device tool.
+    const QString tool = qEnvironmentVariable("ORANGE_TEST_LPMAKE");
+    if (tool.isEmpty()) QSKIP("Set ORANGE_TEST_LPMAKE for local Super tool validation");
+    QVERIFY(QFileInfo(tool).isExecutable());
+    QFETCH(QString, group);
+    QFETCH(bool, flattened);
+    const QString root = dir + "/售后 包", output = dir + "/output";
+    QVERIFY(QDir().mkpath(root + "/IMAGES"));
+    const QString source = root + (flattened ? "/system.img" : "/IMAGES/system.img");
+    const QByteArray content(512, 's');
+    QVERIFY(put(source, content));
+    QJsonArray groups;
+    if (group != "implicit")
+      groups.append(QJsonObject{{"name", group == "default" ? "default" : "g"},
+          {"maximum_size", group == "bounded" ? "4194304" : "0"}});
+    QJsonObject part{{"name", "system_a"}, {"size", "4096"},
+                     {"path", "IMAGES/system.img"}};
+    if (group != "implicit") part["group_name"] = group == "default" ? "default" : "g";
+    QJsonObject def{
+        {"block_devices", QJsonArray{QJsonObject{{"name", "super"},
+            {"size", "8388608"}, {"alignment", "4096"}}}},
+        {"groups", groups}, {"partitions", QJsonArray{part}}};
+    const QByteArray original = QJsonDocument(def).toJson();
+    QVERIFY(put(root + "/super_def.json", original));
+    OugaPreparation preparation;
+    QSignalSpy done(&preparation, &OugaPreparation::finished);
+    QSignalSpy ready(&preparation, &OugaPreparation::prepared);
+    QString logs;
+    connect(&preparation, &OugaPreparation::log, this,
+            [&logs](const QString &message) { logs += message + '\n'; });
+    preparation.makeSuper(tool, root, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 20000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(logs + done[0][1].toString()));
+    QCOMPARE(ready.count(), 1);
+    QCOMPARE(read(source), content);
+    QCOMPARE(read(root + "/super_def.json"), original);
+    Partition super;
+    QString error;
+    QVERIFY2(OugaPackage::inspect("super", output + "/super.img", &super, &error),
+             qPrintable(error));
+    QCOMPARE(super.merged, QSet<QString>{"system"});
+    QVERIFY(super.expandedBytes > 4096);
+    const auto prepared = qvariant_cast<QVector<Partition>>(ready[0][0]);
+    QCOMPARE(prepared.size(), 2);
+    QVERIFY(std::any_of(prepared.cbegin(), prepared.cend(),
+                       [](const Partition &image) { return image.name == "super"; }));
   }
   void sequences_data() {
     QTest::addColumn<int>("mode");
@@ -4667,6 +4865,8 @@ private slots:
     QTest::addColumn<QString>("extension");
     QTest::addColumn<bool>("afterSales");
     QTest::newRow("full-raw") << "raw" << false;
+    QTest::newRow("full-iso") << "ISO" << false;
+    QTest::newRow("after-sales-iso") << "iso" << true;
     QTest::newRow("full-sparse") << "SPARSE" << false;
     QTest::newRow("after-sales-raw") << "RAW" << true;
     QTest::newRow("after-sales-sparse") << "sparse" << true;

@@ -893,6 +893,7 @@ void OugaFlashWindow::dropEvent(QDropEvent *event) {
     log("已选择Payload/全量包文件，点击解包Payload准备文件；不会自动写入。");
   } else if (info.isFile() &&
              (info.suffix().compare("img", Qt::CaseInsensitive) == 0 ||
+              info.suffix().compare("iso", Qt::CaseInsensitive) == 0 ||
               info.suffix().compare("raw", Qt::CaseInsensitive) == 0 ||
               info.suffix().compare("sparse", Qt::CaseInsensitive) == 0))
     load(info.absolutePath());
