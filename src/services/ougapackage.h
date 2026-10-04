@@ -39,6 +39,9 @@ public:
   static QByteArray digest(const QString &file, QString *error);
   static qint64 expandedSize(const QString &file, QString *error);
   static bool readArb(const QString &file, quint32 *index, QString *error);
+  // Informational only: a model label is not a compatibility/ARB check.
+  // Empty means unavailable or malformed metadata, not a package error.
+  static QString payloadDeviceModel(const QString &source);
   static QStringList parsePayloadList(const QString &output);
   static QString findPayload(const QString &directory);
   static bool payloadManifest(const QString &file,

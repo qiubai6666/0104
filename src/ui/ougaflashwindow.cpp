@@ -742,10 +742,13 @@ void OugaFlashWindow::log(const QString &message) {
                     timestamp);
   QColor color("#334155");
   if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
-      text.contains("FAILED") || text.startsWith("计划已阻止"))
+      text.contains("FAILED") || text.startsWith("计划已阻止") ||
+      text.startsWith("刷机包对应的机型为"))
     color = QColor("#DC2626");
   else if (text.startsWith("警告") || text.contains("请求停止") ||
-           text.contains("未验证") || text.contains("取消"))
+           text.contains("未验证") || text.contains("取消") ||
+           text.startsWith("正在判断刷机包对应的机型") ||
+           text.startsWith("解析刷机包对应机型失败"))
     color = QColor("#D97706");
   else if (text.startsWith("完成：") || text.contains("成功") ||
            text.startsWith("发现 ") || text.startsWith("解包完成") ||

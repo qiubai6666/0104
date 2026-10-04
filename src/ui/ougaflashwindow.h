@@ -56,6 +56,7 @@ private:
     Scan,
     PathCheck,
     PayloadInspect,
+    PayloadModelWait,
     PayloadDownload,
     PayloadArchive,
     PayloadExtract,
@@ -132,6 +133,7 @@ private:
   void configureService();
   void extractPayload(bool all);
   void preparePayloadSource();
+  void startPayloadPreparation();
   void extractPayloadArchive();
   void runPayload();
   void preparationFinished(bool success, const QString &message);

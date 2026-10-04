@@ -345,6 +345,47 @@ void OugaFlashWindow::extractPayload(bool all) {
     preparePayloadSource();
 }
 void OugaFlashWindow::preparePayloadSource() {
+  const quint64 generation = m_generation;
+  if (!continueTask(generation))
+    return;
+  if (!m_unpackPayload) {
+    startPayloadPreparation();
+    return;
+  }
+  log("正在判断刷机包对应的机型...");
+  m_task = Task::PayloadInspect;
+  updateBusy();
+  auto watcher = new QFutureWatcher<QString>(this);
+  connect(watcher, &QFutureWatcher<QString>::finished, this,
+          [this, watcher, generation] {
+    const QString model = watcher->result();
+    watcher->deleteLater();
+    if (!continueTask(generation))
+      return;
+    if (model.isEmpty()) {
+      log("解析刷机包对应机型失败，跳过解析步骤...");
+      startPayloadPreparation();
+      return;
+    }
+    log("刷机包对应的机型为" + model + "...");
+    log("刷错包会导致设备黑砖，5秒后开始解包...");
+    m_task = Task::PayloadModelWait;
+    m_progress->setProperty("rate", "5秒后开始解包...");
+    m_progress->update();
+    updateBusy();
+    // Reference warning delay, without sleeping/blocking the GUI thread.
+    // The generation guard also invalidates a cancelled task's timer.
+    QTimer::singleShot(5000, Qt::PreciseTimer, this, [this, generation] {
+      if (continueTask(generation))
+        startPayloadPreparation();
+    });
+  });
+  const QString source = m_payloadSource;
+  watcher->setFuture(QtConcurrent::run([source] {
+    return OugaPackage::payloadDeviceModel(source);
+  }));
+}
+void OugaFlashWindow::startPayloadPreparation() {
   if (!continueTask(m_generation))
     return;
   log(m_unpackPayload ? "开始解包，输出将实时显示在日志窗口中。"

@@ -889,7 +889,15 @@ module_finished:
     }
 }
 
-bool RepairWindow::hasActiveOugaTask() const { return ougaWindow && ougaWindow->isBusy(); }
+bool RepairWindow::hasActiveOugaTask() const {
+    if (!ougaWindow) return false;
+    if (ougaWindow->isBusy()) return true;
+    // The taskbar window has no QObject parent: preserve its logical launcher
+    // protection explicitly instead of relying on the lease's parent chain.
+    for (QObject *owner = DeviceOperationLease::owner(); owner; owner = owner->parent())
+        if (owner == ougaWindow) return true;
+    return false;
+}
 void RepairWindow::closeEvent(QCloseEvent *event) {
     if (hasActiveOugaTask() || DeviceOperationLease::owner()==this) {
         event->ignore();

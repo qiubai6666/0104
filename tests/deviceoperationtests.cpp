@@ -104,14 +104,22 @@ void DeviceOperationTests::ougaSingleWindowAndLease()
     QVERIFY(first);
     repair.buttons[RepairWindow::OugaFlash]->click();
     QCOMPARE(repair.ougaWindow, first);
-    QCOMPARE(repair.findChildren<OugaFlashWindow *>().size(), 1);
+    // The flasher has no native owner so Windows can show its taskbar button.
+    QVERIFY(!first->parentWidget());
+    int flashWindows = 0;
+    for (QWidget *widget : QApplication::topLevelWidgets())
+        if (qobject_cast<OugaFlashWindow *>(widget)) ++flashWindows;
+    QCOMPARE(flashWindows, 1);
     QObject operation(first);
+    QVERIFY(!repair.hasActiveOugaTask());
     QVERIFY(DeviceOperationLease::acquire(&operation));
+    QVERIFY(repair.hasActiveOugaTask());
     QVERIFY(!repair.close());
     QVERIFY(!first->close());
     first->showMinimized();
     QVERIFY(DeviceOperationLease::busyFor(&repair));
     DeviceOperationLease::release(&operation);
+    QVERIFY(!repair.hasActiveOugaTask());
     QVERIFY(first->close());
 }
 

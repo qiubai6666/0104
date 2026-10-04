@@ -461,6 +461,125 @@ QString OugaPackage::findPayload(const QString &directory) {
   QString p = QDir(directory).filePath("payload.bin");
   return QFileInfo(p).isFile() ? p : QString();
 }
+QString OugaPackage::payloadDeviceModel(const QString &source) {
+  // Match the reference: read the sidecar beside the selected source; never
+  // search unrelated folders or treat package scripts as metadata.
+  const QFileInfo info(QDir(QFileInfo(source).absolutePath())
+                           .filePath("payload_properties.txt"));
+  constexpr qint64 maxPropertiesSize = 1024 * 1024;
+  if (!info.isFile() || info.isSymLink() || info.isJunction() ||
+      !info.isReadable() || info.size() > maxPropertiesSize)
+    return {};
+  QFile file(info.absoluteFilePath());
+  if (!file.open(QIODevice::ReadOnly))
+    return {};
+  const QByteArray bytes = file.read(maxPropertiesSize + 1);
+  if (file.error() != QFile::NoError || bytes.size() > maxPropertiesSize)
+    return {};
+  QString properties = QString::fromUtf8(bytes);
+  if (properties.startsWith(QChar(0xfeff)))
+    properties.remove(0, 1);
+  QString version;
+  for (const QString &line : properties.split('\n')) {
+    if (line.startsWith("ota_target_version=")) {
+      version = line.mid(QStringLiteral("ota_target_version=").size()).trimmed();
+      break;
+    }
+  }
+  if (version.isEmpty())
+    return {};
+  // Mapping copied from the reference. Match complete identifiers rather than
+  // truncating all codes to six characters (OPD/RMX/codenames are longer).
+  static const QMap<QString, QString> models = {
+      {"PLZ110", "一加15T"},
+      {"PLQ110", "一加 ACE 6"},
+      {"PLR110", "一加 ACE 6T"},
+      {"PLK110", "一加15"},
+      {"PLC110", "一加ACE5至尊版"},
+      {"PMB110", "一加ACE6至尊版"},
+      {"OPD2513", "一加Pad3 Pro"},
+      {"OPD2413", "一加Pad2 Pro"},
+      {"PKX110", "一加13T"},
+      {"OPD2508", "一加平板 2"},
+      {"OPD2407", "一加平板"},
+      {"PKR110", "一加ACE5 Pro"},
+      {"PKG110", "一加ACE5"},
+      {"PJZ110", "一加13"},
+      {"OPD2404", "一加Pad Pro"},
+      {"OPD2417", "OPPO Pad SE"},
+      {"OPD2515", "OPPO Pad Mini"},
+      {"OPD2102", "OPPO Pad Air"},
+      {"OPD2301", "OPPO Pad Air2"},
+      {"OPD2405", "OPPO Pad 3"},
+      {"OPD2401", "OPPO Pad 3 Pro"},
+      {"OPD2409", "OPPO Pad 4 Pro"},
+      {"OPD2501", "OPPO Pad Air5"},
+      {"OPD2506", "OPPO Pad 5"},
+      {"OPD2511", "OPPO Pad 5 Pro"},
+      {"OPD2601", "OPPO Pad 6"},
+      {"PJX110", "一加ACE3 Pro"},
+      {"PJF110", "一加ACE3V"},
+      {"PJE110", "一加ACE3"},
+      {"PJD110", "一加12"},
+      {"PJA110", "一加ACE2 Pro"},
+      {"PHP110", "一加ACE2v"},
+      {"PHK110", "一加ACE2"},
+      {"PHB110", "一加11"},
+      {"PGP110", "一加ACE Pro"},
+      {"PGZ110", "一加ACE竞速版"},
+      {"PKGM10", "一加ACE"},
+      {"NE2210", "一加10Pro"},
+      {"martini", "一加 9RT"},
+      {"lemonades", "一加 9R"},
+      {"lemonadep", "一加 9 Pro"},
+      {"lemonade", "一加 9"},
+      {"kebab", "一加 8T"},
+      {"instantnoodlep", "一加 8 Pro"},
+      {"instantnoodle", "一加 8"},
+      {"hotdogg", "一加 7T Pro"},
+      {"RMX3370", "真我GT Neo2"},
+      {"RMX3357", "真我GT neo2T"},
+      {"RMX3562", "真我GT neo3 150w"},
+      {"RMX3560", "真我GT neo3 80w"},
+      {"RMX3706", "真我GT neo5 150w"},
+      {"RMX3708", "真我GT neo5 240w"},
+      {"RMX3700", "真我GT neo5 SE"},
+      {"RMX3850", "真我GT neo6 SE"},
+      {"RMX3852", "真我GT neo6"},
+      {"RMX3366", "真我GT大师探索版"},
+      {"RMX3300", "真我GT2 Pro"},
+      {"RMX3551", "真我GT2大师探索版"},
+      {"RMX3310", "真我GT2"},
+      {"RMX3820", "真我GT5 150w"},
+      {"RMX3823", "真我GT5 240w"},
+      {"RMX3888", "真我GT5 Pro"},
+      {"RMX3800", "真我GT6"},
+      {"RMX5090", "真我GT7 Pro竞速版"},
+      {"RMX5010", "真我GT7 Pro"},
+      {"RMX6688", "真我GT7"},
+      {"RMX5200", "真我GT8 Pro"},
+      {"RMX6699", "真我GT8"},
+      {"RMX8899", "真我Neo8"},
+      {"RMX5080", "真我GT neo7 SE"},
+      {"RMX5062", "真我GT neo7 Turbo"},
+      {"RMX5060", "真我GT neo7"},
+      {"RMX5071", "真我GT neo7X"},
+  };
+  QString matched, model;
+  for (auto it = models.cbegin(); it != models.cend(); ++it) {
+    const QString &code = it.key();
+    if (version.startsWith(code) && code.size() > matched.size() &&
+        (version.size() == code.size() ||
+         !version.at(code.size()).isLetterOrNumber())) {
+      matched = code;
+      model = it.value();
+    }
+  }
+  if (!model.isEmpty())
+    return model;
+  return version.size() >= 6 ? QStringLiteral("未知机型") : QString();
+}
+
 QStringList OugaPackage::parsePayloadList(const QString &out) {
   QStringList names;
   for (const QString &l : out.split('\n')) {

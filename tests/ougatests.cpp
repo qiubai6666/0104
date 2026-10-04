@@ -517,6 +517,195 @@ private slots:
   void cleanup() {
     QVERIFY2(!DeviceOperationLease::owner(), "Leaked device lease");
   }
+  void payloadDeviceModel_data() {
+    QTest::addColumn<QByteArray>("properties");
+    QTest::addColumn<QString>("expected");
+    QTest::newRow("PLZ110") << QByteArray("ota_target_version=PLZ110_14.0.0.101\n") << QString("一加15T");
+    QTest::newRow("PLQ110") << QByteArray("ota_target_version=PLQ110_14.0.0.101\n") << QString("一加 ACE 6");
+    QTest::newRow("PLR110") << QByteArray("ota_target_version=PLR110_14.0.0.101\n") << QString("一加 ACE 6T");
+    QTest::newRow("PLK110") << QByteArray("ota_target_version=PLK110_14.0.0.101\n") << QString("一加15");
+    QTest::newRow("PLC110") << QByteArray("ota_target_version=PLC110_14.0.0.101\n") << QString("一加ACE5至尊版");
+    QTest::newRow("PMB110") << QByteArray("ota_target_version=PMB110_14.0.0.101\n") << QString("一加ACE6至尊版");
+    QTest::newRow("OPD2513") << QByteArray("ota_target_version=OPD2513_14.0.0.101\n") << QString("一加Pad3 Pro");
+    QTest::newRow("OPD2413") << QByteArray("ota_target_version=OPD2413_14.0.0.101\n") << QString("一加Pad2 Pro");
+    QTest::newRow("PKX110") << QByteArray("ota_target_version=PKX110_14.0.0.101\n") << QString("一加13T");
+    QTest::newRow("OPD2508") << QByteArray("ota_target_version=OPD2508_14.0.0.101\n") << QString("一加平板 2");
+    QTest::newRow("OPD2407") << QByteArray("ota_target_version=OPD2407_14.0.0.101\n") << QString("一加平板");
+    QTest::newRow("PKR110") << QByteArray("ota_target_version=PKR110_14.0.0.101\n") << QString("一加ACE5 Pro");
+    QTest::newRow("PKG110") << QByteArray("ota_target_version=PKG110_14.0.0.101\n") << QString("一加ACE5");
+    QTest::newRow("PJZ110") << QByteArray("ota_target_version=PJZ110_14.0.0.101\n") << QString("一加13");
+    QTest::newRow("OPD2404") << QByteArray("ota_target_version=OPD2404_14.0.0.101\n") << QString("一加Pad Pro");
+    QTest::newRow("OPD2417") << QByteArray("ota_target_version=OPD2417_14.0.0.101\n") << QString("OPPO Pad SE");
+    QTest::newRow("OPD2515") << QByteArray("ota_target_version=OPD2515_14.0.0.101\n") << QString("OPPO Pad Mini");
+    QTest::newRow("OPD2102") << QByteArray("ota_target_version=OPD2102_14.0.0.101\n") << QString("OPPO Pad Air");
+    QTest::newRow("OPD2301") << QByteArray("ota_target_version=OPD2301_14.0.0.101\n") << QString("OPPO Pad Air2");
+    QTest::newRow("OPD2405") << QByteArray("ota_target_version=OPD2405_14.0.0.101\n") << QString("OPPO Pad 3");
+    QTest::newRow("OPD2401") << QByteArray("ota_target_version=OPD2401_14.0.0.101\n") << QString("OPPO Pad 3 Pro");
+    QTest::newRow("OPD2409") << QByteArray("ota_target_version=OPD2409_14.0.0.101\n") << QString("OPPO Pad 4 Pro");
+    QTest::newRow("OPD2501") << QByteArray("ota_target_version=OPD2501_14.0.0.101\n") << QString("OPPO Pad Air5");
+    QTest::newRow("OPD2506") << QByteArray("ota_target_version=OPD2506_14.0.0.101\n") << QString("OPPO Pad 5");
+    QTest::newRow("OPD2511") << QByteArray("ota_target_version=OPD2511_14.0.0.101\n") << QString("OPPO Pad 5 Pro");
+    QTest::newRow("OPD2601") << QByteArray("ota_target_version=OPD2601_14.0.0.101\n") << QString("OPPO Pad 6");
+    QTest::newRow("PJX110") << QByteArray("ota_target_version=PJX110_14.0.0.101\n") << QString("一加ACE3 Pro");
+    QTest::newRow("PJF110") << QByteArray("ota_target_version=PJF110_14.0.0.101\n") << QString("一加ACE3V");
+    QTest::newRow("PJE110") << QByteArray("ota_target_version=PJE110_14.0.0.101\n") << QString("一加ACE3");
+    QTest::newRow("PJD110") << QByteArray("ota_target_version=PJD110_14.0.0.101\n") << QString("一加12");
+    QTest::newRow("PJA110") << QByteArray("ota_target_version=PJA110_14.0.0.101\n") << QString("一加ACE2 Pro");
+    QTest::newRow("PHP110") << QByteArray("ota_target_version=PHP110_14.0.0.101\n") << QString("一加ACE2v");
+    QTest::newRow("PHK110") << QByteArray("ota_target_version=PHK110_14.0.0.101\n") << QString("一加ACE2");
+    QTest::newRow("PHB110") << QByteArray("ota_target_version=PHB110_14.0.0.101\n") << QString("一加11");
+    QTest::newRow("PGP110") << QByteArray("ota_target_version=PGP110_14.0.0.101\n") << QString("一加ACE Pro");
+    QTest::newRow("PGZ110") << QByteArray("ota_target_version=PGZ110_14.0.0.101\n") << QString("一加ACE竞速版");
+    QTest::newRow("PKGM10") << QByteArray("ota_target_version=PKGM10_14.0.0.101\n") << QString("一加ACE");
+    QTest::newRow("NE2210") << QByteArray("ota_target_version=NE2210_14.0.0.101\n") << QString("一加10Pro");
+    QTest::newRow("martini") << QByteArray("ota_target_version=martini_14.0.0.101\n") << QString("一加 9RT");
+    QTest::newRow("lemonades") << QByteArray("ota_target_version=lemonades_14.0.0.101\n") << QString("一加 9R");
+    QTest::newRow("lemonadep") << QByteArray("ota_target_version=lemonadep_14.0.0.101\n") << QString("一加 9 Pro");
+    QTest::newRow("lemonade") << QByteArray("ota_target_version=lemonade_14.0.0.101\n") << QString("一加 9");
+    QTest::newRow("kebab") << QByteArray("ota_target_version=kebab_14.0.0.101\n") << QString("一加 8T");
+    QTest::newRow("instantnoodlep") << QByteArray("ota_target_version=instantnoodlep_14.0.0.101\n") << QString("一加 8 Pro");
+    QTest::newRow("instantnoodle") << QByteArray("ota_target_version=instantnoodle_14.0.0.101\n") << QString("一加 8");
+    QTest::newRow("hotdogg") << QByteArray("ota_target_version=hotdogg_14.0.0.101\n") << QString("一加 7T Pro");
+    QTest::newRow("RMX3370") << QByteArray("ota_target_version=RMX3370_14.0.0.101\n") << QString("真我GT Neo2");
+    QTest::newRow("RMX3357") << QByteArray("ota_target_version=RMX3357_14.0.0.101\n") << QString("真我GT neo2T");
+    QTest::newRow("RMX3562") << QByteArray("ota_target_version=RMX3562_14.0.0.101\n") << QString("真我GT neo3 150w");
+    QTest::newRow("RMX3560") << QByteArray("ota_target_version=RMX3560_14.0.0.101\n") << QString("真我GT neo3 80w");
+    QTest::newRow("RMX3706") << QByteArray("ota_target_version=RMX3706_14.0.0.101\n") << QString("真我GT neo5 150w");
+    QTest::newRow("RMX3708") << QByteArray("ota_target_version=RMX3708_14.0.0.101\n") << QString("真我GT neo5 240w");
+    QTest::newRow("RMX3700") << QByteArray("ota_target_version=RMX3700_14.0.0.101\n") << QString("真我GT neo5 SE");
+    QTest::newRow("RMX3850") << QByteArray("ota_target_version=RMX3850_14.0.0.101\n") << QString("真我GT neo6 SE");
+    QTest::newRow("RMX3852") << QByteArray("ota_target_version=RMX3852_14.0.0.101\n") << QString("真我GT neo6");
+    QTest::newRow("RMX3366") << QByteArray("ota_target_version=RMX3366_14.0.0.101\n") << QString("真我GT大师探索版");
+    QTest::newRow("RMX3300") << QByteArray("ota_target_version=RMX3300_14.0.0.101\n") << QString("真我GT2 Pro");
+    QTest::newRow("RMX3551") << QByteArray("ota_target_version=RMX3551_14.0.0.101\n") << QString("真我GT2大师探索版");
+    QTest::newRow("RMX3310") << QByteArray("ota_target_version=RMX3310_14.0.0.101\n") << QString("真我GT2");
+    QTest::newRow("RMX3820") << QByteArray("ota_target_version=RMX3820_14.0.0.101\n") << QString("真我GT5 150w");
+    QTest::newRow("RMX3823") << QByteArray("ota_target_version=RMX3823_14.0.0.101\n") << QString("真我GT5 240w");
+    QTest::newRow("RMX3888") << QByteArray("ota_target_version=RMX3888_14.0.0.101\n") << QString("真我GT5 Pro");
+    QTest::newRow("RMX3800") << QByteArray("ota_target_version=RMX3800_14.0.0.101\n") << QString("真我GT6");
+    QTest::newRow("RMX5090") << QByteArray("ota_target_version=RMX5090_14.0.0.101\n") << QString("真我GT7 Pro竞速版");
+    QTest::newRow("RMX5010") << QByteArray("ota_target_version=RMX5010_14.0.0.101\n") << QString("真我GT7 Pro");
+    QTest::newRow("RMX6688") << QByteArray("ota_target_version=RMX6688_14.0.0.101\n") << QString("真我GT7");
+    QTest::newRow("RMX5200") << QByteArray("ota_target_version=RMX5200_14.0.0.101\n") << QString("真我GT8 Pro");
+    QTest::newRow("RMX6699") << QByteArray("ota_target_version=RMX6699_14.0.0.101\n") << QString("真我GT8");
+    QTest::newRow("RMX8899") << QByteArray("ota_target_version=RMX8899_14.0.0.101\n") << QString("真我Neo8");
+    QTest::newRow("RMX5080") << QByteArray("ota_target_version=RMX5080_14.0.0.101\n") << QString("真我GT neo7 SE");
+    QTest::newRow("RMX5062") << QByteArray("ota_target_version=RMX5062_14.0.0.101\n") << QString("真我GT neo7 Turbo");
+    QTest::newRow("RMX5060") << QByteArray("ota_target_version=RMX5060_14.0.0.101\n") << QString("真我GT neo7");
+    QTest::newRow("RMX5071") << QByteArray("ota_target_version=RMX5071_14.0.0.101\n") << QString("真我GT neo7X");
+    QTest::newRow("no-metadata") << QByteArray() << QString();
+    QTest::newRow("missing-version") << QByteArray("FILE_HASH=xyz\nFILE_SIZE=512\n") << QString();
+    QTest::newRow("empty-version") << QByteArray("ota_target_version=  \r\n") << QString();
+    QTest::newRow("short-version") << QByteArray("ota_target_version=abc\n") << QString();
+    QTest::newRow("unknown-model") << QByteArray("ota_target_version=ABC123_14.0\n") << QString("未知机型");
+    QTest::newRow("prefix-is-not-model") << QByteArray("ota_target_version=PLZ1100_14.0\n") << QString("未知机型");
+    QTest::newRow("longest-model") << QByteArray("ota_target_version=lemonadep_14.0\n") << QString("一加 9 Pro");
+    QTest::newRow("longest-noodles") << QByteArray("ota_target_version=instantnoodlep_14.0\n") << QString("一加 8 Pro");
+    QTest::newRow("bom-crlf") << (QByteArray::fromHex("efbbbf") + "ota_target_version=  PJZ110_15.0 \r\n") << QString("一加13");
+    QTest::newRow("exact-code") << QByteArray("ota_target_version=kebab\n") << QString("一加 8T");
+    QTest::newRow("first-version-only") << QByteArray("ota_target_version=PJD110_14.0\nota_target_version=PJZ110_15.0\n") << QString("一加12");
+    QTest::newRow("oversized-metadata") << (QByteArray("ota_target_version=PJZ110_15.0\n") + QByteArray(1024 * 1024, 'x')) << QString();
+  }
+  void payloadDeviceModel() {
+    QFETCH(QByteArray, properties);
+    QFETCH(QString, expected);
+    const QString sourceDir = dir + "/中文 空格 输入";
+    QVERIFY(QDir().mkpath(sourceDir));
+    const QString source = sourceDir + "/payload.bin";
+    QVERIFY(put(source, "unchanged source"));
+    const QString sidecar = sourceDir + "/payload_properties.txt";
+    if (!properties.isNull())
+      QVERIFY(put(sidecar, properties));
+    // A metadata file elsewhere must not be used as a fallback.
+    QVERIFY(put(dir + "/payload_properties.txt", "ota_target_version=PLZ110_15.0\n"));
+    for (const QString &name : {source, sourceDir + "/ota.zip"})
+      QCOMPARE(OugaPackage::payloadDeviceModel(name), expected);
+    QCOMPARE(read(source), QByteArray("unchanged source"));
+    if (!properties.isNull())
+      QCOMPARE(read(sidecar), properties);
+  }
+  void payloadDeviceModelDoesNotReadDirectory() {
+    const QString sidecar = dir + "/payload_properties.txt";
+    QVERIFY(QDir().mkpath(sidecar));
+    QCOMPARE(OugaPackage::payloadDeviceModel(dir + "/payload.bin"), QString());
+  }
+  void widgetPayloadModelWarning_data() {
+    QTest::addColumn<bool>("cancel");
+    QTest::newRow("warning-before-unpack") << false;
+    QTest::newRow("cancel-does-not-restart") << true;
+  }
+  void widgetPayloadModelWarning() {
+    QFETCH(bool, cancel);
+    QByteArray boot, vendor;
+    const QString sourceDir = dir + "/input";
+    QVERIFY(QDir().mkpath(sourceDir));
+    const QString source = sourceDir + "/payload.bin", output = dir + "/output";
+    QVERIFY(put(source, nativePayloadBytes(&boot, &vendor)));
+    QVERIFY(put(sourceDir + "/payload_properties.txt", cancel
+        ? "ota_target_version=ABC123_15.0\n"
+        : "ota_target_version=PJZ110_15.0\n"));
+    QVERIFY(QDir().mkpath(output));
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    auto preparation = window.findChild<OugaPreparation *>();
+    auto log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox");
+    auto button = window.findChild<QPushButton *>("UnpackPayloadButton");
+    auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+    QSignalSpy ready(preparation, &OugaPreparation::prepared);
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    int beats = 0;
+    QTimer heartbeat;
+    heartbeat.setInterval(20);
+    connect(&heartbeat, &QTimer::timeout, &window, [&] { ++beats; });
+    heartbeat.start();
+    QElapsedTimer clock;
+    clock.start();
+    button->click();
+    QTRY_VERIFY_WITH_TIMEOUT(log->toPlainText().contains("5秒后开始解包..."), 2000);
+    QVERIFY(window.isBusy());
+    QVERIFY(!preparation->busy());
+    QVERIFY(!log->toPlainText().contains("开始解包，"));
+    QCOMPARE(progress->property("rate").toString(), QString("5秒后开始解包..."));
+    QVERIFY(!QFileInfo::exists(output + "/images/boot.img"));
+    if (cancel) {
+      window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+      QVERIFY(!window.isBusy());
+      QCOMPARE(ready.count(), 0);
+      // A new task completes before the cancelled warning's timer expires.
+      QVERIFY(put(sourceDir + "/payload_properties.txt", "FILE_HASH=no-model\n"));
+      button->click();
+      QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 3000);
+      QCOMPARE(ready.count(), 1);
+      QTest::qWait(qMax<qint64>(0, 5300 - clock.elapsed()));
+      QCOMPARE(ready.count(), 1);
+      QVERIFY(!window.isBusy());
+      QVERIFY(log->toPlainText().contains("解析刷机包对应机型失败，跳过解析步骤..."));
+    } else {
+      QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 15000);
+      QVERIFY(clock.elapsed() >= 5000);
+      QCOMPARE(ready.count(), 1);
+    }
+    QVERIFY(beats >= 20); // event loop stays alive throughout the warning
+    const QString text = log->toPlainText();
+    const QString modelMessage = cancel ? "刷机包对应的机型为未知机型..."
+                                        : "刷机包对应的机型为一加13...";
+    const auto checking = text.indexOf("正在判断刷机包对应的机型...");
+    const auto identified = text.indexOf(modelMessage);
+    const auto unpacking = text.indexOf("开始解包，");
+    QVERIFY(checking >= 0);
+    QVERIFY(identified > checking);
+    QVERIFY(unpacking > identified);
+    QVERIFY(text.contains("Payload解包成功！"));
+    QCOMPARE(read(output + "/images/boot.img"), boot);
+    QCOMPARE(read(output + "/images/vendor.img"), vendor);
+    QCOMPARE(read(source), nativePayloadBytes(&boot, &vendor));
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
+  }
   void sparse_data() {
     QTest::addColumn<int>("fault");
     for (int i = 0; i < 11; ++i)
@@ -3200,7 +3389,13 @@ private slots:
     QVERIFY(runner.trace.isEmpty());
     QVERIFY(window.close());
   }
+  void widgetPayloadInspectionCanBeStopped_data() {
+    QTest::addColumn<bool>("manifestStage");
+    QTest::newRow("metadata-read") << false;
+    QTest::newRow("manifest-read") << true;
+  }
   void widgetPayloadInspectionCanBeStopped() {
+    QFETCH(bool, manifestStage);
     QByteArray boot, vendor;
     const QString source = dir + "/payload.bin", output = dir + "/output";
     QVERIFY(put(source, nativePayloadBytes(&boot, &vendor)));
@@ -3214,13 +3409,32 @@ private slots:
     auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
     folder->setText(output);
     QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    bool stopScheduled = false, stopIssued = false;
+    auto stopInspection = [&] {
+      QVERIFY(window.isBusy());
+      QVERIFY(!preparation->busy());
+      window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+      QVERIFY(window.isBusy()); // keep the worker's owner alive until completion
+      stopIssued = true;
+    };
+    if (manifestStage) {
+      auto log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox");
+      connect(log, &QPlainTextEdit::textChanged, &window, [&, log] {
+        if (!stopScheduled && log->toPlainText().contains("输出目录:")) {
+          stopScheduled = true;
+          // This runs after runPayload has launched manifest inspection but
+          // before its completion callback. Preserve coverage of that stage.
+          QTimer::singleShot(0, &window, stopInspection);
+        }
+      });
+    }
     window.findChild<QPushButton *>("UnpackPayloadButton")->click();
     QVERIFY(window.isBusy());
-    // The GUI call returns before inspection completes or preparation starts.
     QVERIFY(!preparation->busy());
-    window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
-    QVERIFY(window.isBusy()); // keep the worker's owner alive until completion
+    if (!manifestStage)
+      stopInspection();
     QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+    QVERIFY(stopIssued);
     QCOMPARE(ready.count(), 0);
     QVERIFY(!QFileInfo::exists(output + "/images/boot.img"));
     QVERIFY(!QFileInfo::exists(output + "/images/vendor.img"));
