@@ -2,6 +2,7 @@
 #include "ougaflashplanner.h"
 #include "ougaflashservice.h"
 #include "ougaflashwindow.h"
+#include "ougapayloadextractor.h"
 #include "ougapreparation.h"
 #include "ougaromservice.h"
 #include "resourceextractor.h"
@@ -344,6 +345,19 @@ void OugaFlashWindow::preparePayloadSource() {
   if (magic.startsWith("PK") ||
       QFileInfo(m_payloadSource).suffix().compare("zip", Qt::CaseInsensitive) ==
           0) {
+    // Like VioletToolBox: a STORED payload.bin is read in place, no copy.
+    quint64 offset = 0, size = 0;
+    if (OugaPayloadExtractor::locate(m_payloadSource, &offset, &size) ==
+        OugaPayloadExtractor::Zip::Stored)
+      runPayload();
+    else
+      extractPayloadArchive();
+  } else
+    runPayload();
+}
+void OugaFlashWindow::extractPayloadArchive() {
+  const quint64 generation = m_generation;
+  {
     QString sevenZip = requireTool("7z", "7z.exe");
     if (!continueTask(generation))
       return;
@@ -358,8 +372,7 @@ void OugaFlashWindow::preparePayloadSource() {
     m_progress->setProperty("rate", "解压中...");
     updateBusy();
     m_prepare->extractArchive(sevenZip, m_payloadSource, m_archiveRoot, false);
-  } else
-    runPayload();
+  }
 }
 void OugaFlashWindow::runPayload() {
   const quint64 generation = m_generation;
@@ -368,8 +381,9 @@ void OugaFlashWindow::runPayload() {
   QVector<OugaPayloadEntry> entries;
   bool delta = false;
   QString error;
+  OugaPayloadLayout layout;
   if (!OugaPackage::payloadManifest(m_payloadSource, &entries, &delta,
-                                    &error)) {
+                                    &error, &layout)) {
     endTask(false, error);
     return;
   }
@@ -394,6 +408,22 @@ void OugaFlashWindow::runPayload() {
   for (const auto &entry : entries)
     if (m_extractNames.isEmpty() || m_extractNames.contains(entry.name))
       delta |= entry.requiresOldImage;
+  if (!delta &&
+      OugaPayloadExtractor::supported(entries, m_extractNames, layout)) {
+    m_task = Task::PayloadExtract;
+    m_payloadLogBlocks.clear();
+    m_progress->setValue(0);
+    m_progress->setProperty("rate", m_unpackPayload ? "解包中..." : "提取中...");
+    updateBusy();
+    m_prepare->payload(QString(), m_payloadSource, m_payloadOutput,
+                       m_extractNames);
+    return;
+  }
+  if (layout.base != 0) {
+    // payload.exe needs a plain payload.bin; use the verified 7z extraction.
+    extractPayloadArchive();
+    return;
+  }
   QString oldDirectory;
   if (delta) {
     oldDirectory = QFileDialog::getExistingDirectory(

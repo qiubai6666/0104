@@ -2,6 +2,7 @@
 #define OUGAPREPARATION_H
 #include "ougapackage.h"
 #include "ougapayloadprocess.h"
+#include <atomic>
 #include <QFutureWatcher>
 #include <QObject>
 #include <QProcess>
@@ -41,6 +42,7 @@ signals:
 
 private:
   bool m_busy = false, m_cancel = false, m_lease = false;
+  std::atomic_bool m_abort{false}; // read by in-process Payload workers
   QProcess m_process;
   OugaPayloadProcess m_payloadProcess;
   QMap<QString, quint64> m_payloadOperations, m_payloadDone;
@@ -53,6 +55,9 @@ private:
   void consumePayloadOutput(const QByteArray &bytes);
   void parsePayloadCounter();
   void startPayloadRow(const QString &name);
+  void nativePayload(const QString &file, const OugaPayloadLayout &layout,
+                     const QVector<OugaPayloadEntry> &entries,
+                     const QString &output, const QStringList &selected);
   QString m_output;
   struct ArchiveProgressState {
     enum Phase { LeadingSpace, Digits, Percent, Ignore };

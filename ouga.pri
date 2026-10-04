@@ -24,3 +24,5 @@ HEADERS += \
     $$PWD/src/ui/ougaflashwindow.h
 
 RESOURCES += $$PWD/src/ui/ouga.qrc
+
+include($$PWD/ougacodecs.pri)

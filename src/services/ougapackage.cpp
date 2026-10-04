@@ -1,4 +1,5 @@
 #include "ougapackage.h"
+#include "ougapayloadextractor.h"
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -111,7 +112,8 @@ bool proto(const QByteArray &b, QVector<Field> *fields) {
 // The minor version describes operation capabilities, not whether old images
 // are needed. Match VioletToolBox's operation-based distinction instead.
 bool payloadOperationNeedsOldImage(const QByteArray &data, bool *required,
-                                   QString *error) {
+                                   QString *error,
+                                   OugaPayloadOperation *op) {
   QVector<Field> operation;
   if (!proto(data, &operation))
     return fail(error, "Payload operation protobuf 损坏");
@@ -122,6 +124,32 @@ bool payloadOperationNeedsOldImage(const QByteArray &data, bool *required,
       if (field.wire != 0 || field.value > 14)
         return fail(error, "Payload operation 类型无效或不支持");
       type = int(field.value);
+    } else if (field.n == 2 || field.n == 3) { // data_offset / data_length
+      if (field.wire != 0)
+        return fail(error, "Payload operation data 范围类型无效");
+      if (field.n == 2) {
+        op->dataOffset = field.value;
+        op->hasDataOffset = true;
+      } else
+        op->dataLength = field.value;
+    } else if (field.n == 6) { // dst_extents
+      QVector<Field> extent;
+      if (field.wire != 2 || !proto(field.data, &extent))
+        return fail(error, "Payload destination extent 损坏");
+      OugaPayloadExtent e;
+      for (const Field &part : extent) {
+        if ((part.n == 1 || part.n == 2) && part.wire != 0)
+          return fail(error, "Payload destination extent 类型无效");
+        if (part.n == 1)
+          e.start = part.value;
+        if (part.n == 2)
+          e.blocks = part.value;
+      }
+      op->destination.append(e);
+    } else if (field.n == 8) { // data_sha256_hash
+      if (field.wire != 2)
+        return fail(error, "Payload data hash 类型无效");
+      op->dataHash = field.data;
     } else if (field.n == 4) { // src_extents
       QVector<Field> extent;
       if (field.wire != 2 || !proto(field.data, &extent))
@@ -144,6 +172,8 @@ bool payloadOperationNeedsOldImage(const QByteArray &data, bool *required,
       source |= !field.data.isEmpty();
     }
   }
+  op->type = type;
+  op->hasSource = source;
   switch (type) {
   case 0:  // REPLACE
   case 1:  // REPLACE_BZ
@@ -251,7 +281,8 @@ qint64 OugaPackage::expandedSize(const QString &file, QString *error) {
 }
 
 bool OugaPackage::inspect(const QString &name, const QString &file,
-                          Ouga::Partition *p, QString *error) {
+                          Ouga::Partition *p, QString *error,
+                          const QByteArray &knownSha256) {
   if (!Ouga::safeName(name) || Ouga::blockedImageName(name))
     return fail(error, "禁止或无法确定用途的分区：" + name);
   const QFileInfo source(file);
@@ -266,7 +297,7 @@ bool OugaPackage::inspect(const QString &name, const QString &file,
   if (Ouga::baseName(name) == "super" &&
       !superContents(file, &p->merged, error))
     return false;
-  p->sha256 = digest(file, error);
+  p->sha256 = knownSha256.size() == 32 ? knownSha256 : digest(file, error);
   return p->sha256.size() == 32;
 }
 bool OugaPackage::hasImageCandidates(const QString &directory) {
@@ -284,7 +315,8 @@ bool OugaPackage::hasImageCandidates(const QString &directory) {
   return false;
 }
 QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
-                                           QString *error) {
+                                           QString *error,
+                                           const QMap<QString, QByteArray> &known) {
   if (error)
     error->clear();
   QVector<Ouga::Partition> result;
@@ -407,10 +439,10 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
   QThreadPool pool;
   pool.setMaxThreadCount(2);
   const auto inspected = QtConcurrent::blockingMapped<QVector<Inspection>>(
-      &pool, sources, [](const QPair<QString, QString> &source) {
+      &pool, sources, [&known](const QPair<QString, QString> &source) {
         Inspection checked;
         checked.valid = inspect(source.first, source.second, &checked.image,
-                                &checked.error);
+                                &checked.error, known.value(source.second));
         return checked;
       });
   for (const auto &checked : inspected) {
@@ -489,11 +521,25 @@ bool OugaPackage::readArb(const QString &file, quint32 *index, QString *error) {
 
 bool OugaPackage::payloadManifest(const QString &file,
                                   QVector<OugaPayloadEntry> *entries,
-                                  bool *delta, QString *error) {
+                                  bool *delta, QString *error,
+                                  OugaPayloadLayout *layout) {
   entries->clear();
   *delta = false;
   QFile f(file);
   if (!f.open(QIODevice::ReadOnly))
+    return fail(error, "Payload 不可读");
+  quint64 base = 0, length = quint64(f.size());
+  switch (OugaPayloadExtractor::locate(file, &base, &length)) {
+  case OugaPayloadExtractor::Zip::NotZip:
+    base = 0;
+    length = quint64(f.size());
+    break;
+  case OugaPayloadExtractor::Zip::Stored:
+    break;
+  case OugaPayloadExtractor::Zip::Other:
+    return fail(error, "ZIP 内 payload.bin 未以存储方式保存，需先解压");
+  }
+  if (!f.seek(qint64(base)))
     return fail(error, "Payload 不可读");
   QByteArray h = f.read(24);
   if (h.size() != 24 || h.left(4) != "CrAU" ||
@@ -504,13 +550,22 @@ bool OugaPackage::payloadManifest(const QString &file,
       reinterpret_cast<const uchar *>(h.constData() + 12));
   quint32 sig = qFromBigEndian<quint32>(
       reinterpret_cast<const uchar *>(h.constData() + 20));
-  if (!n || n > 64 * 1024 * 1024 || n + sig > quint64(f.size() - 24))
+  if (length < 24 || !n || n > 64 * 1024 * 1024 || n + sig > length - 24)
     return fail(error, "Payload manifest 越界");
   QVector<Field> fields;
   if (!proto(f.read(qint64(n)), &fields))
     return fail(error, "Payload protobuf 损坏");
+  OugaPayloadLayout geometry;
+  geometry.base = base;
+  geometry.end = base + length;
+  geometry.dataOffset = base + 24 + n + sig;
   QSet<QString> names;
   for (const Field &v : fields) {
+    if (v.n == 3) { // block_size
+      if (v.wire != 0 || !v.value || v.value > 1024 * 1024 || v.value % 512)
+        return fail(error, "Payload block size 无效");
+      geometry.blockSize = v.value;
+    }
     if (v.n != 13)
       continue;
     if (v.wire != 2)
@@ -529,8 +584,11 @@ bool OugaPackage::payloadManifest(const QString &file,
         ++e.operations;
         if (p.wire != 2)
           return fail(error, "Payload operation 类型无效");
-        if (!payloadOperationNeedsOldImage(p.data, &e.requiresOldImage, error))
+        OugaPayloadOperation op;
+        if (!payloadOperationNeedsOldImage(p.data, &e.requiresOldImage, error,
+                                           &op))
           return false;
+        e.ops.append(op);
       }
       if (p.n == 6 || p.n == 7) {
         QVector<Field> info;
@@ -563,6 +621,8 @@ bool OugaPackage::payloadManifest(const QString &file,
     *delta |= e.requiresOldImage;
     entries->append(e);
   }
+  if (layout)
+    *layout = geometry;
   return !entries->isEmpty() || fail(error, "Payload 无分区");
 }
 bool OugaPackage::safeArchiveListing(const QString &listing, QString *error) {

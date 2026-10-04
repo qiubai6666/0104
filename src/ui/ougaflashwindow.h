@@ -128,6 +128,7 @@ private:
   void configureService();
   void extractPayload(bool all);
   void preparePayloadSource();
+  void extractPayloadArchive();
   void runPayload();
   void preparationFinished(bool success, const QString &message);
   void networkFinished(bool success, const QString &message);

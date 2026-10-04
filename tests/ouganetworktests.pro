@@ -5,3 +5,4 @@ TARGET = OugaNetworkTests
 INCLUDEPATH += $$PWD/../src/services
 SOURCES += $$PWD/ouganetworktests.cpp $$PWD/../src/services/ougaromservice.cpp $$PWD/../src/services/ougapackage.cpp $$PWD/../src/services/ougaflashtypes.cpp
 HEADERS += $$PWD/ouganetworktests.h $$PWD/../src/services/ougaromservice.h $$PWD/../src/services/ougapackage.h $$PWD/../src/services/ougaflashtypes.h
+include($$PWD/../ougacodecs.pri)

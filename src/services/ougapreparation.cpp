@@ -1,5 +1,6 @@
 #include "ougapreparation.h"
 #include "deviceoperationlease.h"
+#include "ougapayloadextractor.h"
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -72,6 +73,7 @@ bool OugaPreparation::begin() {
     return false;
   m_busy = true;
   m_cancel = false;
+  m_abort = false;
   emit busyChanged(true);
   return true;
 }
@@ -96,6 +98,7 @@ void OugaPreparation::end(bool ok, const QString &s) {
 }
 void OugaPreparation::cancel() {
   m_cancel = true;
+  m_abort = true;
   if (m_payloadActive) m_payloadProcess.cancel();
   if (m_process.state() != QProcess::NotRunning)
     m_process.kill();
@@ -358,10 +361,12 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
   }
   auto entries = std::make_shared<QVector<OugaPayloadEntry>>();
   auto delta = std::make_shared<bool>(false);
+  auto layout = std::make_shared<OugaPayloadLayout>();
   work(
-      [entries, delta, file, selected, oldDirectory] {
+      [entries, delta, layout, file, selected, oldDirectory] {
         QString e;
-        if (!OugaPackage::payloadManifest(file, entries.get(), delta.get(), &e))
+        if (!OugaPackage::payloadManifest(file, entries.get(), delta.get(), &e,
+                                          layout.get()))
           return e;
         QSet<QString> names;
         for (const auto &p : *entries)
@@ -386,7 +391,16 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
         }
         return QString();
       },
-      [this, entries, delta, tool, file, output, selected, oldDirectory] {
+      [this, entries, delta, layout, tool, file, output, selected,
+       oldDirectory] {
+        if (!*delta && OugaPayloadExtractor::supported(*entries, selected, *layout)) {
+          nativePayload(file, *layout, *entries, output, selected);
+          return;
+        }
+        if (tool.isEmpty() || layout->base != 0) {
+          end(false, "此 Payload 需要 payload.exe 提取（增量或不支持的操作）");
+          return;
+        }
         // Match CPU parallelism without unbounded disk contention on large hosts.
         const int workers = qBound(2, QThread::idealThreadCount(), 8);
         QStringList args = {"--out", output, "--workers", QString::number(workers)};
@@ -465,6 +479,89 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
                   });
             };
         m_payloadProcess.start(tool, args, output);
+      });
+}
+void OugaPreparation::nativePayload(const QString &file,
+                                    const OugaPayloadLayout &layout,
+                                    const QVector<OugaPayloadEntry> &entries,
+                                    const QString &output,
+                                    const QStringList &selected) {
+  QVector<OugaPayloadEntry> chosen;
+  QStringList names;
+  for (const auto &p : entries)
+    if (selected.isEmpty() || selected.contains(p.name)) {
+      chosen << p;
+      names << p.name;
+    }
+  m_payloadActive = true;
+  m_payloadRows.clear();
+  m_lastPayloadProgress = 0;
+  emit payloadListed(names);
+  emit payloadProgress(0);
+  if (m_cancel) {
+    end(false, "准备已取消；保留输出文件");
+    return;
+  }
+  auto images = std::make_shared<QVector<Ouga::Partition>>();
+  auto last = std::make_shared<std::atomic_int>(0);
+  // Same parallelism as VioletToolBox: Environment.ProcessorCount.
+  const int workers = qMax(1, QThread::idealThreadCount());
+  work(
+      [this, file, layout, chosen, output, images, last, workers] {
+        OugaPayloadExtractor::Callbacks callbacks;
+        callbacks.started = [this](const QString &name) {
+          QMetaObject::invokeMethod(this, [this, name] {
+            if (m_payloadActive && !m_cancel)
+              startPayloadRow(name);
+          }, Qt::QueuedConnection);
+        };
+        callbacks.finished = [this](const QString &name) {
+          QMetaObject::invokeMethod(this, [this, name] {
+            if (m_payloadActive && !m_cancel) {
+              m_payloadRows[name] = 2;
+              emit payloadPartitionFinished(name, true);
+            }
+          }, Qt::QueuedConnection);
+        };
+        callbacks.progress = [this, last](quint64 done, quint64 total) {
+          // Written bytes, not time; 100% only after the final checks below.
+          const int percent =
+              total ? int(qMin<quint64>(99, done * 100 / total)) : 0;
+          int previous = last->load();
+          while (percent > previous &&
+                 !last->compare_exchange_weak(previous, percent)) {
+          }
+          if (percent > previous)
+            QMetaObject::invokeMethod(this, [this, percent] {
+              if (m_payloadActive && !m_cancel &&
+                  percent > m_lastPayloadProgress) {
+                m_lastPayloadProgress = percent;
+                emit payloadProgress(percent);
+              }
+            }, Qt::QueuedConnection);
+        };
+        QString e = OugaPayloadExtractor::extract(file, layout, chosen, output,
+                                                  workers, m_abort, callbacks);
+        if (!e.isEmpty())
+          return e;
+        // Every byte came from hash-verified operations that tile the image
+        // exactly, so the manifest digest is this output's expected SHA-256;
+        // flashing still re-hashes the file before every write.
+        QMap<QString, QByteArray> known;
+        for (const auto &p : chosen) {
+          const QString f = QDir(output).filePath(p.name + ".img");
+          if (!OugaPackage::inside(output, f) ||
+              quint64(QFileInfo(f).size()) != p.size)
+            return QString("Payload 输出缺失/长度不符：") + p.name;
+          known.insert(QFileInfo(f).canonicalFilePath(), p.hash);
+        }
+        *images = OugaPackage::scan(output, &e, known);
+        return e;
+      },
+      [this, images, output] {
+        emit payloadProgress(100);
+        emit prepared(*images, output);
+        end(true, "Payload 已提取（逐操作 SHA-256 校验）；尚未写入设备");
       });
 }
 void OugaPreparation::extractArchive(const QString &tool, const QString &file,

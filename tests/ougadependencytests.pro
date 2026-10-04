@@ -27,3 +27,4 @@ contains(CONFIG, bundled_dependency_resources) {
 } else {
     RESOURCES += $$PWD/fixtures/ougadependencies/resources.qrc
 }
+include($$PWD/../ougacodecs.pri)

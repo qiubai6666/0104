@@ -7,7 +7,10 @@ param(
     [switch]$IncludeOptionalDependencies,
     [switch]$PreserveExistingFiles,
     [switch]$UseUpx,
-    [string]$UpxPath
+    [string]$UpxPath,
+    # Folder with libbz2-1.dll from the MinGW kit that linked the executable
+    # (mingw64\opt\bin). Defaults to the g++ found on PATH.
+    [string]$CodecBinPath
 )
 
 Set-StrictMode -Version Latest
@@ -129,10 +132,21 @@ try {
     $env:PATH = $originalPath
 }
 
+# In-process Payload extraction links bzip2 dynamically; windeployqt does not copy it.
+if ([string]::IsNullOrWhiteSpace($CodecBinPath)) {
+    $compiler = Get-Command g++.exe -ErrorAction SilentlyContinue
+    if ($compiler) { $CodecBinPath = Join-Path (Split-Path -Parent (Split-Path -Parent $compiler.Source)) 'opt\bin' }
+}
+$codec = if ([string]::IsNullOrWhiteSpace($CodecBinPath)) { $null } else { Join-Path $CodecBinPath 'libbz2-1.dll' }
+if (-not $codec -or -not (Test-Path -LiteralPath $codec -PathType Leaf)) {
+    throw 'libbz2-1.dll not found. Pass -CodecBinPath pointing to the MinGW kit opt\bin used for the build.'
+}
+Copy-Item -LiteralPath $codec -Destination (Join-Path $output 'libbz2-1.dll') -Force
+
 # Resolve plugins relative to the executable instead of the developer's Qt installation.
 [IO.File]::WriteAllText((Join-Path $output 'qt.conf'), "[Paths]`r`nPrefix = .`r`nPlugins = .`r`n", [Text.UTF8Encoding]::new($false))
 $required = @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll', 'Qt6Concurrent.dll', 'Qt6Svg.dll',
-              'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll',
+              'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll', 'libbz2-1.dll',
               'platforms\qwindows.dll', 'styles\qmodernwindowsstyle.dll',
               'networkinformation\qnetworklistmanager.dll', 'tls\qschannelbackend.dll')
 foreach ($file in $required) {
