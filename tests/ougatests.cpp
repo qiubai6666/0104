@@ -44,6 +44,7 @@
 #endif
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -2449,6 +2450,270 @@ private slots:
     QCOMPARE(runner.device.slot, slot);
     QVERIFY(!DeviceOperationLease::owner());
   }
+private:
+  // Independent reference order: do not derive this oracle from production helpers.
+  QStringList afterSalesCritical(Platform platform) {
+    return platform == Platform::Qualcomm
+        ? QStringList{"boot", "dtbo", "init_boot", "modem", "recovery",
+                      "vbmeta", "vbmeta_system", "vbmeta_vendor", "vendor_boot"}
+        : QStringList{"boot", "dtbo", "init_boot", "lk", "vbmeta",
+                      "vbmeta_system", "vbmeta_vendor", "vendor_boot"};
+  }
+  Device afterSalesDevice(Platform platform, const QString &start,
+                          int largerSlot, bool slotless) {
+    Device device = fixtureDevice(platform, start, false);
+    if (largerSlot == 1) device.sizes["system_a"] += 1024;
+    if (largerSlot == 2) device.sizes["system_b"] += 1024;
+    for (const QString name : {"modem_backup", "abl"})
+      for (const QString slot : {"a", "b"}) {
+        device.partitions.insert(name + "_" + slot);
+        device.sizes[name + "_" + slot] = 1024 * 1024;
+      }
+    if (slotless)
+      for (const QString name : {"boot", "modem", "modem_backup"}) {
+        for (const QString slot : {"a", "b"}) {
+          device.partitions.remove(name + "_" + slot);
+          device.sizes.remove(name + "_" + slot);
+        }
+        device.partitions.insert(name);
+        device.sizes[name] = 1024 * 1024;
+        device.variables["has-slot:" + name] = "no";
+      }
+    return device;
+  }
+  QVector<Partition> afterSalesImages(Platform platform) {
+    QVector<Partition> ps;
+    for (const QString &name : afterSalesCritical(platform))
+      ps << image(name, QByteArray(64, 'c'));
+    if (platform == Platform::MediaTek)
+      ps << image("modem", QByteArray(32, 'm'));
+    ps << image("modem_backup_b", QByteArray(96, 'b'))
+       << image("abl_b", QByteArray(128, 'a'))
+       << image("system", QByteArray(512, 's'))
+       << image("super", superBytes());
+    return ps;
+  }
+  QStringList afterSalesCommands(Platform platform, const QString &finalSlot,
+                                 bool slotless, bool clear, bool reboot) {
+    QStringList cmds;
+    for (const QString &name : afterSalesCritical(platform)) {
+      cmds << "flash " + name + (slotless && (name == "boot" || name == "modem") ? "" : "_a");
+      if (!(slotless && (name == "boot" || name == "modem")))
+        cmds << "flash " + name + "_b";
+    }
+    cmds << "reboot fastboot" << "delete-logical-partition system_a-cow";
+    if (platform == Platform::MediaTek) {
+      cmds << QString(slotless ? "flash modem" : "flash modem_a");
+      if (!slotless) cmds << "flash modem_b";
+    }
+    cmds << QString(slotless ? "flash modem_backup" : "flash modem_backup_a");
+    if (!slotless) cmds << "flash modem_backup_b";
+    cmds << "flash abl_a" << "flash abl_b" << "getvar all"
+         << "set_active " + finalSlot;
+    if (clear) {
+      cmds << "erase userdata" << "erase metadata";
+      if (platform == Platform::Qualcomm) cmds << "-w";
+    }
+    if (reboot) cmds << "reboot";
+    return cmds;
+  }
+private slots:
+  void afterSalesBootloaderSequence_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("start");
+    QTest::addColumn<int>("largerSlot");
+    QTest::addColumn<bool>("slotless");
+    QTest::addColumn<bool>("clear");
+    QTest::addColumn<bool>("reboot");
+    for (int pf : {1, 2})
+      for (const QString slot : {"a", "b"})
+        for (int larger : {0, 1, 2})
+          for (bool noSlot : {false, true})
+            for (int end = 0; end < 4; ++end)
+              QTest::newRow(qPrintable(QString("%1-%2-size%3-noslot%4-end%5")
+                  .arg(pf).arg(slot).arg(larger).arg(noSlot).arg(end)))
+                  << pf << slot << larger << noSlot << bool(end & 1) << bool(end & 2);
+  }
+  void afterSalesBootloaderSequence() {
+    QFETCH(int, platform); QFETCH(QString, start); QFETCH(int, largerSlot);
+    QFETCH(bool, slotless); QFETCH(bool, clear); QFETCH(bool, reboot);
+    const Platform pf = Platform(platform);
+    const Device device = afterSalesDevice(pf, start, largerSlot, slotless);
+    auto ps = afterSalesImages(pf);
+    auto opts = options(FlashMode::AfterSalesBootloader, pf);
+    opts.afterSuper = true;
+    opts.clearData = clear; opts.autoReboot = reboot; opts.formatToolsReady = true;
+    Plan tail; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &tail, &error), qPrintable(error));
+    const QString finalSlot = largerSlot == 2 ? "b" : "a";
+    QCOMPARE(tail.options.targetSlot, finalSlot);
+    const QStringList expected = afterSalesCommands(pf, finalSlot, slotless, clear, reboot);
+    QCOMPARE(commands(tail), expected);
+    qint64 bytes = 0; int writes = 0;
+    for (const QString &cmd : expected) {
+      if (!cmd.startsWith("flash ")) continue;
+      ++writes;
+      const QString name = baseName(cmd.mid(6));
+      const auto found = std::find_if(ps.cbegin(), ps.cend(), [&](const Partition &p) {
+        return baseName(p.name) == name;
+      });
+      QVERIFY(found != ps.cend()); bytes += found->expandedBytes;
+    }
+    QCOMPARE(tail.flashCount, writes); QCOMPARE(tail.totalBytes, bytes);
+    QVERIFY(tail.device.sameSnapshot(device));
+    for (const Step &s : tail.steps)
+      if (!s.image.isEmpty())
+        QCOMPARE(s.userspace, !afterSalesCritical(pf).contains(baseName(s.target)));
+    opts.afterSuper = false;
+    Plan full;
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &full, &error), qPrintable(error));
+    QCOMPARE(commands(full), QStringList({"erase super", "flash super"}) + expected);
+    QCOMPARE(full.steps[2].kind, Step::Wait);
+    QCOMPARE(full.steps[2].waitMs, 120000);
+    QCOMPARE(full.steps[3].kind, Step::Checkpoint);
+    QCOMPARE(full.flashCount, writes + 1);
+    QCOMPARE(full.totalBytes, bytes + ps.last().expandedBytes);
+  }
+  void afterSalesBootloaderPreflight_data() {
+    QTest::addColumn<int>("platform"); QTest::addColumn<int>("failure");
+    for (int pf : {1, 2})
+      for (int failure = 0; failure < 6; ++failure)
+        QTest::newRow(qPrintable(QString("%1-invalid%2").arg(pf).arg(failure))) << pf << failure;
+  }
+  void afterSalesBootloaderPreflight() {
+    QFETCH(int, platform); QFETCH(int, failure);
+    const Platform pf = Platform(platform);
+    auto device = afterSalesDevice(pf, "a", 2, false);
+    auto ps = afterSalesImages(pf);
+    auto opts = options(FlashMode::AfterSalesBootloader, pf);
+    if (failure == 0) device.sizes.remove("vendor_b");
+    if (failure == 1) device.sizes["system_b"] = quint64(LLONG_MAX);
+    if (failure == 2) device.sizes["modem_backup_b"] = 16;
+    if (failure == 3) device.sizes.remove("modem_backup_b");
+    if (failure == 4) device.partitions.remove("modem_backup_b");
+    if (failure == 5) ps.removeFirst();
+    QString error; Plan plan;
+    // Reject invalid tail before the irreversible erase/flash Super stage too.
+    QVERIFY(!OugaFlashPlanner::build(ps, device, opts, &plan, &error));
+    QVERIFY(!error.isEmpty());
+    opts.afterSuper = true;
+    QVERIFY(!OugaFlashPlanner::build(ps, device, opts, &plan, &error));
+  }
+  void afterSalesBootloaderExecution_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("start");
+    QTest::addColumn<int>("largerSlot");
+    for (int pf : {1, 2})
+      for (const QString slot : {"a", "b"})
+        for (int larger : {0, 1, 2})
+          QTest::newRow(qPrintable(QString("%1-%2-size%3").arg(pf).arg(slot).arg(larger)))
+              << pf << slot << larger;
+  }
+  void afterSalesBootloaderExecution() {
+    QFETCH(int, platform); QFETCH(QString, start); QFETCH(int, largerSlot);
+    const Platform pf = Platform(platform);
+    FakeRunner runner;
+    runner.device = afterSalesDevice(pf, start, largerSlot, false);
+    auto ps = afterSalesImages(pf);
+    auto opts = options(FlashMode::AfterSalesBootloader, pf);
+    opts.clearData = opts.autoReboot = true; opts.formatToolsReady = true;
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, runner.device, opts, &plan, &error), qPrintable(error));
+    QVERIFY(put(dir + "/fastboot.exe", "fake"));
+    QVERIFY(put(dir + "/make_f2fs.exe", "fake"));
+    QVERIFY(put(dir + "/mke2fs.exe", "fake"));
+    QVERIFY(put(dir + "/mke2fs.conf", "fake"));
+    OugaFlashService service(&runner);
+    service.setTiming({1, 1500, 1000, 3, 0});
+    service.configure(dir + "/fastboot.exe", dir + "/logs");
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy checkpoint(&service, &OugaFlashService::checkpoint);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(checkpoint.count(), 1, 3000);
+    QVERIFY(service.paused());
+    QCOMPARE(runner.device.slot, start);
+    QVERIFY(!runner.trace.join('\n').contains("flash boot"));
+    service.confirmCheckpoint(true);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    QStringList actual;
+    for (const QString &cmd : runner.trace)
+      if (!cmd.startsWith("getvar ") && cmd != "devices")
+        actual << (cmd.startsWith("flash ") ? cmd.section(' ', 0, 1) : cmd);
+    const QString finalSlot = largerSlot == 2 ? "b" : "a";
+    auto expected = afterSalesCommands(pf, finalSlot, false, true, true);
+    expected.removeAll("getvar all");
+    QCOMPARE(actual, QStringList({"erase super", "flash super"}) + expected);
+    QCOMPARE(runner.device.slot, finalSlot);
+    QCOMPARE(progress.last()[0].toInt(), plan.flashCount);
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void afterSalesBootloaderFailureBoundary_data() {
+    QTest::addColumn<int>("platform"); QTest::addColumn<int>("failure");
+    for (int pf : {1, 2})
+      for (int failure = 0; failure < 11; ++failure)
+        QTest::newRow(qPrintable(QString("%1-failure%2").arg(pf).arg(failure))) << pf << failure;
+  }
+  void afterSalesBootloaderFailureBoundary() {
+    QFETCH(int, platform); QFETCH(int, failure);
+    const Platform pf = Platform(platform);
+    FakeRunner runner;
+    runner.device = afterSalesDevice(pf, "a", 2, false);
+    auto ps = afterSalesImages(pf);
+    auto opts = options(FlashMode::AfterSalesBootloader, pf);
+    opts.afterSuper = true; opts.clearData = opts.autoReboot = true; opts.formatToolsReady = true;
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, runner.device, opts, &plan, &error), qPrintable(error));
+    QVERIFY(put(dir + "/fastboot.exe", "fake"));
+    QVERIFY(put(dir + "/make_f2fs.exe", "fake"));
+    QVERIFY(put(dir + "/mke2fs.exe", "fake")); QVERIFY(put(dir + "/mke2fs.conf", "fake"));
+    OugaFlashService service(&runner);
+    service.setTiming({1, 500, 1000, 3, 0});
+    service.configure(dir + "/fastboot.exe", dir + "/logs");
+    if (failure < 3) {
+      runner.failAt = failure == 0 ? "flash dtbo_b" : "flash modem_backup_b";
+      runner.failCode = failure == 0 ? 0 : 2;
+      runner.normal = failure != 2;
+    } else if (failure == 3) {
+      runner.failAt = "reboot fastboot";
+    } else if (failure == 4) {
+      runner.after = [&](const QStringList &a) {
+        if (a.mid(0, 2).join(' ') == "flash abl_b") service.requestStop();
+      };
+    } else {
+      runner.after = [&](const QStringList &a) {
+        if (failure == 10 && a == QStringList({"reboot", "fastboot"})) {
+          runner.device.sizes["system_a"] += 2 * 1024 * 1024;
+          return;
+        }
+        if (a.mid(0, 2).join(' ') != "flash abl_b") return;
+        if (failure == 5) runner.device.sizes["system_a"] += 2 * 1024 * 1024;
+        if (failure == 6) runner.device.sizes.remove("system_b");
+        if (failure == 7) runner.device.serial = "REPLACEMENT";
+        if (failure == 8) runner.device.slot = "b";
+        if (failure == 9) runner.disconnected = true;
+      };
+    }
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(!done[0][0].toBool());
+    if (failure < 4) {
+      QVERIFY(std::any_of(runner.trace.cbegin(), runner.trace.cend(),
+                         [&](const QString &cmd) { return cmd.startsWith(runner.failAt); }));
+    } else {
+      QVERIFY(std::any_of(runner.trace.cbegin(), runner.trace.cend(),
+                         [](const QString &cmd) { return cmd.startsWith("flash abl_b "); }));
+      if (failure >= 5)
+        QVERIFY(runner.trace.last().startsWith("getvar "));
+    }
+    if (failure == 10)
+      QVERIFY(done[0][1].toString().contains("售后启动槽与确认计划不一致"));
+    for (const QString &cmd : runner.trace)
+      QVERIFY(!cmd.startsWith("set_active ") && !cmd.startsWith("erase ") && cmd != "-w" && cmd != "reboot");
+    QVERIFY(!DeviceOperationLease::owner());
+  }
   void afterSalesTailUsesVerifiedTargets_data() {
     QTest::addColumn<int>("platform");
     QTest::newRow("qualcomm") << 1;
@@ -2485,10 +2750,10 @@ private slots:
     QVERIFY(!cmds.contains("flash system_a") &&
             !cmds.contains("flash system_b"));
     QCOMPARE(cmds.count("flash modem_backup_b"), 1);
-    QVERIFY(!cmds.contains("flash modem_backup_a"));
+    QCOMPARE(cmds.count("flash modem_backup_a"), 1);
     if (pf == Platform::MediaTek) {
       QCOMPARE(cmds.count("flash modem_b"), 1);
-      QVERIFY(!cmds.contains("flash modem_a"));
+      QCOMPARE(cmds.count("flash modem_a"), 1);
     }
     QCOMPARE(cmds.count("set_active b"), 1);
     QVERIFY(cmds.indexOf("reboot fastboot") <

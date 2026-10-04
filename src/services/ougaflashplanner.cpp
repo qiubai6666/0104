@@ -104,7 +104,7 @@ struct Builder {
     return true;
   }
   bool flashCritical(const QVector<Partition> &images, const QString &missing) {
-    for (const QString &name : criticalImages(p.device.platform)) {
+    for (const QString &name : criticalImages(p.device.platform, p.options.mode)) {
       auto image =
           std::find_if(images.cbegin(), images.cend(), [&](const Partition &i) {
             return baseName(i.name) == name;
@@ -142,26 +142,8 @@ struct Builder {
     return true;
   }
   bool selectAfterSalesSlot() {
-    quint64 sizes[2] = {0, 0};
-    bool found[2] = {false, false};
-    for (auto it = p.device.sizes.cbegin(); it != p.device.sizes.cend(); ++it) {
-      if (!p.device.isLogical(it.key()) ||
-          (!it.key().endsWith("_a") && !it.key().endsWith("_b")))
-        continue;
-      const int index = it.key().endsWith("_a") ? 0 : 1;
-      if (it.value() > quint64(LLONG_MAX) - sizes[index]) {
-        error = "槽位容量溢出";
-        return false;
-      }
-      sizes[index] += it.value();
-      found[index] = true;
-    }
-    if (!found[0] || !found[1] || (!sizes[0] && !sizes[1])) {
-      error = "无法读取双槽逻辑分区容量，不能猜测启动槽 A";
-      return false;
-    }
-    slot = sizes[0] >= sizes[1] ? "a" : "b";
-    return true;
+    slot = afterSalesSlot(p.device, &error);
+    return !slot.isEmpty();
   }
   void cow() {
     QStringList names = p.device.partitions.values();
@@ -427,7 +409,7 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     }
     QVector<Partition> active;
     const QStringList critical =
-        af ? criticalImages(d.platform) : QStringList();
+        af ? criticalImages(d.platform, options.mode) : QStringList();
     for (const Partition &image : ps) {
       const QString name = baseName(image.name);
       if (name != "super" && !merged.contains(name) && !critical.contains(name))
@@ -471,15 +453,27 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
         return fail(error, b.error);
     }
     const bool rebuild = force || only || (ab && b.slot != d.slot);
-    if (b.slot != d.slot && (rebuild || af))
+    if (b.slot != d.slot && rebuild)
       b.command("切换活动槽（不可逆） " + b.slot, {"set_active", b.slot},
                 b.slot);
     if (rebuild && !b.rebuild(active))
       return fail(error, b.error);
     if (!preSwitch && !ab)
       b.cow();
-    if (!b.flashImages(normal, ab) || !b.flashDeferredModem(modem))
+    if (!b.flashImages(normal, ab || af) || !b.flashDeferredModem(modem))
       return fail(error, b.error);
+    if (af) {
+      // Keep the current slot active until all reference stages succeed. The
+      // final probe must verify the previewed capacities/slot before switching.
+      Step probe;
+      probe.kind = Step::Reprobe;
+      probe.title = "重新读取分区表并核对售后启动槽";
+      probe.arguments = {"getvar", "all"};
+      probe.userspace = true;
+      b.p.steps << probe;
+      b.command("设置售后启动槽（不可逆） " + b.slot,
+                {"set_active", b.slot}, b.slot);
+    }
     if (!b.finish())
       return fail(error, b.error);
   }

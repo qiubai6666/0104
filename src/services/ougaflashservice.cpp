@@ -504,6 +504,24 @@ void OugaFlashService::next() {
     });
     return;
   }
+  if (s.kind == Step::Reprobe) {
+    probeStable(s.userspace, [this](const Device &d) {
+      QString error;
+      if (!compatible(d, true, &error)) {
+        finish(false, "售后收尾分区表核对失败，请重新生成并确认计划：" + error);
+        return;
+      }
+      const QString slot = afterSalesSlot(d, &error);
+      if (slot.isEmpty() || slot != m_plan.options.targetSlot) {
+        finish(false, "售后启动槽与确认计划不一致，拒绝切槽/清数据/重启：" + error);
+        return;
+      }
+      m_expected = d;
+      ++m_index;
+      next();
+    });
+    return;
+  }
   auto run = [this, s] {
     command(s.arguments, [this, s](int c, bool n, const QString &out) {
       bool ok = commandSucceeded(c, n, out);
@@ -531,10 +549,12 @@ void OugaFlashService::next() {
       if (s.arguments.value(0) == "create-logical-partition") {
         m_expected.sizes[s.target] = s.arguments.value(2).toULongLong();
         m_expected.partitions.insert(s.target);
+        m_expected.logical.insert(s.target);
       }
       if (s.arguments.value(0) == "delete-logical-partition") {
         m_expected.sizes.remove(s.target);
         m_expected.partitions.remove(s.target);
+        m_expected.logical.remove(s.target);
       }
       ++m_index;
       const quint64 generation = m_generation;

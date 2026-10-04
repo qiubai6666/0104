@@ -1,5 +1,6 @@
 #include "ougaflashtypes.h"
 #include <QRegularExpression>
+#include <climits>
 namespace Ouga {
 QString baseName(const QString &name) {
   QString n = name.trimmed().toLower();
@@ -30,9 +31,18 @@ bool blockedImageName(const QString &name) {
          n == "super_empty" || n == "payload" || n.contains("gpt") ||
          n.startsWith("prog_");
 }
-QStringList criticalImages(Platform platform) {
+QStringList criticalImages(Platform platform, FlashMode mode) {
   if (platform != Platform::Qualcomm && platform != Platform::MediaTek)
     return {};
+  if (mode == FlashMode::AfterSalesBootloader) {
+    QStringList names = {"boot", "dtbo", "init_boot"};
+    if (platform == Platform::MediaTek)
+      names << "lk";
+    else
+      names << "modem" << "recovery";
+    names << "vbmeta" << "vbmeta_system" << "vbmeta_vendor" << "vendor_boot";
+    return names;
+  }
   QStringList names = {"boot",        "init_boot",     "dtbo",         "vbmeta",
                        "vendor_boot", "vbmeta_system", "vbmeta_vendor"};
   if (platform == Platform::MediaTek)
@@ -40,6 +50,37 @@ QStringList criticalImages(Platform platform) {
   else
     names << "modem" << "recovery";
   return names;
+}
+QString afterSalesSlot(const Device &device, QString *error) {
+  if (error)
+    error->clear();
+  quint64 sizes[2] = {0, 0};
+  bool found[2] = {false, false};
+  for (const QString &name : device.partitions) {
+    if (!device.isLogical(name) ||
+        (!name.endsWith("_a") && !name.endsWith("_b")))
+      continue;
+    if (!device.sizes.contains(name)) {
+      if (error)
+        *error = "无法读取双槽逻辑分区容量：" + name;
+      return {};
+    }
+    const int index = name.endsWith("_a") ? 0 : 1;
+    const quint64 bytes = device.sizes.value(name);
+    if (bytes > quint64(LLONG_MAX) - sizes[index]) {
+      if (error)
+        *error = "槽位容量溢出";
+      return {};
+    }
+    sizes[index] += bytes;
+    found[index] = true;
+  }
+  if (!found[0] || !found[1] || (!sizes[0] && !sizes[1])) {
+    if (error)
+      *error = "无法读取双槽逻辑分区容量，不能猜测启动槽 A";
+    return {};
+  }
+  return sizes[0] >= sizes[1] ? "a" : "b";
 }
 bool needsAdditionalImages(FlashMode mode) {
   return mode == FlashMode::BothSlots || mode == FlashMode::Force ||

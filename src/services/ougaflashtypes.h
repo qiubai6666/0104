@@ -51,7 +51,7 @@ struct Device {
   bool sameSnapshot(const Device &other) const;
 };
 struct Step {
-  enum Kind { Command, ModeSwitch, Wait, Checkpoint };
+  enum Kind { Command, ModeSwitch, Wait, Checkpoint, Reprobe };
   Kind kind = Command;
   QString title;
   QStringList arguments;
@@ -75,7 +75,9 @@ QString baseName(const QString &name);
 bool safeName(const QString &name);
 bool logicalName(const QString &name);
 bool blockedImageName(const QString &name);
-QStringList criticalImages(Platform platform);
+QStringList criticalImages(Platform platform,
+                           FlashMode mode = FlashMode::RepairFastbootd);
+QString afterSalesSlot(const Device &device, QString *error = nullptr);
 bool needsAdditionalImages(FlashMode mode);
 bool startsInFastbootd(FlashMode mode);
 QString sizeText(qint64 bytes);
