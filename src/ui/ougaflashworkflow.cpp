@@ -327,33 +327,14 @@ void OugaFlashWindow::extractPayload(bool all) {
     preparePayloadSource();
 }
 void OugaFlashWindow::preparePayloadSource() {
-  const quint64 generation = m_generation;
-  if (!continueTask(generation))
+  if (!continueTask(m_generation))
     return;
   log(m_unpackPayload ? "开始解包，输出将实时显示在日志窗口中。"
                       : m_extractNames.isEmpty() ? "开始提取镜像..."
                                                : "开始提取分区: " + m_extractNames.join(", "));
   log("源文件: " + m_payloadSource);
   log("输出目录: " + m_payloadOutput);
-  QFile file(m_payloadSource);
-  if (!file.open(QIODevice::ReadOnly)) {
-    endTask(false, "源文件无法读取");
-    return;
-  }
-  const QByteArray magic = file.read(4);
-  file.close();
-  if (magic.startsWith("PK") ||
-      QFileInfo(m_payloadSource).suffix().compare("zip", Qt::CaseInsensitive) ==
-          0) {
-    // Like VioletToolBox: a STORED payload.bin is read in place, no copy.
-    quint64 offset = 0, size = 0;
-    if (OugaPayloadExtractor::locate(m_payloadSource, &offset, &size) ==
-        OugaPayloadExtractor::Zip::Stored)
-      runPayload();
-    else
-      extractPayloadArchive();
-  } else
-    runPayload();
+  runPayload();
 }
 void OugaFlashWindow::extractPayloadArchive() {
   const quint64 generation = m_generation;
@@ -378,79 +359,116 @@ void OugaFlashWindow::runPayload() {
   const quint64 generation = m_generation;
   if (!continueTask(generation))
     return;
-  QVector<OugaPayloadEntry> entries;
-  bool delta = false;
-  QString error;
-  OugaPayloadLayout layout;
-  if (!OugaPackage::payloadManifest(m_payloadSource, &entries, &delta,
-                                    &error, &layout)) {
-    endTask(false, error);
-    return;
-  }
-  if (!m_extractNames.isEmpty()) {
-    QStringList available, matched;
-    for (const auto &entry : entries)
-      available << entry.name;
-    for (const QString &name : m_extractNames) {
-      if (available.contains(name))
-        matched << name;
-      else
-        log("警告：未找到分区 '" + name + "'，该ROM可能不包含此分区");
-    }
-    if (matched.isEmpty()) {
-      endTask(false, "Payload中没有所请求分区");
+  struct Inspection {
+    QString error;
+    QStringList selected, missing;
+    bool archive = false, delta = false, native = false;
+  };
+  // ZIP lookup, protobuf parsing and extent sorting are all file/CPU work.
+  // Keep the task alive until its worker returns, including after Stop.
+  m_task = Task::PayloadInspect;
+  m_progress->setProperty("rate", "读取分区信息...");
+  m_progress->update();
+  updateBusy();
+  auto watcher = new QFutureWatcher<Inspection>(this);
+  connect(watcher, &QFutureWatcher<Inspection>::finished, this,
+          [this, watcher, generation] {
+    const auto result = watcher->result();
+    watcher->deleteLater();
+    if (!continueTask(generation))
+      return;
+    if (!result.error.isEmpty()) {
+      endTask(false, result.error);
       return;
     }
-    m_extractNames = matched;
-  }
-  // A selected full partition does not need the baseline of an unselected one.
-  delta = false;
-  for (const auto &entry : entries)
-    if (m_extractNames.isEmpty() || m_extractNames.contains(entry.name))
-      delta |= entry.requiresOldImage;
-  if (!delta &&
-      OugaPayloadExtractor::supported(entries, m_extractNames, layout)) {
+    for (const QString &name : result.missing)
+      log("警告：未找到分区 '" + name + "'，该ROM可能不包含此分区");
+    m_extractNames = result.selected;
+    if (result.archive) {
+      extractPayloadArchive();
+      return;
+    }
+    QString tool, oldDirectory;
+    if (!result.native) {
+      if (result.delta) {
+        oldDirectory = QFileDialog::getExistingDirectory(
+            this, "增量Payload：选择匹配的旧镜像目录");
+        if (!continueTask(generation))
+          return;
+        if (oldDirectory.isEmpty()) {
+          endTask(false, "增量Payload缺少旧镜像，拒绝提取");
+          return;
+        }
+      }
+      tool = requireTool("payload", "Payload工具",
+                         ResourceExtractor::getResourcePath() + "/payload.exe");
+      if (!continueTask(generation))
+        return;
+      if (tool.isEmpty()) {
+        endTask(false, "Payload工具不可用");
+        return;
+      }
+    }
     m_task = Task::PayloadExtract;
     m_payloadLogBlocks.clear();
     m_progress->setValue(0);
     m_progress->setProperty("rate", m_unpackPayload ? "解包中..." : "提取中...");
     updateBusy();
-    m_prepare->payload(QString(), m_payloadSource, m_payloadOutput,
-                       m_extractNames);
-    return;
-  }
-  if (layout.base != 0) {
-    // payload.exe needs a plain payload.bin; use the verified 7z extraction.
-    extractPayloadArchive();
-    return;
-  }
-  QString oldDirectory;
-  if (delta) {
-    oldDirectory = QFileDialog::getExistingDirectory(
-        this, "增量Payload：选择匹配的旧镜像目录");
-    if (!continueTask(generation))
-      return;
-    if (oldDirectory.isEmpty()) {
-      endTask(false, "增量Payload缺少旧镜像，拒绝提取");
-      return;
+    m_prepare->payload(tool, m_payloadSource, m_payloadOutput, m_extractNames,
+                       oldDirectory);
+  });
+  const QString source = m_payloadSource;
+  const QStringList requested = m_extractNames;
+  watcher->setFuture(QtConcurrent::run([source, requested] {
+    Inspection result;
+    result.selected = requested;
+    QFile file(source);
+    if (!file.open(QIODevice::ReadOnly)) {
+      result.error = "源文件无法读取";
+      return result;
     }
-  }
-  QString tool =
-      requireTool("payload", "Payload工具",
-                  ResourceExtractor::getResourcePath() + "/payload.exe");
-  if (!continueTask(generation))
-    return;
-  if (tool.isEmpty()) {
-    endTask(false, "Payload工具不可用");
-    return;
-  }
-  m_task = Task::PayloadExtract;
-  m_payloadLogBlocks.clear();
-  m_progress->setValue(0);
-  m_progress->setProperty("rate", m_unpackPayload ? "解包中..." : "提取中...");
-  updateBusy();
-  m_prepare->payload(tool, m_payloadSource, m_payloadOutput, m_extractNames,
-                     oldDirectory);
+    const QByteArray magic = file.read(4);
+    file.close();
+    if (magic.startsWith("PK") ||
+        QFileInfo(source).suffix().compare("zip", Qt::CaseInsensitive) == 0) {
+      quint64 offset = 0, size = 0;
+      if (OugaPayloadExtractor::locate(source, &offset, &size) !=
+          OugaPayloadExtractor::Zip::Stored) {
+        result.archive = true;
+        return result;
+      }
+    }
+    QVector<OugaPayloadEntry> entries;
+    OugaPayloadLayout layout;
+    bool delta = false;
+    if (!OugaPackage::payloadManifest(source, &entries, &delta, &result.error,
+                                      &layout))
+      return result;
+    if (!requested.isEmpty()) {
+      QSet<QString> available;
+      for (const auto &entry : entries)
+        available.insert(entry.name);
+      result.selected.clear();
+      for (const QString &name : requested)
+        if (available.contains(name))
+          result.selected << name;
+        else
+          result.missing << name;
+      if (result.selected.isEmpty()) {
+        result.error = "Payload中没有所请求分区";
+        return result;
+      }
+    }
+    // An unselected delta partition must not require a baseline.
+    for (const auto &entry : entries)
+      if (result.selected.isEmpty() || result.selected.contains(entry.name))
+        result.delta |= entry.requiresOldImage;
+    result.native = !result.delta &&
+        OugaPayloadExtractor::supported(entries, result.selected, layout);
+    // The external tool only accepts a plain payload.bin.
+    result.archive = !result.native && layout.base != 0;
+    return result;
+  }));
 }
 void OugaFlashWindow::preparationFinished(bool success,
                                           const QString &message) {
@@ -991,6 +1009,7 @@ void OugaFlashWindow::requestStop() {
     m_prepare->cancel();
   else if (m_rom->busy())
     m_rom->cancel();
-  else if (m_task != Task::PathCheck && m_task != Task::Arb)
+  else if (m_task != Task::PathCheck && m_task != Task::PayloadInspect &&
+           m_task != Task::Arb)
     endTask(false, "已取消后续阶段；已产生的文件保留");
 }

@@ -4,12 +4,17 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMutex>
+#include <QThread>
+#include <QThreadPool>
+#include <QtConcurrentRun>
 #include <QtEndian>
 #include <algorithm>
-#include <thread>
-#include <vector>
 #include <bzlib.h>
 #include <lzma.h>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#include <bcrypt.h>
+#endif
 namespace {
 quint16 le16(const QByteArray &b, qsizetype at) {
   return qFromLittleEndian<quint16>(
@@ -31,15 +36,77 @@ QByteArray readAt(QFile &f, quint64 offset, qint64 size) {
 // One decoded operation must fit a bounded buffer; AOSP chunks are <= 2 MiB.
 constexpr quint64 maxOperationBytes = 256ull * 1024 * 1024;
 constexpr quint64 xzMemoryLimit = 256ull * 1024 * 1024;
-bool xz(const QByteArray &in, QByteArray *out) {
-  uint64_t limit = xzMemoryLimit;
-  size_t inPos = 0, outPos = 0;
-  const lzma_ret r = lzma_stream_buffer_decode(
-      &limit, 0, nullptr, reinterpret_cast<const uint8_t *>(in.constData()),
-      &inPos, size_t(in.size()), reinterpret_cast<uint8_t *>(out->data()),
-      &outPos, size_t(out->size()));
-  return r == LZMA_OK && outPos == size_t(out->size());
-}
+// Reinitializing one stream reuses liblzma's dictionary/decoder allocations.
+// Keep checksum, input-consumption and exact output-length validation.
+class XzDecoder {
+public:
+  ~XzDecoder() { lzma_end(&m_stream); }
+  bool decode(const QByteArray &in, QByteArray *out) {
+    if (lzma_stream_decoder(&m_stream, xzMemoryLimit, 0) != LZMA_OK)
+      return false;
+    m_stream.next_in = reinterpret_cast<const uint8_t *>(in.constData());
+    m_stream.avail_in = size_t(in.size());
+    m_stream.next_out = reinterpret_cast<uint8_t *>(out->data());
+    m_stream.avail_out = size_t(out->size());
+    const lzma_ret result = lzma_code(&m_stream, LZMA_FINISH);
+    return result == LZMA_STREAM_END && m_stream.avail_in == 0 &&
+           m_stream.avail_out == 0;
+  }
+private:
+  lzma_stream m_stream = LZMA_STREAM_INIT;
+};
+
+// Windows CNG provides the same SHA-256 with CPU acceleration where available.
+// Each worker owns a reusable hash. Any provider/API failure falls back to Qt;
+// a failed hash is never accepted and never reused in a partially-fed state.
+class OperationHash {
+public:
+#ifdef Q_OS_WIN
+  OperationHash() {
+    if (BCryptOpenAlgorithmProvider(&m_algorithm, BCRYPT_SHA256_ALGORITHM,
+                                     nullptr, 0) < 0)
+      return;
+    DWORD length = 0, copied = 0;
+    if (BCryptGetProperty(m_algorithm, BCRYPT_OBJECT_LENGTH,
+                          reinterpret_cast<PUCHAR>(&length), sizeof(length),
+                          &copied, 0) < 0 || !length || length > 65536)
+      return;
+    m_object.resize(qsizetype(length));
+    if (BCryptCreateHash(m_algorithm, &m_hash,
+                         reinterpret_cast<PUCHAR>(m_object.data()), length,
+                         nullptr, 0, BCRYPT_HASH_REUSABLE_FLAG) < 0)
+      m_hash = nullptr;
+  }
+  ~OperationHash() {
+    if (m_hash)
+      BCryptDestroyHash(m_hash);
+    if (m_algorithm)
+      BCryptCloseAlgorithmProvider(m_algorithm, 0);
+  }
+#endif
+  QByteArray hash(const QByteArray &data) {
+#ifdef Q_OS_WIN
+    if (m_hash) {
+      QByteArray result(32, Qt::Uninitialized);
+      if (BCryptHashData(m_hash,
+                         reinterpret_cast<PUCHAR>(const_cast<char *>(data.constData())),
+                         ULONG(data.size()), 0) >= 0 &&
+          BCryptFinishHash(m_hash, reinterpret_cast<PUCHAR>(result.data()),
+                            ULONG(result.size()), 0) >= 0)
+        return result;
+      BCryptDestroyHash(m_hash);
+      m_hash = nullptr;
+    }
+#endif
+    return QCryptographicHash::hash(data, QCryptographicHash::Sha256);
+  }
+private:
+#ifdef Q_OS_WIN
+  BCRYPT_ALG_HANDLE m_algorithm = nullptr;
+  BCRYPT_HASH_HANDLE m_hash = nullptr;
+  QByteArray m_object;
+#endif
+};
 bool bz2(const QByteArray &in, QByteArray *out) {
   unsigned int length = unsigned(out->size());
   const int r = BZ2_bzBuffToBuffDecompress(
@@ -241,6 +308,12 @@ QString OugaPayloadExtractor::extract(const QString &file,
   if (callbacks.progress)
     callbacks.progress(0, total);
   workers = qMax(1, workers);
+  // Like Task.Run in the reference, reuse worker threads across partitions.
+  // Do not occupy/change the application's shared pool or GUI priority.
+  QThreadPool pool;
+  pool.setMaxThreadCount(workers);
+  pool.setThreadPriority(QThread::LowPriority);
+  pool.setExpiryTimeout(-1);
   for (const auto &entry : entries) {
     if (cancel)
       return "准备已取消；保留已完成的镜像";
@@ -276,7 +349,9 @@ QString OugaPayloadExtractor::extract(const QString &file,
         fail("无法打开 Payload 读写句柄：" + entry.name);
         return;
       }
-      QByteArray raw;
+      QByteArray data, raw;
+      XzDecoder decoder;
+      OperationHash hasher;
       for (qsizetype i = next++; i < entry.ops.size() && !failed && !cancel;
            i = next++) {
         const OugaPayloadOperation &op = entry.ops[i];
@@ -287,21 +362,20 @@ QString OugaPayloadExtractor::extract(const QString &file,
           report(bytes);
           continue;
         }
-        const QByteArray data =
-            readAt(in, layout.dataOffset + op.dataOffset, qint64(op.dataLength));
-        if (quint64(data.size()) != op.dataLength) {
+        data.resize(qsizetype(op.dataLength));
+        if (!in.seek(qint64(layout.dataOffset + op.dataOffset)) ||
+            in.read(data.data(), data.size()) != data.size()) {
           fail("Payload 数据读取失败：" + entry.name);
           return;
         }
-        if (QCryptographicHash::hash(data, QCryptographicHash::Sha256) !=
-            op.dataHash) {
+        if (hasher.hash(data) != op.dataHash) {
           fail("operation data sha256 校验失败：" + entry.name);
           return;
         }
         const QByteArray *decoded = &data;
         if (op.type != 0) {
           raw.resize(qsizetype(bytes));
-          if (!(op.type == 8 ? xz(data, &raw) : bz2(data, &raw))) {
+          if (!(op.type == 8 ? decoder.decode(data, &raw) : bz2(data, &raw))) {
             fail("Payload 数据解压失败：" + entry.name);
             return;
           }
@@ -321,12 +395,12 @@ QString OugaPayloadExtractor::extract(const QString &file,
       }
     };
     const int count = int(qMin<qsizetype>(workers, entry.ops.size()));
-    std::vector<std::thread> threads;
-    threads.reserve(size_t(count));
+    QVector<QFuture<void>> jobs;
+    jobs.reserve(count);
     for (int n = 0; n < count; ++n)
-      threads.emplace_back(worker);
-    for (auto &thread : threads)
-      thread.join();
+      jobs << QtConcurrent::run(&pool, worker);
+    for (auto &job : jobs)
+      job.waitForFinished();
     if (!failed && cancel)
       error = "准备已取消；保留已完成的镜像";
     if (!error.isEmpty() || cancel) {

@@ -354,17 +354,15 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
                               const QString &oldDirectory) {
   if (!begin())
     return;
-  QString e;
-  if (!newOutput(file, output, &e)) {
-    end(false, e);
-    return;
-  }
   auto entries = std::make_shared<QVector<OugaPayloadEntry>>();
   auto delta = std::make_shared<bool>(false);
   auto layout = std::make_shared<OugaPayloadLayout>();
+  auto native = std::make_shared<bool>(false);
   work(
-      [entries, delta, layout, file, selected, oldDirectory] {
+      [entries, delta, layout, native, file, output, selected, oldDirectory] {
         QString e;
+        if (!newOutput(file, output, &e))
+          return e;
         if (!OugaPackage::payloadManifest(file, entries.get(), delta.get(), &e,
                                           layout.get()))
           return e;
@@ -389,11 +387,13 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
               OugaPackage::digest(f, &e) != p.oldHash)
             return QString("增量 Payload 缺少匹配的旧镜像：") + p.name;
         }
+        *native = !*delta &&
+            OugaPayloadExtractor::supported(*entries, selected, *layout);
         return QString();
       },
-      [this, entries, delta, layout, tool, file, output, selected,
+      [this, entries, delta, layout, native, tool, file, output, selected,
        oldDirectory] {
-        if (!*delta && OugaPayloadExtractor::supported(*entries, selected, *layout)) {
+        if (*native) {
           nativePayload(file, *layout, *entries, output, selected);
           return;
         }

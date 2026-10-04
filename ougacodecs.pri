@@ -15,3 +15,6 @@ DEFINES += LZMA_API_STATIC
 QMAKE_CXXFLAGS += -idirafter $$shell_quote($$OUGA_CODEC_ROOT/include)
 # liblzma links statically; bzip2 needs libbz2-1.dll beside the executable.
 LIBS += -L$$shell_quote($$OUGA_CODEC_ROOT/lib) -llzma -lbz2
+
+# CNG is a Windows system library; no extra distributable DLL is required.
+win32: LIBS += -lbcrypt

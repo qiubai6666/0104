@@ -54,6 +54,7 @@ private:
     None,
     Scan,
     PathCheck,
+    PayloadInspect,
     PayloadDownload,
     PayloadArchive,
     PayloadExtract,

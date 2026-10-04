@@ -70,7 +70,7 @@ private:
   std::function<void(bool, const QString &)> m_callback;
   bool begin();
   void end(bool ok, const QString &message);
-  bool newOutput(const QString &source, const QString &output, QString *error);
+  static bool newOutput(const QString &source, const QString &output, QString *error);
   void run(const QString &tool, const QStringList &args, const QString &cwd,
            std::function<void(bool, const QString &)> done,
            bool reportArchiveProgress = false, bool quietOutput = false);

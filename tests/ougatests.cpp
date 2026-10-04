@@ -22,6 +22,7 @@
 #include <QJsonObject>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMutex>
 #include <QMimeData>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -1765,6 +1766,131 @@ private slots:
       return r[0].toString() == "vendor" && !r[1].toBool();
     }));
   }
+  void nativePayloadRepeatedOperations_data() {
+    QTest::addColumn<int>("type");
+    QTest::addColumn<int>("workers");
+    for (int type : {0, 1, 8})
+      for (int workers : {1, 4})
+        QTest::newRow(qPrintable(QString("type-%1-workers-%2").arg(type).arg(workers)))
+            << type << workers;
+  }
+  void nativePayloadRepeatedOperations() {
+    QFETCH(int, type);
+    QFETCH(int, workers);
+    QByteArray blob, manifest = vi(3 << 3) + vi(4096);
+    QMap<QString, QByteArray> expected;
+    // Different input/output sizes exercise reused buffers, hashes and XZ state.
+    for (const QString &name : {QString("boot"), QString("vendor")}) {
+      QByteArray image;
+      QVector<NativeOp> operations;
+      quint64 block = 0;
+      for (int i = 0; i < 48; ++i) {
+        const int blocks = 1 + i % 5;
+        const QByteArray raw = nativeImage(blocks, char('a' + i));
+        const QByteArray encoded = type == 8 ? xzBytes(raw) :
+                                   type == 1 ? bzBytes(raw) : raw;
+        QVERIFY(!encoded.isEmpty());
+        operations << NativeOp{type, block, quint64(blocks), encoded};
+        image += raw;
+        block += quint64(blocks);
+      }
+      expected[name] = image;
+      manifest += nativePartition(name.toUtf8(), image, operations, &blob);
+    }
+    const QString file = dir + "/payload.bin", output = dir + "/images";
+    const QByteArray bytes = payloadContainer(manifest) + blob;
+    QVERIFY(put(file, bytes));
+    QVERIFY(QDir().mkpath(output));
+    QVector<OugaPayloadEntry> entries;
+    OugaPayloadLayout layout;
+    bool delta = false;
+    QString error;
+    QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
+    std::atomic_bool cancel{false};
+    error = OugaPayloadExtractor::extract(file, layout, entries, output, workers,
+                                          cancel, {});
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    for (auto i = expected.cbegin(); i != expected.cend(); ++i) {
+      const QString target = output + '/' + i.key() + ".img";
+      QCOMPARE(read(target), i.value());
+      QCOMPARE(OugaPackage::digest(target, nullptr), sha(i.value()));
+    }
+    QCOMPARE(read(file), bytes);
+  }
+  void nativePayloadReusesWorkers() {
+    QByteArray blob, manifest = vi(3 << 3) + vi(4096);
+    const QByteArray image = nativeImage(1, 'x');
+    const QStringList names = {"boot", "vendor", "system", "system_ext", "product",
+                               "odm", "modem", "tz", "dsp", "abl", "dtbo", "vbmeta"};
+    for (const QString &name : names)
+      manifest += nativePartition(name.toUtf8(), image, {{0, 0, 1, image}}, &blob);
+    const QString file = dir + "/payload.bin", output = dir + "/images";
+    QVERIFY(put(file, payloadContainer(manifest) + blob));
+    QVERIFY(QDir().mkpath(output));
+    QVector<OugaPayloadEntry> entries;
+    OugaPayloadLayout layout;
+    bool delta = false;
+    QString error;
+    QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
+    QSet<Qt::HANDLE> threads;
+    QMutex mutex;
+    std::atomic_bool cancel{false};
+    OugaPayloadExtractor::Callbacks callbacks;
+    callbacks.progress = [&](quint64 done, quint64) {
+      if (!done)
+        return;
+      QMutexLocker lock(&mutex);
+      threads.insert(QThread::currentThreadId());
+    };
+    error = OugaPayloadExtractor::extract(file, layout, entries, output, 1,
+                                          cancel, callbacks);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    // QFuture may execute a queued job in the waiting caller as well.
+    QVERIFY(!threads.isEmpty());
+    QVERIFY2(threads.size() <= 2, "A thread was recreated for every partition");
+    for (const QString &name : names)
+      QCOMPARE(read(output + '/' + name + ".img"), image);
+  }
+  void nativePayloadXzBounds_data() {
+    QTest::addColumn<int>("fault");
+    QTest::newRow("truncated-footer") << 0;
+    QTest::newRow("corrupted-stream") << 1;
+    QTest::newRow("short-output") << 2;
+    QTest::newRow("oversized-output") << 3;
+    QTest::newRow("trailing-junk") << 4;
+  }
+  void nativePayloadXzBounds() {
+    QFETCH(int, fault);
+    QByteArray image = nativeImage(2, 'q'), encoded = xzBytes(image);
+    QVERIFY(!encoded.isEmpty());
+    if (fault == 0)
+      encoded.chop(1);
+    else if (fault == 1)
+      encoded[encoded.size() / 2] ^= 0x44;
+    else if (fault == 2)
+      image += QByteArray(4096, 0);
+    else if (fault == 3)
+      image.chop(4096);
+    else
+      encoded += "junk";
+    QByteArray blob;
+    const QByteArray manifest = vi(3 << 3) + vi(4096) +
+        nativePartition("boot", image,
+                         {{8, 0, quint64(image.size() / 4096), encoded}}, &blob);
+    const QString file = dir + "/payload.bin", output = dir + "-invalid-xz";
+    QVERIFY(put(file, payloadContainer(manifest) + blob));
+    OugaPreparation preparation;
+    QSignalSpy done(&preparation, &OugaPreparation::finished),
+               ready(&preparation, &OugaPreparation::prepared);
+    preparation.payload({}, file, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 20000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY2(done[0][1].toString().contains("解压失败"),
+             qPrintable(done[0][1].toString()));
+    QCOMPARE(ready.count(), 0);
+    QVERIFY(!QFileInfo::exists(output + "/boot.img"));
+    QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
+  }
   void nativePayloadEligibility() {
     QByteArray boot, vendor;
     const QByteArray payload = nativePayloadBytes(&boot, &vendor);
@@ -2549,6 +2675,33 @@ private slots:
     QVERIFY(QDir(output).entryList({"ouga-payload-source*"}, QDir::Dirs).isEmpty());
     QCOMPARE(window.findChild<QTableWidget *>("OugaPartitionTableDataGrid")->rowCount(), 2);
     QCOMPARE(read(source), bytes);
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
+  }
+  void widgetPayloadInspectionCanBeStopped() {
+    QByteArray boot, vendor;
+    const QString source = dir + "/payload.bin", output = dir + "/output";
+    QVERIFY(put(source, nativePayloadBytes(&boot, &vendor)));
+    QVERIFY(QDir().mkpath(output));
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    auto preparation = window.findChild<OugaPreparation *>();
+    QSignalSpy ready(preparation, &OugaPreparation::prepared);
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    window.findChild<QPushButton *>("UnpackPayloadButton")->click();
+    QVERIFY(window.isBusy());
+    // The GUI call returns before inspection completes or preparation starts.
+    QVERIFY(!preparation->busy());
+    window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+    QVERIFY(window.isBusy()); // keep the worker's owner alive until completion
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+    QCOMPARE(ready.count(), 0);
+    QVERIFY(!QFileInfo::exists(output + "/images/boot.img"));
+    QVERIFY(!QFileInfo::exists(output + "/images/vendor.img"));
     QVERIFY(runner.trace.isEmpty());
     QVERIFY(window.close());
   }

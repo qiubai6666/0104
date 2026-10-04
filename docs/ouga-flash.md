@@ -59,14 +59,18 @@ AB、强力、仅 FBD 必须具有匹配的 my_company / my_preload。来自包�
 - 与 VioletToolBox 的 PayloadProcessing 一致，全量 Payload 在应用内提取（src/services/ougapayloadextractor.cpp）：分区依次处理，单个分区内的操作按逻辑处理器数并行，每个操作解码前核对 data_sha256_hash，写入按块随机定位；进度按已写入字节计算，校验完成前最高 99%。ZIP 中以存储方式保存的唯一 payload.bin 直接在原包内按偏移读取，不预解压；压缩、加密、重复或结构异常的条目仍走上述 7z 只解 payload.bin 的流程。
 - 仅当所选分区全部为带数据摘要的 REPLACE / REPLACE_BZ / REPLACE_XZ / ZERO / DISCARD，且目标区段无缺口、无重叠地恰好覆盖整个镜像时才走应用内提取；增量包、REPLACE_ZSTD 或任何不满足的情况继续使用 payload.exe（2–8 个 worker），流程及校验不变。参考实现对差分包直接报错，这里保留原有能力。
 - 应用内提取的镜像由逐操作校验的数据完整覆盖，不再提取后整体重读：以 manifest 摘要作为该镜像的期望 SHA-256，并照常检查长度、Sparse、路径与映射；刷写前及每次写入前仍完整复检磁盘文件，与参考实现的校验时机一致。失败或取消时删除未完成的 .partial，保留已完成的镜像。
-- xz（静态链接）与 bzip2 取自 Qt MinGW 套件的 mingw64/opt（ougacodecs.pri，可用 OUGA_CODEC_ROOT 覆盖）；deploy.ps1 将 libbz2-1.dll 一并部署并列为必需文件（可用 -CodecBinPath 指定）。
+- 每次提取使用专属、可复用的低优先级 Qt 线程池，不再为每个分区反复创建和销毁线程；每个工作任务复用输入缓冲和 XZ 解码器。Windows 逐操作 SHA-256 使用系统 CNG 的可复用校验器，初始化或计算失败则完整回退到 Qt SHA-256；XZ 仍检查压缩流校验、完整输入消耗及精确输出长度。
+- ZIP 定位、Payload manifest 解析、操作范围检查与输出目录检查在后台运行，GUI 只接收进度和结果。解析期间停止会等待后台工作返回后结束任务，窗口不可提前销毁；不更改全局线程池或界面线程优先级。
+- xz（静态链接）与 bzip2 取自 Qt MinGW 套件的 mingw64/opt（ougacodecs.pri，可用 OUGA_CODEC_ROOT 覆盖）；deploy.ps1 将 libbz2-1.dll 一并部署并列为必需文件（可用 -CodecBinPath 指定）。 CNG 来自 Windows 系统 bcrypt，不新增分发 DLL。
 - 提取后的扫描使用独立、最多 2 线程的校验池，按确定顺序返回结果。扫描取得的 SHA-256 仅在同一次准备任务内用于 manifest 比对，不重复完整读取可刷写镜像；被排除的镜像仍单独核对 manifest。
 - 不持久缓存摘要，不以文件大小或修改时间代替刷写前的完整复检。长度、Sparse、路径、映射、manifest 与失败阻止规则保留。ZIP 仍只提取经列表校验的唯一 payload.bin，不执行整包解压。
 - 实际收益取决于 CPU、磁盘与固件压缩方式；性能测试应使用同一真实 Payload、独立输出目录，并对比全部输出镜像的大小和 SHA-256。模拟测试通过不代表真机兼容性验证。
 
 2026-10-04 本机实测：对同一 8,997,436,618 字节的真实 Payload 分别执行旧版和新版准备流程（提取及完整校验，不含 ZIP 预解压），从 474.411 秒降至 251.596 秒，耗时减少 46.97%。65 个输出镜像合计 12,049,133,568 字节，逐项大小及 SHA-256 完全一致；本机 8 个逻辑处理器，新版使用 8 个 worker。该结果为旧版先、新版后的单轮 SSD 测试，可能受系统缓存影响，不代表所有包或磁盘均有相同收益，也未与 VioletToolBox 可执行程序进行同机测速。
 
-2026-10-04 应用内提取实测：同一 8,997,444,488 字节 ZIP（payload.bin 为存储方式）直接解包，无预解压，提取到完成准备共 136.966 秒（上一版仅提取及校验即 251.596 秒，另需先复制约 9 GB 的 payload.bin）。65 个镜像合计 12,049,133,568 字节，事后独立逐项核对大小及 SHA-256 与 manifest 全部一致；8 个逻辑处理器、8 个线程，单轮测试，输出与源位于不同磁盘，同样未与 VioletToolBox 同机测速。
+2026-10-04 应用内提取实测：同一 8,997,444,488 字节 ZIP（payload.bin 为存储方式）直接解包，无预解压，提取到完成准备共 136.966 秒（上一版仅提取及校验即 251.596 秒，另需先复制约 9 GB 的 payload.bin）。65 个镜像合计 12,049,133,568 字节，事后独立逐项核对大小及 SHA-256 与 manifest 全部一致；8 个逻辑处理器、8 个线程，单轮测试，输出与源位于不同盘符，但实际是同一物理 SATA SSD，同样未与 VioletToolBox 同机测速。
+
+2026-10-04 本轮实际窗口复测：使用同一 ZIP，在隔离的 QApplication / OugaFlashWindow 中点击真实「解包」按钮，计时涵盖目录准备、ZIP / manifest 解析、镜像提取和最终扫描（offscreen 平台，不连接手机）。任务开始版本 a2ed85a 用时 395.318 秒，本轮优化后 108.526 秒，耗时减少 72.55%；10 毫秒界面心跳的最大间隔从 1477 毫秒降至 51 毫秒。前后 65 个镜像合计 12,049,133,568 字节，另用系统 SHA-256 逐文件完整读取核对，实际摘要、大小与 manifest 及前后输出全部一致，不仅比较准备结果中的期望摘要。本机 8 个逻辑处理器，源包和 TEMP 输出位于不同盘符、同一物理 SATA SSD；旧版先、新版后的单轮结果仍可能受缓存、温度和系统负载影响。没有构建或运行 VioletToolBox 进行同机测速，不据此宣称已追平参考程序，也不代表真机刷写验证。
 
 ## 云下载与自动救砖
 
@@ -112,7 +116,7 @@ ROM 服务适配 SMT 的 /series、/devices、/versions（GET）与 /download-li
 
 - tests/ougadependencytests.pro：分目录资源完整性、内置工具默认路径、匹配的格式化文件、lpmake 帮助/实际生成失败边界。捆绑的 Windows lpmake 使用独立输出目录中的相对文件名，工作目录由 QProcess 以 Unicode 传入；源镜像和 JSON 不改动。参考 lpmake 对超长 Win32 路径有限制，宜选择较短的输出目录；生成失败仍停止，不伪报成功。默认只用不可执行的夹具及测试进程；显式 bundled_dependency_resources 构建验证真实内嵌工具的版本、全部摘要、中文路径 ZIP 解压和 8 MiB 小型 Super 生成，始终不发出真实设备命令。
 
-- tests/ougatests.pro：包 / Payload / ARB / Super、平台和槽位命令矩阵、共享规则、确定性排序与实际刷写计数、has-slot 稳定性、Super 后重新确认、格式化依赖复检、命令输出去重、结果落盘失败、故障注入、停止 / 租约、原版控件与最小尺寸布局、表格缓存 / 拖入、内部开始线刷、模态期间停止。
+- tests/ougatests.pro：原生多操作 REPLACE / BZ / XZ 的完整输出与摘要、跨分区工作线程复用、XZ 截断 / 损坏 / 输出长度 / 尾部垃圾边界、GUI 异步解析及停止生命周期；包 / Payload / ARB / Super、平台和槽位命令矩阵、共享规则、确定性排序与实际刷写计数、has-slot 稳定性、Super 后重新确认、格式化依赖复检、命令输出去重、结果落盘失败、故障注入、停止 / 租约、原版控件与最小尺寸布局、表格缓存 / 拖入、内部开始线刷、模态期间停止。
 - tests/ouganetworktests.pro：仅 loopback 的服务、Range、摘要 / 长度、跨站凭证隔离、取消 / 续传。
 - tests/deviceoperationtests.pro：旧功能互斥、单窗口、关闭 / 最小化保护，使用假工具。
 - tests/processmanagertests.pro、tests/readabilitytests.pro：既有进程与界面回归。
@@ -121,5 +125,7 @@ ROM 服务适配 SMT 的 /series、/devices、/versions（GET）与 /download-li
 遵守 AGENTS.md，所有临时工作目录、TEMP/TMP、构建、设置、日志和截图放在本轮项目外系统 TEMP；Ouga 测试设置 ORANGE_TEST_ARTIFACTS。中文路径造成 qmake / MinGW 重入异常时，在同一 TEMP 的 ASCII 源码副本编译，正式源码位置不变。
 
 Release 使用 Qt 6.11.2 MinGW；成功后显式传本次 ExecutablePath、匹配 QtBinPath、项目 OrangeToolsApp 输出和 PreserveExistingFiles 给 deploy.ps1，不删除现有文件。核对 exe SHA-256，并在 TEMP 副本验证依赖和 Smoke。不运行有自动清理行为的 check-deployment.ps1，不强退用户进程，不额外压缩。验证材料由用户按收尾建议手动处理。
+
+2026-10-04 本轮验证：欧加 264 项、捆绑依赖 83 项、网络 24 项、设备互斥 34 项、进程管理 16 项、界面资源 / 密码 11 项均通过；默认依赖测试 74 项通过、9 项有意跳过，捆绑依赖构建覆盖这些真实非设备工具。部署副本移除开发环境 PATH 后，依赖 / 插件 Smoke 和 15 项原生解包 / 停止用例通过；实际 Release 启动至密码窗口后正常关闭，退出码 0，40 / 40 个嵌入资源提取成功。启动验证使用全新的 TEMP 用户数据路径，不认证、不启动设备监控；Qt6Test.dll 仅复制至 TEMP 测试副本，不加入正式发布包。本次构建与发布 exe 的 SHA-256 一致。
 
 **模拟回归与部署验证不替代真机验收。** 真机须另行记录机型 / 地区 / 版本、平台、起始 / 最终槽、模式、完整工具版本、解锁状态、设备表、映像摘要、计划、原始日志、Super 前后表与启动结果；外部 ROM 服务、真实固件以及硬件 ARB 状态也需单独验证。
