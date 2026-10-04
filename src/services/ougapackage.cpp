@@ -9,6 +9,8 @@
 #include <QRegularExpression>
 #include <QXmlStreamReader>
 #include <QtEndian>
+#include <QThreadPool>
+#include <QtConcurrent>
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -392,11 +394,31 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
         return {};
     }
   }
-  for (auto it = files.cbegin(); it != files.cend(); ++it) {
-    Ouga::Partition p;
-    if (!inspect(it.key(), it.value(), &p, error))
+  struct Inspection {
+    Ouga::Partition image;
+    QString error;
+    bool valid = false;
+  };
+  QVector<QPair<QString, QString>> sources;
+  for (auto it = files.cbegin(); it != files.cend(); ++it)
+    sources.append(qMakePair(it.key(), it.value()));
+  // A private, bounded pool avoids flooding rotating disks and never changes
+  // the shared pool used by preparation/UI tasks. Preserve deterministic order.
+  QThreadPool pool;
+  pool.setMaxThreadCount(2);
+  const auto inspected = QtConcurrent::blockingMapped<QVector<Inspection>>(
+      &pool, sources, [](const QPair<QString, QString> &source) {
+        Inspection checked;
+        checked.valid = inspect(source.first, source.second, &checked.image,
+                                &checked.error);
+        return checked;
+      });
+  for (const auto &checked : inspected) {
+    if (!checked.valid) {
+      fail(error, checked.error);
       return {};
-    result << p;
+    }
+    result << checked.image;
   }
   if (result.isEmpty())
     fail(error,

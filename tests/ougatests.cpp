@@ -32,6 +32,7 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QThread>
 #include <QUuid>
 #include <QtEndian>
 #include <QtTest>
@@ -495,6 +496,49 @@ private slots:
     QVERIFY(put(dir + "/boot_b.img", "duplicate"));
     QVERIFY(OugaPackage::scan(dir, &e).isEmpty());
     QVERIFY(e.contains("多个"));
+  }
+  void parallelScanKeepsHashesAndOrder() {
+    const QStringList names = {"boot", "vendor", "system"};
+    for (const QString &name : names)
+      QVERIFY(put(dir + "/" + name + ".img", QByteArray(1024 * 1024, name.at(0).toLatin1())));
+    QString error;
+    const auto images = OugaPackage::scan(dir, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(images.size(), 3);
+    QStringList sorted = names;
+    sorted.sort();
+    for (int i = 0; i < images.size(); ++i) {
+      QCOMPARE(images[i].name, sorted[i]);
+      QCOMPARE(images[i].sha256, QCryptographicHash::hash(
+          QByteArray(1024 * 1024, sorted[i].at(0).toLatin1()), QCryptographicHash::Sha256));
+    }
+    QVERIFY(put(dir + "/vendor.img", QByteArray()));
+    QVERIFY(OugaPackage::scan(dir, &error).isEmpty());
+    QVERIFY(!error.isEmpty());
+  }
+  void payloadExcludedImageStillVerified_data() {
+    QTest::addColumn<bool>("corrupt");
+    QTest::newRow("excluded-valid") << false;
+    QTest::newRow("excluded-corrupt") << true;
+  }
+  void payloadExcludedImageStillVerified() {
+    QFETCH(bool, corrupt);
+    const QString file = dir + "/payload.bin";
+    const QString output = dir + (corrupt ? "-excluded-corrupt" : "-excluded-ok");
+    QVERIFY(put(file, payloadContainer(payloadPartition("boot", 0) + payloadPartition("misc", 0))));
+    OugaPreparation prep;
+    QSignalSpy done(&prep, &OugaPreparation::finished), ready(&prep, &OugaPreparation::prepared);
+    prep.payload(QCoreApplication::applicationFilePath(), file, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 10000);
+    QCOMPARE(done[0][0].toBool(), !corrupt);
+    QCOMPARE(ready.size(), corrupt ? 0 : 1);
+    if (!corrupt) {
+      const auto images = qvariant_cast<QVector<Ouga::Partition>>(ready[0][0]);
+      QCOMPARE(images.size(), 1);
+      QCOMPARE(images[0].name, "boot");
+      QCOMPARE(images[0].sha256, QCryptographicHash::hash(QByteArray(512, 'p'), QCryptographicHash::Sha256));
+    } else
+      QVERIFY(done[0][1].toString().contains("SHA-256"));
   }
   void rawprogram_data() {
     QTest::addColumn<QString>("extra");
@@ -2763,6 +2807,16 @@ int main(int argc, char **argv) {
     }
     if (command == "--out" && argc >= 6 &&
         QString::fromLocal8Bit(argv[argc - 1]).endsWith("payload.bin")) {
+      // Assert the production invocation uses bounded CPU parallelism.
+      if (std::strcmp(argv[3], "--workers") != 0 ||
+          QString::fromLocal8Bit(argv[4]).toInt() != qBound(2, QThread::idealThreadCount(), 8))
+        return 11;
+      const QByteArray excluded = payloadContainer(payloadPartition("boot", 0) + payloadPartition("misc", 0));
+      if (read(QString::fromLocal8Bit(argv[argc - 1])) == excluded) {
+        const QString output = QString::fromLocal8Bit(argv[2]);
+        return put(output + "/boot.img", QByteArray(512, 'p')) &&
+               put(output + "/misc.img", QByteArray(512, output.endsWith("corrupt") ? 'x' : 'p')) ? 0 : 12;
+      }
       // Only this executable's fixture format is accepted; no real tools.
       const QString source = QString::fromLocal8Bit(argv[argc - 1]);
       const QByteArray bytes = read(source);

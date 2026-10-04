@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTimer>
+#include <QThread>
 #include <QRegularExpression>
 #include <QLocale>
 #include <QUuid>
@@ -386,7 +387,9 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
         return QString();
       },
       [this, entries, delta, tool, file, output, selected, oldDirectory] {
-        QStringList args = {"--out", output, "--workers", "2"};
+        // Match CPU parallelism without unbounded disk contention on large hosts.
+        const int workers = qBound(2, QThread::idealThreadCount(), 8);
+        QStringList args = {"--out", output, "--workers", QString::number(workers)};
         if (*delta)
           args << "--diff" << "--old" << oldDirectory;
         if (!selected.isEmpty())
@@ -421,13 +424,29 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
               work(
                   [this, entries, output, selected, images] {
                     QString e;
+                    // scan() validates mappings, sparse ranges and hashes once.
+                    // Reuse only this invocation's results for manifest comparison,
+                    // never a persistent cache or a size/mtime shortcut before flash.
+                    *images = OugaPackage::scan(output, &e);
+                    if (!e.isEmpty())
+                      return e;
+                    QMap<QString, QByteArray> hashes;
+                    for (const auto &image : *images)
+                      hashes.insert(image.path, image.sha256);
                     for (const auto &p : *entries) {
                       if (!selected.isEmpty() && !selected.contains(p.name))
                         continue;
-                      QString f = QDir(output).filePath(p.name + ".img");
+                      const QString f = QDir(output).filePath(p.name + ".img");
                       if (!OugaPackage::inside(output, f) ||
-                          quint64(QFileInfo(f).size()) != p.size ||
-                          OugaPackage::digest(f, &e) != p.hash)
+                          quint64(QFileInfo(f).size()) != p.size)
+                        return QString("Payload 输出缺失/长度/SHA-256 不符：") +
+                               p.name;
+                      const QString canonical = QFileInfo(f).canonicalFilePath();
+                      // Excluded partitions (e.g. misc/FRP) are still verified,
+                      // but must not be added to the flashable image list.
+                      const QByteArray hash = hashes.contains(canonical)
+                          ? hashes.value(canonical) : OugaPackage::digest(f, &e);
+                      if (hash != p.hash)
                         return QString("Payload 输出缺失/长度/SHA-256 不符：") +
                                p.name;
                       QMetaObject::invokeMethod(this, [this, name = p.name] {
@@ -437,7 +456,6 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
                         }
                       }, Qt::QueuedConnection);
                     }
-                    *images = OugaPackage::scan(output, &e);
                     return e;
                   },
                   [this, images, output] {
