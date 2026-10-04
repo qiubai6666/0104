@@ -14,7 +14,8 @@ public:
   // Locate a single STORED payload.bin. Other: ZIP that needs 7z (compressed,
   // encrypted, ambiguous or malformed); the existing safe extraction is used.
   static Zip locate(const QString &file, quint64 *offset, quint64 *size);
-  // Every operation is a hashed full-image type and the destination extents
+  // REPLACE / BZ / XZ / ZSTD / ZERO / DISCARD only. Every data operation is
+  // hash-verified, and the destination extents
   // tile the partition exactly; anything else is left to payload.exe.
   static bool supported(const OugaPayloadEntry &entry,
                         const OugaPayloadLayout &layout);

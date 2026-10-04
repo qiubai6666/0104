@@ -20,6 +20,11 @@ if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
     throw "Release executable not found: $ExecutablePath. Build first or pass -ExecutablePath."
 }
 $executable = (Resolve-Path -LiteralPath $ExecutablePath).Path
+# The statically linked Zstandard decoder's BSD notice must accompany binaries.
+$zstdLicense = Join-Path $PSScriptRoot 'third_party\zstd\LICENSE'
+if (-not (Test-Path -LiteralPath $zstdLicense -PathType Leaf)) {
+    throw "Zstandard license is missing: $zstdLicense"
+}
 
 # Prefer the Qt kit recorded by the executable's own qmake build.
 if ([string]::IsNullOrWhiteSpace($QtBinPath)) {
@@ -142,12 +147,15 @@ if (-not $codec -or -not (Test-Path -LiteralPath $codec -PathType Leaf)) {
     throw 'libbz2-1.dll not found. Pass -CodecBinPath pointing to the MinGW kit opt\bin used for the build.'
 }
 Copy-Item -LiteralPath $codec -Destination (Join-Path $output 'libbz2-1.dll') -Force
+$licenseDirectory = Join-Path $output 'licenses'
+[IO.Directory]::CreateDirectory($licenseDirectory) | Out-Null
+Copy-Item -LiteralPath $zstdLicense -Destination (Join-Path $licenseDirectory 'zstd-BSD.txt') -Force
 
 # Resolve plugins relative to the executable instead of the developer's Qt installation.
 [IO.File]::WriteAllText((Join-Path $output 'qt.conf'), "[Paths]`r`nPrefix = .`r`nPlugins = .`r`n", [Text.UTF8Encoding]::new($false))
 $required = @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll', 'Qt6Concurrent.dll', 'Qt6Svg.dll',
               'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll', 'libbz2-1.dll',
-              'platforms\qwindows.dll', 'styles\qmodernwindowsstyle.dll',
+              'licenses\zstd-BSD.txt', 'platforms\qwindows.dll', 'styles\qmodernwindowsstyle.dll',
               'networkinformation\qnetworklistmanager.dll', 'tls\qschannelbackend.dll')
 foreach ($file in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $output $file) -PathType Leaf)) {

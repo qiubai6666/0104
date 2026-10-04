@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <bzlib.h>
 #include <lzma.h>
+#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd.h>
 #ifdef Q_OS_WIN
 #include <qt_windows.h>
 #include <bcrypt.h>
@@ -54,6 +56,37 @@ public:
   }
 private:
   lzma_stream m_stream = LZMA_STREAM_INIT;
+};
+
+// VioletToolBox's Type.Zstd (14), without falling back to payload.exe.
+// A worker reuses its context, and the manifest's bounded destination length
+// controls allocation. Reject oversized windows, dictionaries, extra frames
+// or trailing bytes instead of silently accepting a partial decode.
+class ZstdDecoder {
+public:
+  ZstdDecoder() : m_context(ZSTD_createDCtx()) {}
+  ~ZstdDecoder() { ZSTD_freeDCtx(m_context); }
+  bool decode(const QByteArray &in, QByteArray *out) {
+    if (!m_context)
+      return false;
+    ZSTD_FrameHeader header{};
+    if (ZSTD_getFrameHeader(&header, in.constData(), size_t(in.size())) != 0 ||
+        header.frameType != ZSTD_frame || header.dictID != 0 ||
+        header.windowSize > maxOperationBytes ||
+        (header.frameContentSize != ZSTD_CONTENTSIZE_UNKNOWN &&
+         header.frameContentSize != quint64(out->size())))
+      return false;
+    const size_t frame =
+        ZSTD_findFrameCompressedSize(in.constData(), size_t(in.size()));
+    if (ZSTD_isError(frame) || frame != size_t(in.size()))
+      return false;
+    const size_t decoded = ZSTD_decompressDCtx(
+        m_context, out->data(), size_t(out->size()),
+        in.constData(), size_t(in.size()));
+    return !ZSTD_isError(decoded) && decoded == size_t(out->size());
+  }
+private:
+  ZSTD_DCtx *m_context = nullptr;
 };
 
 // Windows CNG provides the same SHA-256 with CPU acceleration where available.
@@ -246,6 +279,7 @@ bool OugaPayloadExtractor::supported(const OugaPayloadEntry &entry,
     case 0: // REPLACE
     case 1: // REPLACE_BZ
     case 8: // REPLACE_XZ
+    case 14: // ZSTD (VioletToolBox / AOSP full-image operation)
       if (!op.hasDataOffset || !op.dataLength || op.dataHash.size() != 32 ||
           op.dataLength > maxOperationBytes ||
           op.dataOffset > available ||
@@ -258,7 +292,7 @@ bool OugaPayloadExtractor::supported(const OugaPayloadEntry &entry,
       if (op.dataLength)
         return false;
       break;
-    default: // REPLACE_ZSTD and every source operation stay with payload.exe
+    default: // Source/delta operations stay with payload.exe
       return false;
     }
   }
@@ -350,7 +384,8 @@ QString OugaPayloadExtractor::extract(const QString &file,
         return;
       }
       QByteArray data, raw;
-      XzDecoder decoder;
+      XzDecoder xzDecoder;
+      ZstdDecoder zstdDecoder;
       OperationHash hasher;
       for (qsizetype i = next++; i < entry.ops.size() && !failed && !cancel;
            i = next++) {
@@ -375,7 +410,10 @@ QString OugaPayloadExtractor::extract(const QString &file,
         const QByteArray *decoded = &data;
         if (op.type != 0) {
           raw.resize(qsizetype(bytes));
-          if (!(op.type == 8 ? decoder.decode(data, &raw) : bz2(data, &raw))) {
+          const bool decodedOk = op.type == 8 ? xzDecoder.decode(data, &raw)
+              : op.type == 14 ? zstdDecoder.decode(data, &raw)
+                              : bz2(data, &raw);
+          if (!decodedOk) {
             fail("Payload 数据解压失败：" + entry.name);
             return;
           }

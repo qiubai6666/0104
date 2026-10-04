@@ -14,6 +14,7 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QGroupBox>
@@ -167,6 +168,9 @@ QByteArray sha(const QByteArray &b) {
 } // namespace
 QByteArray xzBytes(const QByteArray &in);
 QByteArray bzBytes(const QByteArray &in);
+QByteArray zstdCompressedBytes();
+QByteArray zstdBytes(const QByteArray &in, bool unknownSize = false,
+                     bool rle = false);
 namespace {
 // image: expected partition contents; ops: data already encoded per type.
 QByteArray nativePartition(const QByteArray &name, const QByteArray &image,
@@ -204,6 +208,26 @@ QByteArray nativePayloadBytes(QByteArray *boot, QByteArray *vendor) {
       &blob);
   manifest += nativePartition("vendor", *vendor, {{1, 0, 2, bzBytes(*vendor)}},
                               &blob);
+  return payloadContainer(manifest) + blob;
+}
+// Real ZSTD compressed block + RAW/RLE + unknown-size, multi-block frames.
+QByteArray nativeZstdPayloadBytes(QMap<QString, QByteArray> *expected) {
+  QByteArray blob, manifest = vi(3 << 3) + vi(4096);
+  (*expected)["boot"] = nativeImage(2, 'z');
+  manifest += nativePartition("boot", expected->value("boot"),
+      {{14, 0, 2, zstdCompressedBytes()}}, &blob);
+  const QByteArray a = nativeImage(1, 'a'), b = nativeImage(1, 'b'),
+                   c = nativeImage(1, 'c');
+  (*expected)["vendor"] = a + b + c + QByteArray(4096, 0);
+  manifest += nativePartition("vendor", expected->value("vendor"),
+      {{8, 0, 1, xzBytes(a)}, {1, 1, 1, bzBytes(b)},
+       {14, 2, 1, zstdBytes(c)}, {6, 3, 1, {}}}, &blob);
+  (*expected)["system"] = nativeImage(40, 's');
+  manifest += nativePartition("system", expected->value("system"),
+      {{14, 0, 40, zstdBytes(expected->value("system"), true)}}, &blob);
+  (*expected)["product"] = QByteArray(4 * 4096, 'r');
+  manifest += nativePartition("product", expected->value("product"),
+      {{14, 0, 4, zstdBytes(expected->value("product"), false, true)}}, &blob);
   return payloadContainer(manifest) + blob;
 }
 // Minimal single-entry ZIP; method 0 stores, 8 claims deflate.
@@ -1769,7 +1793,7 @@ private slots:
   void nativePayloadRepeatedOperations_data() {
     QTest::addColumn<int>("type");
     QTest::addColumn<int>("workers");
-    for (int type : {0, 1, 8})
+    for (int type : {0, 1, 8, 14})
       for (int workers : {1, 4})
         QTest::newRow(qPrintable(QString("type-%1-workers-%2").arg(type).arg(workers)))
             << type << workers;
@@ -1788,7 +1812,8 @@ private slots:
         const int blocks = 1 + i % 5;
         const QByteArray raw = nativeImage(blocks, char('a' + i));
         const QByteArray encoded = type == 8 ? xzBytes(raw) :
-                                   type == 1 ? bzBytes(raw) : raw;
+                                   type == 1 ? bzBytes(raw) :
+                                   type == 14 ? zstdBytes(raw, i % 2) : raw;
         QVERIFY(!encoded.isEmpty());
         operations << NativeOp{type, block, quint64(blocks), encoded};
         image += raw;
@@ -1891,6 +1916,151 @@ private slots:
     QVERIFY(!QFileInfo::exists(output + "/boot.img"));
     QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
   }
+  void nativePayloadZstdExtraction_data() {
+    QTest::addColumn<bool>("zip");
+    QTest::addColumn<QStringList>("selected");
+    QTest::newRow("payload-all") << false << QStringList();
+    QTest::newRow("stored-zip-all") << true << QStringList();
+    QTest::newRow("payload-selected-compressed") << false << QStringList{"boot"};
+    QTest::newRow("stored-zip-selected-unknown-size") << true << QStringList{"system"};
+  }
+  void nativePayloadZstdExtraction() {
+    QFETCH(bool, zip);
+    QFETCH(QStringList, selected);
+    QMap<QString, QByteArray> expected;
+    const QByteArray payload = nativeZstdPayloadBytes(&expected);
+    const QByteArray bytes = zip ? zipBytes("payload.bin", payload) : payload;
+    const QString file = dir + (zip ? "/ota 包.zip" : "/payload.bin"),
+                  output = dir + "-zstd 中文 images";
+    QVERIFY(put(file, bytes));
+    OugaPreparation preparation;
+    QSignalSpy done(&preparation, &OugaPreparation::finished),
+               ready(&preparation, &OugaPreparation::prepared),
+               progress(&preparation, &OugaPreparation::payloadProgress),
+               rows(&preparation, &OugaPreparation::payloadPartitionFinished);
+    preparation.payload({}, file, output, selected); // No external dumper exists.
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 20000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    QCOMPARE(ready.count(), 1);
+    const auto images = qvariant_cast<QVector<Ouga::Partition>>(ready[0][0]);
+    QCOMPARE(images.size(), selected.isEmpty() ? 4 : selected.size());
+    for (const auto &image : images) {
+      QCOMPARE(read(image.path), expected.value(image.name));
+      QCOMPARE(image.sha256, sha(expected.value(image.name)));
+      QCOMPARE(OugaPackage::digest(image.path, nullptr), image.sha256);
+    }
+    QCOMPARE(rows.count(), images.size());
+    for (const auto &row : rows)
+      QVERIFY(row[1].toBool());
+    QVERIFY(progress.size() >= 2);
+    QCOMPARE(progress.last()[0].toInt(), 100);
+    for (int i = 1; i < progress.size(); ++i)
+      QVERIFY(progress[i][0].toInt() > progress[i - 1][0].toInt());
+    for (auto i = expected.cbegin(); i != expected.cend(); ++i)
+      QCOMPARE(QFileInfo::exists(output + '/' + i.key() + ".img"),
+               selected.isEmpty() || selected.contains(i.key()));
+    QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
+    QCOMPARE(read(file), bytes);
+  }
+  void nativePayloadZstdBounds_data() {
+    QTest::addColumn<int>("fault");
+    const char *names[] = {"truncated-checksum", "invalid-checksum", "short-output",
+        "oversized-output", "trailing-junk", "concatenated-frames", "skippable-frame",
+        "dictionary-required", "oversized-window", "reserved-block-type",
+        "truncated-frame-header", "unknown-size-short-output",
+        "unknown-size-oversized-output", "corrupt-compressed-data"};
+    for (int i = 0; i < int(sizeof(names) / sizeof(names[0])); ++i)
+      QTest::newRow(names[i]) << i;
+  }
+  void nativePayloadZstdBounds() {
+    QFETCH(int, fault);
+    const QByteArray original = nativeImage(2, 'z');
+    QByteArray image = original, encoded = zstdCompressedBytes();
+    QVERIFY(!encoded.isEmpty());
+    switch (fault) {
+    case 0: encoded.chop(1); break;
+    case 1: encoded[encoded.size() - 1] ^= 0x5a; break;
+    case 2: image += QByteArray(4096, 0); break;
+    case 3: image.chop(4096); break;
+    case 4: encoded += "junk"; break;
+    case 5: encoded += zstdCompressedBytes(); break;
+    case 6: encoded = QByteArray::fromHex("502a4d1800000000"); break;
+    case 7:
+      encoded = zstdBytes(original);
+      encoded[4] = char(0xa1); // 1-byte dictionary ID before the 4-byte FCS
+      encoded.insert(5, char(7));
+      break;
+    case 8:
+      encoded = zstdBytes(original, true);
+      encoded[5] = char(0x98); // 512 MiB window, above decoder policy
+      break;
+    case 9:
+      encoded = zstdBytes(original);
+      encoded[9] = char((quint8(encoded[9]) & ~6u) | 6u);
+      break;
+    case 10: encoded = QByteArray::fromHex("28b52ffda0"); break;
+    case 11:
+      encoded = zstdBytes(original, true);
+      image += QByteArray(4096, 0);
+      break;
+    case 12:
+      encoded = zstdBytes(original, true);
+      image.chop(4096);
+      break;
+    case 13: encoded[encoded.size() - 7] ^= 0x40; break;
+    }
+    QByteArray blob, manifest = vi(3 << 3) + vi(4096);
+    const QByteArray boot = nativeImage(1, 'a');
+    manifest += nativePartition("boot", boot, {{0, 0, 1, boot}}, &blob);
+    manifest += nativePartition("vendor", image,
+        {{14, 0, quint64(image.size() / 4096), encoded}}, &blob);
+    const QString file = dir + "/payload.bin", output = dir + "-invalid-zstd";
+    const QByteArray bytes = payloadContainer(manifest) + blob;
+    QVERIFY(put(file, bytes));
+    OugaPreparation preparation;
+    QSignalSpy done(&preparation, &OugaPreparation::finished),
+               ready(&preparation, &OugaPreparation::prepared),
+               progress(&preparation, &OugaPreparation::payloadProgress);
+    preparation.payload({}, file, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 20000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY2(done[0][1].toString().contains("解压失败"),
+             qPrintable(done[0][1].toString()));
+    QCOMPARE(ready.count(), 0);
+    for (const auto &row : progress)
+      QVERIFY(row[0].toInt() < 100);
+    QCOMPARE(read(output + "/boot.img"), boot);
+    QVERIFY(!QFileInfo::exists(output + "/vendor.img"));
+    QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
+    QCOMPARE(read(file), bytes);
+  }
+  void nativePayloadZstdTamperedData() {
+    QMap<QString, QByteArray> expected;
+    QByteArray bytes = nativeZstdPayloadBytes(&expected);
+    const QString file = dir + "/payload.bin", output = dir + "-bad-zstd-digest";
+    QVERIFY(put(file, bytes));
+    QVector<OugaPayloadEntry> entries;
+    OugaPayloadLayout layout;
+    bool delta = false;
+    QString error;
+    QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
+    QCOMPARE(entries[0].ops[0].type, quint32(14));
+    bytes[qsizetype(layout.dataOffset)] ^= 0x40; // Manifest hash is unchanged.
+    QVERIFY(put(file, bytes));
+    OugaPreparation preparation;
+    QSignalSpy done(&preparation, &OugaPreparation::finished),
+               ready(&preparation, &OugaPreparation::prepared),
+               progress(&preparation, &OugaPreparation::payloadProgress);
+    preparation.payload({}, file, output);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 20000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY(done[0][1].toString().contains("sha256"));
+    QCOMPARE(ready.count(), 0);
+    for (const auto &row : progress)
+      QVERIFY(row[0].toInt() < 100);
+    QVERIFY(!QFileInfo::exists(output + "/boot.img"));
+    QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
+  }
   void nativePayloadEligibility() {
     QByteArray boot, vendor;
     const QByteArray payload = nativePayloadBytes(&boot, &vendor);
@@ -1917,8 +2087,11 @@ private slots:
     QVERIFY(!OugaPayloadExtractor::supported(unhashed, {}, layout));
     auto zstd = entries;
     zstd[1].ops[0].type = 14;
-    QVERIFY(!OugaPayloadExtractor::supported(zstd, {}, layout));
+    QVERIFY(OugaPayloadExtractor::supported(zstd, {}, layout));
     QVERIFY(OugaPayloadExtractor::supported(zstd, {"boot"}, layout));
+    auto unsupported = entries;
+    unsupported[1].ops[0].type = 15;
+    QVERIFY(!OugaPayloadExtractor::supported(unsupported, {}, layout));
     auto outside = entries;
     outside[1].ops[0].dataOffset = layout.end;
     QVERIFY(!OugaPayloadExtractor::supported(outside, {}, layout));
@@ -2676,6 +2849,103 @@ private slots:
     QCOMPARE(window.findChild<QTableWidget *>("OugaPartitionTableDataGrid")->rowCount(), 2);
     QCOMPARE(read(source), bytes);
     QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
+  }
+  void widgetNativeZstdUnpackResponsive() {
+    QSettings settings;
+    const QStringList keys = {"Ouga/7z", "Ouga/payload"};
+    QMap<QString, QVariant> previous;
+    for (const auto &key : keys) {
+      previous.insert(key, settings.value(key));
+      settings.setValue(key, dir + "/absent/tool.exe");
+    }
+    const auto restoreSettings = qScopeGuard([&] {
+      for (auto i = previous.cbegin(); i != previous.cend(); ++i)
+        if (i.value().isValid()) settings.setValue(i.key(), i.value());
+        else settings.remove(i.key());
+    });
+    const QByteArray part = nativeImage(2, 'z'), encoded = zstdCompressedBytes();
+    QByteArray image, blob;
+    QVector<NativeOp> operations;
+    // Enough actual operations to expose a blocking decode loop in the GUI.
+    for (int i = 0; i < 8192; ++i) {
+      image += part;
+      operations << NativeOp{14, quint64(i * 2), 2, encoded};
+    }
+    const QByteArray manifest = vi(3 << 3) + vi(4096) +
+        nativePartition("system", image, operations, &blob);
+    const QByteArray bytes = zipBytes("payload.bin", payloadContainer(manifest) + blob);
+    const QString source = dir + "/输入 ZSTD/ota 包.zip", output = dir + "/输出";
+    QVERIFY(QDir().mkpath(QFileInfo(source).absolutePath()));
+    QVERIFY(put(source, bytes));
+    QVERIFY(QDir().mkpath(output));
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(source);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 20000);
+    auto preparation = window.findChild<OugaPreparation *>();
+    auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+    QVERIFY(preparation && progress);
+    QSignalSpy values(preparation, &OugaPreparation::payloadProgress);
+    int unexpectedDialogs = 0, ticksWhileBusy = 0;
+    qint64 maxGap = 0;
+    QElapsedTimer clock;
+    clock.start();
+    QTimer heartbeat;
+    heartbeat.setInterval(5);
+    connect(&heartbeat, &QTimer::timeout, &window, [&] {
+      const qint64 gap = clock.restart();
+      if (window.isBusy()) {
+        ++ticksWhileBusy;
+        maxGap = qMax(maxGap, gap);
+      }
+      for (QWidget *widget : QApplication::topLevelWidgets())
+        if (auto dialog = qobject_cast<QFileDialog *>(widget))
+          if (dialog->isVisible()) {
+            ++unexpectedDialogs;
+            dialog->reject();
+          }
+    });
+    bool capturedProgress = false;
+    connect(preparation, &OugaPreparation::payloadProgress, &window, [&](int percent) {
+      QCOMPARE(progress->value(), percent);
+      if (!capturedProgress && percent >= 42 && percent < 100) {
+        capturedProgress = true;
+        QVERIFY(window.grab().save(dir + "/zstd-unpack-progress.png"));
+      }
+    });
+    heartbeat.start();
+    QElapsedTimer elapsed;
+    elapsed.start();
+    window.findChild<QPushButton *>("UnpackPayloadButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 30000);
+    heartbeat.stop();
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                            ->toPlainText();
+    QVERIFY2(log.contains("Payload解包成功！"), qPrintable(log));
+    QVERIFY(log.contains("发现 1 个分区: system"));
+    QVERIFY(log.contains("[提取] system.img... OK"));
+    QVERIFY(!log.contains("预解压"));
+    QCOMPARE(unexpectedDialogs, 0);
+    QVERIFY2(ticksWhileBusy >= 2, "UI heartbeat did not run during extraction");
+    QVERIFY2(maxGap < 1000, qPrintable(QString("UI heartbeat gap: %1 ms").arg(maxGap)));
+    QVERIFY(capturedProgress);
+    QVERIFY(values.size() >= 3);
+    for (int i = 1; i < values.size(); ++i)
+      QVERIFY(values[i][0].toInt() > values[i - 1][0].toInt());
+    QCOMPARE(progress->value(), 100);
+    QCOMPARE(read(output + "/images/system.img"), image);
+    QCOMPARE(OugaPackage::digest(output + "/images/system.img", nullptr), sha(image));
+    QCOMPARE(read(source), bytes);
+    QCOMPARE(window.findChild<QTableWidget *>("OugaPartitionTableDataGrid")->rowCount(), 1);
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.grab().save(dir + "/zstd-unpack-complete.png"));
+    qInfo("ZSTD GUI fixture: elapsed=%lld ms, busy heartbeats=%d, max gap=%lld ms",
+          elapsed.elapsed(), ticksWhileBusy, maxGap);
     QVERIFY(window.close());
   }
   void widgetUnpackPreservesExistingImages_data() {

@@ -4,6 +4,11 @@
 # Override with OUGA_CODEC_ROOT=<dir containing include/ and lib/>.
 SOURCES += $$PWD/src/services/ougapayloadextractor.cpp
 HEADERS += $$PWD/src/services/ougapayloadextractor.h
+# Pinned decoder-only Zstandard 1.5.7, statically compiled from upstream's
+# single-file library. No zstd executable, Python module or extra DLL is needed.
+SOURCES += $$PWD/third_party/zstd/zstddeclib.c
+HEADERS += $$PWD/third_party/zstd/zstd.h $$PWD/third_party/zstd/zstd_errors.h
+INCLUDEPATH += $$PWD/third_party/zstd
 isEmpty(OUGA_CODEC_ROOT) {
     OUGA_COMPILER = $$system(where $$QMAKE_CXX 2>nul)
     OUGA_COMPILER = $$first(OUGA_COMPILER)

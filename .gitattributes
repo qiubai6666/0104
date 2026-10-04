@@ -1,6 +1,9 @@
 # Preserve bundled dependency bytes so manifest SHA-256 survives checkout.
 /qiubai/bin/** -text
 
+# Keep the pinned upstream codec and its provenance hashes reproducible.
+/third_party/zstd/** text eol=lf
+
 # The shared platform-tools files are also checksum-preserved build inputs.
 /qiubai/*.exe -text
 /qiubai/*.dll -text
