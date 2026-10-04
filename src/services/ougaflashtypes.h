@@ -75,8 +75,8 @@ QString baseName(const QString &name);
 bool safeName(const QString &name);
 bool logicalName(const QString &name);
 bool blockedImageName(const QString &name);
-QStringList criticalImages(Platform platform,
-                           FlashMode mode = FlashMode::RepairFastbootd);
+QStringList criticalImages(Platform platform);
+QStringList criticalExtractionImages(Platform platform);
 QString afterSalesSlot(const Device &device, QString *error = nullptr);
 bool needsAdditionalImages(FlashMode mode);
 bool startsInFastbootd(FlashMode mode);

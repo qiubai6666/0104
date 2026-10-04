@@ -31,25 +31,27 @@ bool blockedImageName(const QString &name) {
          n == "super_empty" || n == "payload" || n.contains("gpt") ||
          n.startsWith("prog_");
 }
-QStringList criticalImages(Platform platform, FlashMode mode) {
+QStringList criticalImages(Platform platform) {
   if (platform != Platform::Qualcomm && platform != Platform::MediaTek)
     return {};
-  if (mode == FlashMode::AfterSalesBootloader) {
-    QStringList names = {"boot", "dtbo", "init_boot"};
-    if (platform == Platform::MediaTek)
-      names << "lk";
-    else
-      names << "modem" << "recovery";
-    names << "vbmeta" << "vbmeta_system" << "vbmeta_vendor" << "vendor_boot";
-    return names;
-  }
-  QStringList names = {"boot",        "init_boot",     "dtbo",         "vbmeta",
-                       "vendor_boot", "vbmeta_system", "vbmeta_vendor"};
+  // Repair and after-sales Bootloader writes use the same reference order.
+  QStringList names = {"boot", "dtbo", "init_boot"};
   if (platform == Platform::MediaTek)
     names << "lk";
   else
     names << "modem" << "recovery";
+  names << "vbmeta" << "vbmeta_system" << "vbmeta_vendor" << "vendor_boot";
   return names;
+}
+QStringList criticalExtractionImages(Platform platform) {
+  // Reference shortcut selection/log order is not its repair write order.
+  if (platform == Platform::Qualcomm)
+    return {"boot", "recovery", "dtbo", "modem", "vbmeta", "vendor_boot",
+            "init_boot", "vbmeta_system", "vbmeta_vendor"};
+  if (platform == Platform::MediaTek)
+    return {"boot", "init_boot", "dtbo", "lk", "vbmeta", "vendor_boot",
+            "vbmeta_system", "vbmeta_vendor"};
+  return {};
 }
 QString afterSalesSlot(const Device &device, QString *error) {
   if (error)

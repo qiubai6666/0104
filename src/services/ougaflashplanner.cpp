@@ -104,7 +104,7 @@ struct Builder {
     return true;
   }
   bool flashCritical(const QVector<Partition> &images, const QString &missing) {
-    for (const QString &name : criticalImages(p.device.platform, p.options.mode)) {
+    for (const QString &name : criticalImages(p.device.platform)) {
       auto image =
           std::find_if(images.cbegin(), images.cend(), [&](const Partition &i) {
             return baseName(i.name) == name;
@@ -409,7 +409,7 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     }
     QVector<Partition> active;
     const QStringList critical =
-        af ? criticalImages(d.platform, options.mode) : QStringList();
+        af ? criticalImages(d.platform) : QStringList();
     for (const Partition &image : ps) {
       const QString name = baseName(image.name);
       if (name != "super" && !merged.contains(name) && !critical.contains(name))

@@ -379,7 +379,7 @@ QStringList commands(const Plan &p) {
 class FakeRunner final : public OugaCommandRunner {
 public:
   Device device = fixtureDevice();
-  QStringList trace;
+  QStringList trace, boundTrace;
   QString failAt, failOutput = "FAILED (remote: test failure)";
   int failCode = 1;
   bool normal = true, holdFlash = false, stuckMode = false,
@@ -394,6 +394,7 @@ public:
     active = true;
     QStringList a = args.value(0) == "-s" ? args.mid(2) : args;
     trace << a.join(' ');
+    boundTrace << args.join(' ');
     if (args.value(0) == "-s" && args.value(1) != device.serial) {
       complete(-1, false, "ERROR: wrong device");
       return;
@@ -1328,13 +1329,16 @@ private slots:
     QCOMPARE(error.isEmpty(), !target.isEmpty());
   }
   void sharedRules() {
-    QCOMPARE(
-        criticalImages(Platform::Qualcomm),
-        QStringList({"boot", "init_boot", "dtbo", "vbmeta", "vendor_boot",
-                     "vbmeta_system", "vbmeta_vendor", "modem", "recovery"}));
-    QCOMPARE(criticalImages(Platform::MediaTek),
-             QStringList({"boot", "init_boot", "dtbo", "vbmeta", "vendor_boot",
-                          "vbmeta_system", "vbmeta_vendor", "lk"}));
+    QCOMPARE(criticalImages(Platform::Qualcomm), afterSalesCritical(Platform::Qualcomm));
+    QCOMPARE(criticalImages(Platform::MediaTek), afterSalesCritical(Platform::MediaTek));
+    QCOMPARE(criticalExtractionImages(Platform::Qualcomm),
+             QStringList({"boot", "recovery", "dtbo", "modem", "vbmeta", "vendor_boot",
+                          "init_boot", "vbmeta_system", "vbmeta_vendor"}));
+    QCOMPARE(criticalExtractionImages(Platform::MediaTek),
+             QStringList({"boot", "init_boot", "dtbo", "lk", "vbmeta", "vendor_boot",
+                          "vbmeta_system", "vbmeta_vendor"}));
+    QVERIFY(criticalExtractionImages(Platform::Unknown).isEmpty());
+    QVERIFY(criticalExtractionImages(Platform(99)).isEmpty());
     QVERIFY(criticalImages(Platform::Unknown).isEmpty());
     QVERIFY(criticalImages(Platform(99)).isEmpty());
     for (int i = 0; i <= 6; ++i) {
@@ -2459,6 +2463,43 @@ private:
         : QStringList{"boot", "dtbo", "init_boot", "lk", "vbmeta",
                       "vbmeta_system", "vbmeta_vendor", "vendor_boot"};
   }
+  QVector<Partition> repairImages(Platform platform) {
+    QVector<Partition> ps;
+    for (const QString &name : afterSalesCritical(platform)) ps << image(name);
+    // Neither source enumeration nor UI selection order should affect writes.
+    std::reverse(ps.begin(), ps.end());
+    return ps;
+  }
+  Device repairDevice(Platform platform, const QString &start, int layout) {
+    auto device = fixtureDevice(platform, start, false);
+    for (const QString &name : afterSalesCritical(platform)) {
+      if (layout == 0 || (layout == 2 && name != "boot" && name != "modem" && name != "lk")) continue;
+      device.partitions.remove(name + "_a");
+      device.partitions.remove(name + "_b");
+      device.sizes.remove(name + "_a");
+      device.sizes.remove(name + "_b");
+      device.partitions.insert(name);
+      device.sizes[name] = 1024 * 1024;
+      device.variables["has-slot:" + name] = "no";
+    }
+    return device;
+  }
+  QStringList repairCommands(Platform platform, int layout) {
+    QStringList cmds;
+    for (const QString &name : afterSalesCritical(platform)) {
+      if (layout == 1 || (layout == 2 && (name == "boot" || name == "modem" || name == "lk")))
+        cmds << "flash " + name;
+      else cmds << "flash " + name + "_a" << "flash " + name + "_b";
+    }
+    return cmds << "reboot fastboot";
+  }
+  QStringList repairTrace(const FakeRunner &runner) {
+    QStringList out;
+    for (const QString &cmd : runner.trace)
+      if (!cmd.startsWith("getvar ") && cmd != "devices")
+        out << (cmd.startsWith("flash ") ? cmd.section(' ', 0, 1) : cmd);
+    return out;
+  }
   Device afterSalesDevice(Platform platform, const QString &start,
                           int largerSlot, bool slotless) {
     Device device = fixtureDevice(platform, start, false);
@@ -2518,6 +2559,197 @@ private:
     return cmds;
   }
 private slots:
+  void repairFastbootdSequence_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("start");
+    QTest::addColumn<int>("layout");
+    for (int pf : {1, 2})
+      for (const QString slot : {"a", "b"})
+        for (int layout = 0; layout < 3; ++layout)
+          QTest::newRow(qPrintable(QString("%1-%2-layout%3").arg(pf).arg(slot).arg(layout)))
+              << pf << slot << layout;
+  }
+  void repairFastbootdSequence() {
+    QFETCH(int, platform); QFETCH(QString, start); QFETCH(int, layout);
+    const Platform pf = Platform(platform);
+    const auto ps = repairImages(pf);
+    const auto device = repairDevice(pf, start, layout);
+    auto opts = options(FlashMode::RepairFastbootd, pf);
+    // A repair must not inherit normal flashing's selected destructive options.
+    opts.clearData = opts.autoReboot = true;
+    opts.formatToolsReady = false;
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &plan, &error), qPrintable(error));
+    const auto expected = repairCommands(pf, layout);
+    QCOMPARE(commands(plan), expected);
+    QCOMPARE(plan.options.targetSlot, start);
+    QVERIFY(!plan.options.clearData && !plan.options.autoReboot);
+    QCOMPARE(plan.flashCount, expected.size() - 1);
+    QCOMPARE(plan.totalBytes, qint64(plan.flashCount) * 512);
+    QCOMPARE(plan.steps.last().kind, Step::ModeSwitch);
+    QVERIFY(plan.steps.last().userspace);
+    for (const auto &s : plan.steps)
+      if (!s.image.isEmpty()) QVERIFY(!s.userspace);
+  }
+  void repairFastbootdExecution_data() { repairFastbootdSequence_data(); }
+  void repairFastbootdExecution() {
+    QFETCH(int, platform); QFETCH(QString, start); QFETCH(int, layout);
+    const Platform pf = Platform(platform);
+    FakeRunner runner;
+    runner.device = repairDevice(pf, start, layout);
+    auto opts = options(FlashMode::RepairFastbootd, pf);
+    opts.clearData = opts.autoReboot = true;
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(repairImages(pf), runner.device, opts, &plan, &error), qPrintable(error));
+    QVERIFY(put(dir + "/fastboot.exe", "fake"));
+    OugaFlashService service(&runner);
+    service.configure(dir + "/fastboot.exe", dir + "/logs");
+    service.setTiming({1, 1500, 1000, 3, 0});
+    int fbdProbes = 0;
+    runner.beforeProbe = [&](Device &d, int) { if (d.userspace) ++fbdProbes; };
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    QCOMPARE(repairTrace(runner), repairCommands(pf, layout));
+    for (const QString &cmd : runner.boundTrace)
+      QVERIFY(cmd.startsWith("-s TEST-SERIAL "));
+    QVERIFY(runner.device.userspace);
+    QCOMPARE(runner.device.slot, start);
+    QVERIFY(fbdProbes >= 3);
+    QCOMPARE(progress.last()[0].toInt(), plan.flashCount);
+    QCOMPARE(progress.last()[1].toInt(), plan.flashCount);
+    const QDir logs(dir + "/logs");
+    const auto sessions = logs.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(sessions.size(), 1);
+    const QDir session(logs.filePath(sessions[0]));
+    const auto result = QJsonDocument::fromJson(read(session.filePath("result.json"))).object();
+    QVERIFY(result["success"].toBool());
+    QCOMPARE(result["completedWrites"].toInt(), plan.flashCount);
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void repairFastbootdPreflight_data() {
+    QTest::addColumn<int>("platform"); QTest::addColumn<int>("failure");
+    for (int pf : {1, 2})
+      for (int failure = 0; failure < 10; ++failure)
+        QTest::newRow(qPrintable(QString("%1-invalid%2").arg(pf).arg(failure))) << pf << failure;
+  }
+  void repairFastbootdPreflight() {
+    QFETCH(int, platform); QFETCH(int, failure);
+    const Platform pf = Platform(platform);
+    auto device = repairDevice(pf, "b", 0);
+    auto ps = repairImages(pf);
+    auto opts = options(FlashMode::RepairFastbootd, pf);
+    opts.validateTable = false; // Cannot disable basic target/image safety.
+    if (failure == 0) ps.removeLast();
+    if (failure == 1) ps.last().selected = false;
+    if (failure == 2) ps << ps.first();
+    if (failure == 3) device.sizes.remove("vendor_boot_b");
+    if (failure == 4) device.sizes["vendor_boot_b"] = 16;
+    if (failure == 5) device.partitions.remove("vendor_boot_b");
+    if (failure == 6) device.unlocked = false;
+    if (failure == 7) device.unlockKnown = false;
+    if (failure == 8) device.userspace = true;
+    if (failure == 9) opts.packagePlatform = pf == Platform::Qualcomm ? Platform::MediaTek : Platform::Qualcomm;
+    Plan plan; QString error;
+    QVERIFY(!OugaFlashPlanner::build(ps, device, opts, &plan, &error));
+    QVERIFY(!error.isEmpty());
+  }
+  void repairFastbootdFailureBoundary_data() {
+    QTest::addColumn<int>("platform"); QTest::addColumn<int>("failure");
+    QTest::addColumn<QString>("target");
+    for (int pf : {1, 2}) {
+      for (int failure = 0; failure < 5; ++failure)
+        for (const QString target : {"boot_a", "boot_b", "dtbo_b", "vendor_boot_b"})
+          QTest::newRow(qPrintable(QString("%1-failure%2-%3").arg(pf).arg(failure).arg(target))) << pf << failure << target;
+      for (int failure = 5; failure <= 10; ++failure)
+        QTest::newRow(qPrintable(QString("%1-mode-or-image%2").arg(pf).arg(failure))) << pf << failure << QString("vendor_boot_b");
+    }
+  }
+  void repairFastbootdFailureBoundary() {
+    QFETCH(int, platform); QFETCH(int, failure); QFETCH(QString, target);
+    const Platform pf = Platform(platform);
+    FakeRunner runner;
+    runner.device = repairDevice(pf, "b", 0);
+    const auto ps = repairImages(pf);
+    auto opts = options(FlashMode::RepairFastbootd, pf);
+    opts.clearData = opts.autoReboot = true;
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, runner.device, opts, &plan, &error), qPrintable(error));
+    QVERIFY(put(dir + "/fastboot.exe", "fake"));
+    OugaFlashService service(&runner);
+    service.configure(dir + "/fastboot.exe", dir + "/logs");
+    service.setTiming({1, 200, 100, 3, 0});
+    bool injected = false;
+    if (failure < 3 || failure == 7) {
+      runner.failAt = failure == 7 ? "reboot fastboot" : "flash " + target;
+      runner.failCode = failure == 0 ? 0 : 2;
+      runner.normal = failure != 2;
+      runner.failOutput = failure == 1 ? "OKAY\nFinished" : "FAILED (remote: injected repair failure)";
+    } else if (failure == 5) {
+      runner.stuckMode = true;
+    } else if (failure == 9) {
+      runner.beforeProbe = [&](Device &d, int) {
+        if (d.userspace) { injected = true; d.sizes["boot_a"] += 1; }
+      };
+    } else {
+      runner.after = [&](const QStringList &args) {
+        const QString trigger = failure == 8 ? "boot_a" : target;
+        if (args.value(0) != "flash" || args.value(1) != trigger) return;
+        injected = true;
+        if (failure == 3) service.requestStop();
+        if (failure == 4) runner.device.serial = "REPLACEMENT";
+        if (failure == 6) runner.disconnected = true;
+        if (failure == 8) {
+          const auto vendor = std::find_if(ps.cbegin(), ps.cend(), [](const Partition &p) {
+            return p.name == "vendor_boot";
+          });
+          QVERIFY(vendor != ps.cend());
+          QVERIFY(put(vendor->path, QByteArray(512, 'x')));
+        }
+        if (failure == 10) runner.device.slot = "a";
+      };
+    }
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(!done[0][0].toBool());
+    const auto trace = repairTrace(runner);
+    if (failure < 3 || failure == 7) {
+      QVERIFY(std::any_of(runner.trace.cbegin(), runner.trace.cend(), [&](const QString &cmd) { return cmd.startsWith(runner.failAt); }));
+    } else if (failure != 5) {
+      QVERIFY(injected);
+    }
+    if (failure < 4) {
+      const int index = repairCommands(pf, 0).indexOf("flash " + target);
+      QVERIFY(index >= 0);
+      QCOMPARE(trace, repairCommands(pf, 0).mid(0, index + 1));
+      // Progress signals describe the current stage; the durable result records
+      // the just-finished write even if stop prevents another stage signal.
+      QCOMPARE(progress.last()[0].toInt(), index);
+      const QDir logs(dir + "/logs");
+      const auto sessions = logs.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+      QCOMPARE(sessions.size(), 1);
+      const auto result = QJsonDocument::fromJson(read(QDir(logs.filePath(sessions[0])).filePath("result.json"))).object();
+      QCOMPARE(result["completedWrites"].toInt(), index + (failure == 3 ? 1 : 0));
+      QVERIFY(!result["success"].toBool());
+    }
+    if (failure == 8) QVERIFY(!trace.contains("flash vendor_boot_a"));
+    if (failure == 8) QVERIFY(!trace.contains("reboot fastboot"));
+    if (failure == 4) {
+      // The old serial remains bound. A replacement must not receive a command;
+      // a last-write replacement can be detected by the attempted old-serial reboot.
+      for (const QString &cmd : runner.boundTrace) QVERIFY(cmd.startsWith("-s TEST-SERIAL "));
+      if (target != "vendor_boot_b") QVERIFY(!trace.contains("reboot fastboot"));
+      QVERIFY(!runner.device.userspace);
+    }
+    for (const QString &cmd : trace)
+      QVERIFY(!cmd.startsWith("erase ") && !cmd.startsWith("set_active ") && cmd != "-w" && cmd != "reboot");
+    QCOMPARE(runner.device.slot, failure == 10 ? QString("a") : QString("b"));
+    QVERIFY(!DeviceOperationLease::owner());
+  }
   void afterSalesBootloaderSequence_data() {
     QTest::addColumn<int>("platform");
     QTest::addColumn<QString>("start");

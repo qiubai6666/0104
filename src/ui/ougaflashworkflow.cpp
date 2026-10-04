@@ -265,9 +265,9 @@ void OugaFlashWindow::extractPayload(bool all) {
       return;
     }
     if (selection == "高通修复FastbootD关键分区")
-      m_extractNames = criticalImages(Platform::Qualcomm);
+      m_extractNames = criticalExtractionImages(Platform::Qualcomm);
     else if (selection == "联发科修复FastbootD关键分区")
-      m_extractNames = criticalImages(Platform::MediaTek);
+      m_extractNames = criticalExtractionImages(Platform::MediaTek);
     else if (selection != "云解包方案-从云端提取线刷文件") {
       if (!safeName(selection)) {
         log("错误：无效的分区名称");

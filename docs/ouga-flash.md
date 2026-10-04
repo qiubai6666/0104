@@ -222,3 +222,14 @@ Release 使用 Qt 6.11.2 MinGW；成功后显式传本次 ExecutablePath、匹�
 - 现有设备操作互斥 34、进程管理 16、界面资源 11、本地回环网络 24、依赖 83 项全部通过，0 跳过。依赖测试显式使用本轮资源快照中的真实捆绑工具；adb/fastboot 仅查询版本，Payload/7z/lpmake 仅处理 TEMP 夹具，不启动共享 ADB Server，不操作手机。
 - Qt 6.11.2 MinGW Release 构建并以 PreserveExistingFiles 更新正式 OrangeToolsApp；构建、正式包及 TEMP 运行验证副本的 EXE SHA-256 一致：7B8F43FAF2D3A611CC76267841DF2150EBC7C2F5A10E927DCF8BDD9752A0C278。原部署目录的 26 个文件全部保留，除 EXE 外 25 个文件摘要不变；17 个本次必需部署文件与验证副本逐项摘要一致。Qt6Test.dll 和测试 EXE 只放 TEMP，未加入正式运行包。
 - 在不包含开发 Qt/MinGW 路径的 PATH 下，TEMP 发布副本 Smoke 的 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Concurrent、SVG 全部通过，插件仅从验证副本加载；该副本再次运行售后定向回归，147 通过、0 失败、0 跳过。未启动正式主程序、解包真实 ROM 或连接/刷写手机。本轮不代表整体逐行复刻完成或真机兼容性认证。
+
+## 2026-10-04 修复 FastbootD 顺序与快捷提取对照
+
+- 机型代码提示已接入全量解包：从所选 Payload / ZIP 同目录的 payload_properties.txt 读取 ota_target_version，按参考的 73 条映射在日志显示刷机包对应机型。它不是连接设备的机型匹配认证；缺少属性或未收录代码不能视为匹配通过。本轮只核实该入口，没有重复修改窗口或机型提示。
+- 核对 VioletToolBox 的 FixFastbootDButton_Click（6160 起）及 SMT 同名方法（39889 起）：实际修复顺序与售后 Bootloader 关键阶段相同，高通为 boot、dtbo、init_boot、modem、recovery、vbmeta、vbmeta_system、vbmeta_vendor、vendor_boot；MTK 为 boot、dtbo、init_boot、lk、vbmeta、vbmeta_system、vbmeta_vendor、vendor_boot。本轮统一这两个刷写入口的顺序并移除不再需要的 mode 参数。每个真实有槽目标依次 A/B，无槽目标只写一次。
+- 快捷提取列表另设纯 helper，保持参考日志/选择顺序：高通为 boot、recovery、dtbo、modem、vbmeta、vendor_boot、init_boot、vbmeta_system、vbmeta_vendor；MTK 为 boot、init_boot、dtbo、lk、vbmeta、vendor_boot、vbmeta_system、vbmeta_vendor。它与实际刷写顺序分离，不增添按钮或操作选项。
+- 保留已约定安全差异：参考缺少镜像会跳过、部分刷写成功也可能进入 FastbootD；本版全部必需镜像、真实目标、解锁与容量须在首次写前确认，任一步失败或停止就结束。修复不继承清数据/自动重启，全部成功后才向原序列号发送 reboot fastboot，连续 3 次稳定查询通过后结束并停留 FastbootD。设备替换后绝不改绑新序列号；若替换发生在最后写入结束，下一次向旧序列号发送的命令失败后停止，不把替换设备接管为成功。
+- 新增 96 项数据用例：12 项独立参考命令序列（两平台、A/B 起始槽、双槽/无槽/混合目标）、12 项 FakeRunner 完整执行与持久结果、20 项预检拒绝、52 项故障和停止边界。覆盖零退出但 FAILED、非零退出但 OKAY、异常退出、各分区边界停止、断连、设备替换、模式超时、镜像变更及活动槽/布局变化。停止后结果记录已成功写入次数，阶段进度不虚报新的成功；所有刷机命令均注入 FakeRunner。
+- 独立序列红测在旧实现上 2 通过、12 失败（含初始化/清理），修复后最终定向 99 通过、0 失败；Windows 原生完整欧加回归 951 通过、0 失败、0 跳过。现有设备操作互斥 34、进程管理 16、界面资源 11、本地回环网络 24、捆绑依赖 83 项全部通过且无跳过；依赖工具仅执行版本查询和本轮 TEMP 小型夹具，不启动共享 ADB Server 或操作手机。
+- Qt 6.11.2 MinGW Release 已以 PreserveExistingFiles 更新 OrangeToolsApp；构建、正式包及 TEMP 验证副本的 EXE SHA-256 一致：37B883DEC0EB3DF2D231A1AD8A41F070121EEBEE52F65364E979EAA24EC3BB28。26 个既有文件均保留，仅 EXE 摘要变化，17 个必需部署文件与验证副本逐项一致。Qt6Test.dll 与测试 EXE 只在 TEMP。
+- 移除开发 Qt/MinGW PATH 后，隔离副本 Smoke 的 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Concurrent、SVG 均通过，插件仅来自验证副本；修复及售后定向回归 241 通过、0 失败、0 跳过。未启动正式主程序、提取真实 ROM 或连接/刷写手机；此轮证明上述顺序修复和模拟/部署验证，不代表整体完全复刻或真机兼容验收完成。
