@@ -498,6 +498,68 @@ class OugaTests : public QObject {
     o.autoReboot = false;
     return o;
   }
+  Device standardFbdDevice(Platform platform, const QString &slot,
+                           int modemLayout) {
+    // 0: no selected modem; 1: physical A/B modem; 2: slotless modem.
+    Device device = fixtureDevice(platform, slot);
+    for (const QString suffix : {"a", "b"}) {
+      device.partitions.insert("modem_backup_" + suffix);
+      device.sizes["modem_backup_" + suffix] = 1024 * 1024;
+      if (modemLayout != 1) {
+        device.partitions.remove("modem_" + suffix);
+        device.sizes.remove("modem_" + suffix);
+      }
+    }
+    if (modemLayout == 2) {
+      device.partitions.insert("modem");
+      device.sizes["modem"] = 1024 * 1024;
+    }
+    return device;
+  }
+  QVector<Partition> standardFbdImages(const QString &slot, int modemLayout) {
+    // Opposite source suffixes must not override the actual active slot.
+    const QString opposite = slot == "a" ? "b" : "a";
+    QVector<Partition> ps = {image("system_" + opposite, QByteArray(128, 's')),
+                             image("modem_backup", QByteArray(96, 'r')),
+                             image("boot_" + opposite, QByteArray(64, 'b')),
+                             image("persist", QByteArray(32, 'p'))};
+    if (modemLayout)
+      ps << image("modem_" + opposite, QByteArray(48, 'm'));
+    return ps;
+  }
+  QStringList standardFbdCommands(FlashMode mode, Platform platform,
+                                  const QString &slot, int modemLayout,
+                                  bool clearData, bool autoReboot) {
+    // Reference sequence with the agreed platform/target safeguards;
+    // independent of Plan.steps (including the known after-sales differences).
+    const bool deferred = modemLayout &&
+        (mode == FlashMode::AfterSalesFastbootd ||
+         (platform == Platform::Qualcomm && modemLayout == 1));
+    QStringList expected = {"delete-logical-partition system_a-cow",
+                             "flash persist"};
+    if (modemLayout && !deferred)
+      expected << (modemLayout == 2 ? "flash modem" : "flash modem_" + slot);
+    expected << "flash boot_" + slot << "flash modem_backup_" + slot
+             << "flash system_" + slot;
+    if (deferred) {
+      if (platform == Platform::Qualcomm && modemLayout == 1)
+        expected << "reboot bootloader";
+      if (modemLayout == 2)
+        expected << "flash modem";
+      else
+        expected << "flash modem_a" << "flash modem_b";
+      if (platform == Platform::Qualcomm && modemLayout == 1)
+        expected << "reboot fastboot";
+    }
+    if (clearData) {
+      expected << "erase userdata" << "erase metadata";
+      if (platform == Platform::Qualcomm)
+        expected << "-w";
+    }
+    if (autoReboot)
+      expected << "reboot";
+    return expected;
+  }
   void configure(OugaFlashService &s) {
     OugaFlashService::Timing t;
     t.pollMs = 1;
@@ -2206,6 +2268,186 @@ private slots:
     s.confirmCheckpoint(false);
     QCOMPARE(done.count(), 1);
     QVERIFY(!done[0][0].toBool());
+  }
+  void standardFbdSequence_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<int>("modemLayout");
+    QTest::addColumn<bool>("clearData");
+    QTest::addColumn<bool>("autoReboot");
+    for (FlashMode mode : {FlashMode::Normal, FlashMode::AfterSalesFastbootd})
+      for (Platform platform : {Platform::Qualcomm, Platform::MediaTek})
+        for (const QString slot : {"a", "b"})
+          for (int modemLayout = 0; modemLayout < 3; ++modemLayout)
+            for (bool clearData : {false, true})
+              for (bool autoReboot : {false, true})
+                QTest::newRow(qPrintable(QString("m%1-p%2-%3-modem%4-clear%5-reboot%6")
+                    .arg(int(mode)).arg(int(platform)).arg(slot).arg(modemLayout)
+                    .arg(clearData).arg(autoReboot)))
+                    << int(mode) << int(platform) << slot << modemLayout
+                    << clearData << autoReboot;
+  }
+  void standardFbdSequence() {
+    QFETCH(int, mode);
+    QFETCH(int, platform);
+    QFETCH(QString, slot);
+    QFETCH(int, modemLayout);
+    QFETCH(bool, clearData);
+    QFETCH(bool, autoReboot);
+    const Platform pf = Platform(platform);
+    const FlashMode fm = FlashMode(mode);
+    const Device device = standardFbdDevice(pf, slot, modemLayout);
+    const auto ps = standardFbdImages(slot, modemLayout);
+    auto opts = options(fm, pf);
+    opts.clearData = clearData;
+    opts.autoReboot = autoReboot;
+    opts.formatToolsReady = true;
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &plan, &error), qPrintable(error));
+    QCOMPARE(commands(plan), standardFbdCommands(fm, pf, slot, modemLayout,
+                                                clearData, autoReboot));
+    QCOMPARE(plan.device.partitions, device.partitions);
+    QCOMPARE(plan.device.sizes, device.sizes);
+    QCOMPARE(plan.options.targetSlot, slot);
+    const bool dual = modemLayout == 1 &&
+                      (pf == Platform::Qualcomm || fm == FlashMode::AfterSalesFastbootd);
+    QCOMPARE(plan.flashCount, 4 + (modemLayout ? (dual ? 2 : 1) : 0));
+    QCOMPARE(plan.totalBytes, qint64(320 + (modemLayout ? (dual ? 96 : 48) : 0)));
+    for (const auto &step : plan.steps) {
+      const bool bootloaderModem = pf == Platform::Qualcomm && modemLayout == 1 &&
+                                   step.arguments.value(0) == "flash" &&
+                                   (step.target == "modem_a" || step.target == "modem_b");
+      if (step.kind != Step::ModeSwitch)
+        QCOMPARE(step.userspace, !bootloaderModem);
+    }
+  }
+  void standardFbdExecution_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<int>("modemLayout");
+    for (FlashMode mode : {FlashMode::Normal, FlashMode::AfterSalesFastbootd})
+      for (Platform platform : {Platform::Qualcomm, Platform::MediaTek})
+        for (const QString slot : {"a", "b"})
+          for (int modemLayout : {1, 2})
+            QTest::newRow(qPrintable(QString("m%1-p%2-%3-modem%4")
+                .arg(int(mode)).arg(int(platform)).arg(slot).arg(modemLayout)))
+                << int(mode) << int(platform) << slot << modemLayout;
+  }
+  void standardFbdExecution() {
+    QFETCH(int, mode);
+    QFETCH(int, platform);
+    QFETCH(QString, slot);
+    QFETCH(int, modemLayout);
+    const Platform pf = Platform(platform);
+    const FlashMode fm = FlashMode(mode);
+    FakeRunner runner;
+    runner.device = standardFbdDevice(pf, slot, modemLayout);
+    // Readable markers satisfy dependency preflight only. FakeRunner never
+    // executes these files or falls back to real platform-tools.
+    for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"})
+      QVERIFY(put(dir + "/" + name, "fixture-only"));
+    OugaFlashService service(&runner);
+    configure(service);
+    auto opts = options(fm, pf);
+    opts.clearData = opts.autoReboot = opts.formatToolsReady = true;
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(standardFbdImages(slot, modemLayout), runner.device,
+                                   opts, &plan, &error), qPrintable(error));
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    QStringList actual;
+    for (const QString &line : runner.trace) {
+      const QStringList args = line.split(' ');
+      if (args.value(0) != "getvar" && args.value(0) != "devices")
+        actual << args.mid(0, args.value(0) == "flash" ? 2 : -1).join(' ');
+    }
+    QCOMPARE(actual, standardFbdCommands(fm, pf, slot, modemLayout, true, true));
+    QVERIFY(!progress.isEmpty());
+    QCOMPARE(progress.last()[0].toInt(), plan.flashCount);
+    QCOMPARE(progress.last()[1].toInt(), plan.flashCount);
+    QCOMPARE(runner.device.slot, slot);
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void standardFbdFailureBoundary_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<int>("failure");
+    for (FlashMode mode : {FlashMode::Normal, FlashMode::AfterSalesFastbootd})
+      for (Platform platform : {Platform::Qualcomm, Platform::MediaTek})
+        for (const QString slot : {"a", "b"})
+          for (int failure = 0; failure < 6; ++failure)
+            QTest::newRow(qPrintable(QString("m%1-p%2-%3-failure%4")
+                .arg(int(mode)).arg(int(platform)).arg(slot).arg(failure)))
+                << int(mode) << int(platform) << slot << failure;
+  }
+  void standardFbdFailureBoundary() {
+    QFETCH(int, mode);
+    QFETCH(int, platform);
+    QFETCH(QString, slot);
+    QFETCH(int, failure);
+    const Platform pf = Platform(platform);
+    const FlashMode fm = FlashMode(mode);
+    FakeRunner runner;
+    runner.device = standardFbdDevice(pf, slot, 1);
+    for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"})
+      QVERIFY(put(dir + "/" + name, "fixture-only"));
+    OugaFlashService service(&runner);
+    configure(service);
+    auto opts = options(fm, pf);
+    opts.clearData = opts.autoReboot = opts.formatToolsReady = true;
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(standardFbdImages(slot, 1), runner.device,
+                                   opts, &plan, &error), qPrintable(error));
+    const bool dual = pf == Platform::Qualcomm || fm == FlashMode::AfterSalesFastbootd;
+    const QString firstModem = "flash modem_" + (dual ? QString("a") : slot);
+    const QString lastModem = "flash modem_" + (dual ? QString("b") : slot);
+    if (failure == 0) {
+      runner.failAt = firstModem;
+      runner.failCode = 0; // FAILED must override a zero exit code.
+    } else if (failure == 1) {
+      runner.failAt = lastModem;
+      runner.failCode = 2;
+      runner.failOutput = "unclassified native output";
+    } else if (failure == 2) {
+      runner.failAt = firstModem;
+      runner.normal = false;
+      runner.failCode = -1;
+    } else if (failure == 3) {
+      runner.after = [&](const QStringList &args) {
+        if (args.mid(0, 2).join(' ') == firstModem)
+          service.requestStop();
+      };
+    } else if (failure == 4) {
+      runner.failAt = "delete-logical-partition system_a-cow";
+      runner.failOutput = "FAILED transport read failed: partition does not exist";
+    } else {
+      runner.failAt = pf == Platform::Qualcomm ? "reboot bootloader" : "flash boot_" + slot;
+    }
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(!done[0][0].toBool());
+    const QString boundary = failure == 3 ? firstModem : runner.failAt;
+    QVERIFY(!runner.trace.isEmpty());
+    QVERIFY2(runner.trace.last().startsWith(boundary), qPrintable(runner.trace.join('\n')));
+    for (const QString &line : runner.trace)
+      QVERIFY(!line.startsWith("erase ") && line != "-w" && line != "reboot" &&
+              line != "reboot fastboot" && !line.startsWith("set_active ") &&
+              !line.startsWith("create-logical-partition "));
+    for (const auto &row : progress)
+      QVERIFY(row[2].toString() != "全部步骤成功");
+    QCOMPARE(runner.device.slot, slot);
+    QVERIFY(!DeviceOperationLease::owner());
   }
   void afterSalesTailUsesVerifiedTargets_data() {
     QTest::addColumn<int>("platform");
