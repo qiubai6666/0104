@@ -27,7 +27,7 @@
 | 模式 | 核心顺序 |
 | --- | --- |
 | 全量普通（AB / 强力 / 仅 FBD 均不勾选） | FastbootD 读取设备表和处理实际 COW；普通分区当前槽、无槽一次。高通有槽 modem 转普通 Fastboot 分别写 A/B，再按需回 FastbootD 收尾；MTK 在 FastbootD 处理。 |
-| AB 通刷 | 物理有槽 A/B、无槽一次，逻辑分区只写最终目标槽。仅换槽时切槽、删除计划涉及的双槽逻辑分区并重建目标槽；高通 modem 普通 Fastboot 双槽。 |
+| AB 通刷 | 先清理 COW，保持原活动槽完成物理有槽 A/B、无槽一次；这些写入全部成功后，仅换槽时切槽、删除计划涉及的双槽逻辑分区并重建目标槽。随后附加镜像及逻辑分区只写最终目标槽。有槽 modem 最后双槽刷写：高通转普通 Fastboot，MTK 留在 FastbootD；无槽 modem 随物理分区只写一次。 |
 | 强力线刷 | 固定目标 A。起始 B 先处理 COW、预写 A 槽非逻辑且非 modem 分区；预写全部成功才切 A 和重建。起始 A 走直接重建分支。随后附加镜像、其余分区和平台对应的 modem 阶段。 |
 | 仅 FBD | 只接受已在 FastbootD 的高通设备，目标为另一槽。确认、倒计时后切槽、双槽删除 / 目标槽重建、COW 和刷写；过程中不返回普通 Fastboot。最终按选项决定是否重启系统。 |
 | 修复 FastbootD | 普通 Fastboot 下检查平台关键镜像完整性，再按真实有槽 / 无槽表写入。高通九类，MTK 八类（含 lk，不含 modem / recovery）。成功后进入 FastbootD 并检查稳定连接，不擦数据、不重启系统。 |
@@ -178,3 +178,11 @@ Release 使用 Qt 6.11.2 MinGW；成功后显式传本次 ExecutablePath、匹�
 - 发布依赖隔离副本中补跑：欧加定向 35 项（含不置顶、独立任务栏、居中和生命周期）、设备操作 34 项、进程管理 16 项、界面资源/密码 11 项、仅本地回环服务的网络 24 项，全部通过。依赖默认夹具首次 74 项通过、9 个真实工具用例跳过；显式指向本任务 TEMP 的捆绑工具副本后完整重跑为 83 项通过、0 跳过。ADB/Fastboot 只查询版本，不启动 ADB Server、不操作设备；解压、Payload 和 Super 仅使用本任务的小型夹具。
 - Qt 6.11.2 MinGW Release 构建成功，`deploy.ps1` 显式指定本次 EXE、匹配 Qt/codec 路径和 `OrangeToolsApp`，采用 `PreserveExistingFiles` 保留已有文件。构建、发布、TEMP 副本 EXE 的 SHA-256 一致：`FC88B72B63B88B9878E6B1D9D832CD7F2EDBF25597C04947BBE9733C79CDB9BE`。
 - TEMP 副本通过 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Qt Concurrent、欧加 SVG Smoke；Qt6Test.dll 只加入 TEMP，不部署到正式程序。未启动会提取用户资源的正式主程序。构建和测试使用独立 TEMP 源码快照，已核对改动源码与工作区 SHA-256 一致；避免 MinGW 重建 Makefile 时对原项目中文路径的错误解析。
+## 2026-10-04 AB 通刷阶段顺序对照
+
+- 对照 SMT `MainWindow.xaml.cs::ExecuteABFlashProcess` 和 VioletToolBox `oujiaflash.cs::ExecuteABFlashProcess`，修正当前实现提前切槽、重建逻辑分区及提前写附加镜像的差异：清理 COW 后，先在原活动槽完成物理分区阶段，全部成功才进入切槽和逻辑分区阶段。同槽不执行切槽或重建。
+- 有槽 modem 不参与物理预刷：高通在最后转普通 Fastboot 双槽写入，再返回 FastbootD 收尾；MTK 最后仍在 FastbootD 双槽写入。无槽 modem 随物理分区只写一次。依旧使用真实设备表解析目标，不给任意名称追加槽位。
+- 新增 72 项数据用例：16 项精确命令序列及有槽/无槽映射，48 项物理预刷错误/停止边界，8 项异步成功执行及槽位、日志、进度验证。旧计划器重跑前 64 项全部失败，修复后完整欧加回归 479 通过、0 失败；预刷失败或分区边界停止时，不切槽、不删除待刷逻辑分区、不清数据、不重启。
+- Release 发布副本的定向回归 108 通过，设备互斥 34、进程 16、界面 11、回环网络 24、真实捆绑依赖 83 项全部通过且无跳过；Smoke 覆盖 Windows 插件、Widget 绘制、PNG、Schannel TLS 1.2、Concurrent 及 SVG。真实 adb/fastboot 只查询版本，不启动共享 Server 或连接设备。
+- 本次构建、正式包和独立 TEMP 验证副本的 EXE SHA-256 一致：`20594F7AA18F802BE913B994C13C9322D07D6F02F64E3E8FFB1C43A6D0F77CE2`。正式包的 17 个部署文件与隔离副本逐项摘要一致；Qt6Test.dll 和测试程序仅加入 TEMP。源码快照与工作区改动代码一致。
+- 没有新增按钮或选项，也没有改动已完成的窗口设置。本轮未运行正式主程序、未解包用户真实 ROM、未操作真实手机；仅证明上述 AB 阶段对齐及模拟/部署验证，不证明整体已经完全复刻或完成真机兼容验收。

@@ -121,6 +121,8 @@ struct Builder {
     return p.options.mode != FlashMode::OnlyFastbootd &&
            ((p.device.platform == Platform::Qualcomm &&
              !p.device.partitions.contains("modem")) ||
+            (p.options.mode == FlashMode::BothSlots &&
+             !p.device.partitions.contains("modem")) ||
             p.options.mode == FlashMode::AfterSalesFastbootd ||
             (p.options.mode == FlashMode::Force && p.device.slot == "b"));
   }
@@ -448,16 +450,18 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
     for (const Partition &image : active) {
       if (baseName(image.name) == "modem" && b.deferModem())
         modem << image;
-      else if (preSwitch && !d.isLogical(image.name))
+      else if ((preSwitch || ab) && !d.isLogical(image.name))
         early << image;
       else
         normal << image;
     }
     if (only)
       b.wait(5000, "仅 FBD：切槽前 5 秒倒计时，可请求停止");
-    if (preSwitch) {
+    // AB keeps the current slot active until all non-logical writes succeed.
+    // Slotted modem is deferred on both platforms; slotless modem stays here.
+    if (preSwitch || ab) {
       b.cow();
-      if (!b.flashImages(early))
+      if (!b.flashImages(early, ab))
         return fail(error, b.error);
     }
     const bool rebuild = force || only || (ab && b.slot != d.slot);
@@ -466,7 +470,7 @@ bool OugaFlashPlanner::build(const QVector<Partition> &images, const Device &d,
                 b.slot);
     if (rebuild && !b.rebuild(active))
       return fail(error, b.error);
-    if (!preSwitch)
+    if (!preSwitch && !ab)
       b.cow();
     if (!b.flashImages(normal, ab) || !b.flashDeferredModem(modem))
       return fail(error, b.error);

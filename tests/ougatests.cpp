@@ -1341,6 +1341,204 @@ private slots:
     QCOMPARE(second.totalBytes, qint64(5632));
     QCOMPARE(commands(second).count("flash persist"), 1);
   }
+  void abStagedSequence_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<QString>("target");
+    QTest::addColumn<bool>("slotlessModem");
+    for (int platform : {1, 2})
+      for (const QString slot : {"a", "b"})
+        for (const QString target : {"a", "b"})
+          for (bool slotless : {false, true})
+            QTest::newRow(qPrintable(QString("p%1-%2-to%3-modem-%4")
+                                         .arg(platform).arg(slot, target)
+                                         .arg(slotless ? "slotless" : "dual")))
+                << platform << slot << target << slotless;
+  }
+  void abStagedSequence() {
+    QFETCH(int, platform);
+    QFETCH(QString, slot);
+    QFETCH(QString, target);
+    QFETCH(bool, slotlessModem);
+    const auto pf = Platform(platform);
+    auto device = fixtureDevice(pf, slot);
+    if (slotlessModem) {
+      for (const QString suffix : {"a", "b"}) {
+        device.partitions.remove("modem_" + suffix);
+        device.sizes.remove("modem_" + suffix);
+      }
+      device.partitions.insert("modem");
+      device.sizes["modem"] = 1024 * 1024;
+    }
+    QVector<Partition> ps = {image("system", QByteArray(1536, 's')),
+                             image("my_preload"), image("boot", QByteArray(1024, 'b')),
+                             image("my_company"), image("vbmeta", QByteArray(256, 'v')),
+                             image("persist", QByteArray(128, 'p')),
+                             image("modem", QByteArray(64, 'm'))};
+    auto opts = options(FlashMode::BothSlots, pf);
+    opts.targetSlot = target;
+    Plan plan, reordered;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &plan, &error), qPrintable(error));
+    QStringList expected{"delete-logical-partition system_a-cow"};
+    if (slotlessModem)
+      expected << "flash modem";
+    expected << "flash persist" << "flash vbmeta_a" << "flash vbmeta_b"
+             << "flash boot_a" << "flash boot_b";
+    if (slot != target) {
+      expected << "set_active " + target;
+      for (const QString name : {"my_company", "my_preload", "system"})
+        for (const QString suffix : {"a", "b"})
+          expected << "delete-logical-partition " + name + "_" + suffix;
+      expected << "create-logical-partition my_company_" + target + " 512"
+               << "create-logical-partition my_preload_" + target + " 512"
+               << "create-logical-partition system_" + target + " 1536";
+    }
+    expected << "flash my_company_" + target << "flash my_preload_" + target
+             << "flash system_" + target;
+    if (!slotlessModem) {
+      if (pf == Platform::Qualcomm)
+        expected << "reboot bootloader";
+      expected << "flash modem_a" << "flash modem_b";
+      if (pf == Platform::Qualcomm)
+        expected << "reboot fastboot";
+    }
+    QCOMPARE(commands(plan), expected);
+    QCOMPARE(plan.flashCount, slotlessModem ? 9 : 10);
+    QCOMPARE(plan.totalBytes, qint64(slotlessModem ? 5312 : 5376));
+    for (const auto &step : plan.steps)
+      if (step.arguments.value(0) == "flash")
+        QCOMPARE(step.userspace, pf != Platform::Qualcomm ||
+                                    !step.target.startsWith("modem_"));
+    std::reverse(ps.begin(), ps.end());
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &reordered, &error), qPrintable(error));
+    QCOMPARE(planText(plan), planText(reordered));
+  }
+  void abPrewriteBoundary_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<QString>("boundary");
+    QTest::addColumn<int>("outcome");
+    for (int platform : {1, 2})
+      for (const QString slot : {"a", "b"})
+        for (const QString boundary : {"persist", "boot_a", "boot_b"})
+          for (int outcome : {0, 1, 2, 3})
+            QTest::newRow(qPrintable(QString("p%1-%2-%3-outcome%4")
+                                         .arg(platform).arg(slot, boundary).arg(outcome)))
+                << platform << slot << boundary << outcome;
+  }
+  void abPrewriteBoundary() {
+    QFETCH(int, platform);
+    QFETCH(QString, slot);
+    QFETCH(QString, boundary);
+    QFETCH(int, outcome);
+    FakeRunner runner;
+    runner.device = fixtureDevice(Platform(platform), slot);
+    OugaFlashService service(&runner);
+    configure(service);
+    auto opts = options(FlashMode::BothSlots, Platform(platform));
+    opts.targetSlot = slot == "a" ? "b" : "a";
+    opts.clearData = opts.autoReboot = opts.formatToolsReady = true;
+    for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"})
+      QVERIFY(put(dir + "/" + name, "fixture-only: never executed"));
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(images(), runner.device, opts, &plan, &error),
+             qPrintable(error));
+    if (outcome == 3) {
+      runner.after = [&](const QStringList &args) {
+        if (args.value(0) == "flash" && args.value(1) == boundary)
+          service.requestStop();
+      };
+    } else {
+      runner.failAt = "flash " + boundary + " ";
+      runner.failCode = outcome == 0 ? 0 : (outcome == 1 ? 2 : -1);
+      runner.normal = outcome != 2;
+      runner.failOutput = outcome == 0 ? "FAILED (remote: denied)" : "test failure";
+    }
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY2(runner.trace.join('\n').contains("flash " + boundary + " "),
+             qPrintable(runner.trace.join('\n')));
+    QCOMPARE(runner.device.slot, slot);
+    for (const QString &cmd : runner.trace) {
+      QVERIFY2(!cmd.startsWith("set_active"), qPrintable(cmd));
+      QVERIFY2(!cmd.startsWith("create-logical-partition"), qPrintable(cmd));
+      QVERIFY2(!cmd.startsWith("delete-logical-partition") || cmd.endsWith("-cow"), qPrintable(cmd));
+      QVERIFY2(!cmd.startsWith("erase ") && cmd != "-w" && !cmd.startsWith("reboot"), qPrintable(cmd));
+      QVERIFY2(!cmd.startsWith("flash my_") && !cmd.startsWith("flash system_") &&
+                   !cmd.startsWith("flash modem_"), qPrintable(cmd));
+    }
+    for (const auto &row : progress)
+      QVERIFY(row[2].toString() != "全部步骤成功");
+    QVERIFY(!service.busy());
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void abSuccessfulExecution_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<QString>("target");
+    for (int platform : {1, 2})
+      for (const QString slot : {"a", "b"})
+        for (const QString target : {"a", "b"})
+          QTest::newRow(qPrintable(QString("p%1-%2-to%3")
+                                       .arg(platform).arg(slot, target)))
+              << platform << slot << target;
+  }
+  void abSuccessfulExecution() {
+    QFETCH(int, platform);
+    QFETCH(QString, slot);
+    QFETCH(QString, target);
+    FakeRunner runner;
+    runner.device = fixtureDevice(Platform(platform), slot);
+    QMap<QString, QString> slotsAtWrite;
+    runner.after = [&](const QStringList &args) {
+      if (args.value(0) == "flash")
+        slotsAtWrite[args.value(1)] = runner.device.slot;
+    };
+    OugaFlashService service(&runner);
+    configure(service);
+    auto opts = options(FlashMode::BothSlots, Platform(platform));
+    opts.targetSlot = target;
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(images(), runner.device, opts, &plan, &error),
+             qPrintable(error));
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    QCOMPARE(runner.device.slot, target);
+    QCOMPARE(runner.device.userspace, true);
+    for (const QString physical : {"boot_a", "boot_b", "persist"})
+      QCOMPARE(slotsAtWrite.value(physical), slot);
+    for (const QString logical : {"system", "my_company", "my_preload"})
+      QCOMPARE(slotsAtWrite.value(logical + "_" + target), target);
+    QCOMPARE(slotsAtWrite.value("modem_a"), target);
+    QCOMPARE(slotsAtWrite.value("modem_b"), target);
+    QStringList executed;
+    for (const QString &cmd : runner.trace) {
+      if (cmd.startsWith("getvar "))
+        continue;
+      executed << (cmd.startsWith("flash ") ? cmd.section(' ', 0, 1) : cmd);
+    }
+    QCOMPARE(executed, commands(plan));
+    QVERIFY(!service.busy());
+    QVERIFY(!DeviceOperationLease::owner());
+    const auto sessions = QDir(dir + "/logs").entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(sessions.size(), 1);
+    const auto result = QJsonDocument::fromJson(
+        read(dir + "/logs/" + sessions[0] + "/result.json")).object();
+    QVERIFY(result["success"].toBool());
+    QCOMPARE(result["completedWrites"].toInt(), plan.flashCount);
+    QVERIFY(!progress.isEmpty());
+    QCOMPARE(progress.last()[0].toInt(), plan.flashCount);
+    QCOMPARE(progress.last()[1].toInt(), plan.flashCount);
+  }
   void forceMtkModemLast() {
     Plan plan;
     QString error;
