@@ -339,6 +339,16 @@ Device fixtureDevice(Platform platform = Platform::Qualcomm,
   d.logical.insert("system_a-cow");
   return d;
 }
+Device cowCapacityDevice(Platform platform, const QString &slot) {
+  Device d = fixtureDevice(platform, slot);
+  // 10 MiB Super - 4 MiB reserve - 2 MiB retained vendor = 4 MiB available
+  // after COW cleanup. Before cleanup the 1 MiB snapshot is still occupied.
+  d.sizes["super"] = 10 * 1024 * 1024;
+  for (const QString name : {"system", "my_company", "my_preload"})
+    for (const QString suffix : {"a", "b"})
+      d.sizes[name + "_" + suffix] = 512 * 1024;
+  return d;
+}
 QString dump(const Device &d) {
   QString out = "(bootloader) serialno: " + d.serial +
                 "\n(bootloader) product: " + d.product +
@@ -472,6 +482,12 @@ class OugaTests : public QObject {
          {"boot", "system", "my_company", "my_preload", "modem", "persist"})
       ps << image(n);
     return ps;
+  }
+  QVector<Partition> cowCapacityImages() {
+    return {image("system", QByteArray(2 * 1024 * 1024, 's')),
+            image("my_company", QByteArray(1024 * 1024, 'c')),
+            image("my_preload", QByteArray(1024 * 1024, 'p')),
+            image("boot")};
   }
   Options options(FlashMode mode = FlashMode::Normal,
                   Platform platform = Platform::Qualcomm) {
@@ -1556,6 +1572,190 @@ private slots:
     QVERIFY(!cmds.contains("flash modem_b"));
     for (const auto &step : plan.steps)
       QVERIFY(step.userspace);
+  }
+  void cowCapacitySequence_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<bool>("cleanedBeforeRebuild");
+    for (int platform : {1, 2}) {
+      for (const QString slot : {"a", "b"}) {
+        QTest::newRow(qPrintable(QString("ab-p%1-%2").arg(platform).arg(slot)))
+            << platform << int(FlashMode::BothSlots) << slot << true;
+        QTest::newRow(qPrintable(QString("force-p%1-%2").arg(platform).arg(slot)))
+            << platform << int(FlashMode::Force) << slot << (slot == "b");
+        if (platform == 1)
+          QTest::newRow(qPrintable(QString("only-fbd-%1").arg(slot)))
+              << platform << int(FlashMode::OnlyFastbootd) << slot << false;
+      }
+    }
+  }
+  void cowCapacitySequence() {
+    QFETCH(int, platform);
+    QFETCH(int, mode);
+    QFETCH(QString, slot);
+    QFETCH(bool, cleanedBeforeRebuild);
+    const auto device = cowCapacityDevice(Platform(platform), slot);
+    const auto ps = cowCapacityImages();
+    auto opts = options(FlashMode(mode), Platform(platform));
+    opts.targetSlot = slot == "a" ? "b" : "a";
+    Plan plan;
+    QString error;
+    const bool ok = OugaFlashPlanner::build(ps, device, opts, &plan, &error);
+    QCOMPARE(ok, cleanedBeforeRebuild);
+    if (!ok) {
+      QVERIFY2(error.contains("容量不足/未知"), qPrintable(error));
+      QVERIFY(plan.steps.isEmpty());
+      return;
+    }
+    QVERIFY(plan.device.sameLayout(device));
+    QCOMPARE(plan.device.sizes["system_a-cow"], quint64(1024 * 1024));
+    const auto cmds = commands(plan);
+    const int cow = cmds.indexOf("delete-logical-partition system_a-cow");
+    const int create = cmds.indexOf("create-logical-partition system_" +
+                                  plan.options.targetSlot + " 2097152");
+    QVERIFY(cow >= 0 && create > cow);
+    QCOMPARE(cmds.count("delete-logical-partition system_a-cow"), 1);
+    for (const QString suffix : {"a", "b"})
+      QVERIFY(!cmds.contains("delete-logical-partition vendor_" + suffix));
+    Plan regenerated;
+    QVERIFY2(OugaFlashPlanner::build(ps, plan.device, plan.options, &regenerated,
+                                    &error), qPrintable(error));
+    QCOMPARE(planText(regenerated), planText(plan));
+    QCOMPARE(regenerated.totalBytes, plan.totalBytes);
+  }
+  void cowCapacityGuards_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<bool>("force");
+    QTest::addColumn<QString>("condition");
+    QTest::addColumn<QString>("reason");
+    const QMap<QString, QString> conditions = {
+        {"missing-super", "容量不足/未知"},
+        {"small-super", "容量不足/未知"},
+        {"oversize-image", "容量不足/未知"},
+        {"retained-vendor", "容量不足/未知"},
+        {"used-overflow", "占用容量溢出"},
+        {"freed-overflow", "释放容量溢出"},
+        {"needed-overflow", "镜像总大小溢出"}};
+    for (int platform : {1, 2})
+      for (bool force : {false, true})
+        for (auto it = conditions.cbegin(); it != conditions.cend(); ++it)
+          QTest::newRow(qPrintable(QString("p%1-%2-%3").arg(platform)
+                                       .arg(force ? "force" : "ab", it.key())))
+              << platform << force << it.key() << it.value();
+  }
+  void cowCapacityGuards() {
+    QFETCH(int, platform);
+    QFETCH(bool, force);
+    QFETCH(QString, condition);
+    QFETCH(QString, reason);
+    auto device = cowCapacityDevice(Platform(platform), "b");
+    auto ps = cowCapacityImages();
+    if (condition == "missing-super")
+      device.sizes.remove("super");
+    else if (condition == "small-super")
+      device.sizes["super"] -= 512;
+    else if (condition == "oversize-image")
+      ++ps[0].expandedBytes; // Rounded to another sector, not rounded down.
+    else if (condition == "retained-vendor")
+      device.sizes["vendor_b"] += 512;
+    else if (condition == "used-overflow")
+      device.sizes["vendor_a"] = quint64(LLONG_MAX);
+    else if (condition == "freed-overflow")
+      device.sizes["system_a"] = quint64(LLONG_MAX);
+    else if (condition == "needed-overflow")
+      ps[0].expandedBytes = LLONG_MAX;
+    auto opts = options(force ? FlashMode::Force : FlashMode::BothSlots,
+                        Platform(platform));
+    opts.targetSlot = "a";
+    Plan plan;
+    QString error;
+    QVERIFY(!OugaFlashPlanner::build(ps, device, opts, &plan, &error));
+    QVERIFY2(error.contains(reason), qPrintable(error));
+    QVERIFY(plan.steps.isEmpty());
+    QCOMPARE(plan.flashCount, 0);
+  }
+  void cowCapacityExecution_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("branch");
+    QTest::addColumn<int>("outcome");
+    for (int platform : {1, 2})
+      for (const QString branch : {"ab-a", "ab-b", "force-b"})
+        for (int outcome = 0; outcome < 6; ++outcome)
+          QTest::newRow(qPrintable(QString("p%1-%2-result%3").arg(platform)
+                                       .arg(branch).arg(outcome)))
+              << platform << branch << outcome;
+  }
+  void cowCapacityExecution() {
+    QFETCH(int, platform);
+    QFETCH(QString, branch);
+    QFETCH(int, outcome);
+    const QString initialSlot = branch == "ab-a" ? "a" : "b";
+    FakeRunner runner;
+    runner.device = cowCapacityDevice(Platform(platform), initialSlot);
+    OugaFlashService service(&runner);
+    configure(service);
+    auto opts = options(branch.startsWith("ab") ? FlashMode::BothSlots
+                                                : FlashMode::Force,
+                        Platform(platform));
+    opts.targetSlot = initialSlot == "a" ? "b" : "a";
+    opts.clearData = opts.autoReboot = opts.formatToolsReady = true;
+    for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"})
+      QVERIFY(put(dir + "/" + name, "fixture-only: never executed"));
+    Plan plan;
+    QString error;
+    QVERIFY2(OugaFlashPlanner::build(cowCapacityImages(), runner.device, opts,
+                                    &plan, &error), qPrintable(error));
+    if (outcome == 5) {
+      runner.after = [&](const QStringList &args) {
+        if (args == QStringList{"delete-logical-partition", "system_a-cow"})
+          service.requestStop();
+      };
+    } else if (outcome != 0) {
+      runner.failAt = "delete-logical-partition system_a-cow";
+      runner.failCode = outcome == 1 ? 0 : (outcome == 3 ? -1 : 2);
+      runner.normal = outcome != 3;
+      runner.failOutput = outcome == 4
+          ? "FAILED (remote: transport disconnected)"
+          : "FAILED (remote: deletion denied)";
+    }
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy progress(&service, &OugaFlashService::progress);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    const QString trace = runner.trace.join('\n');
+    QVERIFY2(trace.contains("delete-logical-partition system_a-cow"), qPrintable(trace));
+    QCOMPARE(done[0][0].toBool(), outcome == 0);
+    if (outcome == 0) {
+      QCOMPARE(runner.device.slot, plan.options.targetSlot);
+      QVERIFY(!runner.device.sizes.contains("system_a-cow"));
+      QCOMPARE(runner.device.sizes["system_" + plan.options.targetSlot],
+               quint64(2 * 1024 * 1024));
+      QCOMPARE(runner.device.sizes["vendor_a"], quint64(1024 * 1024));
+      QCOMPARE(runner.device.sizes["vendor_b"], quint64(1024 * 1024));
+      QVERIFY(trace.contains("erase userdata"));
+      QVERIFY(trace.contains("erase metadata"));
+      QCOMPARE(runner.trace.contains("-w"), platform == 1);
+      QVERIFY(runner.trace.contains("reboot"));
+      QCOMPARE(progress.last()[0].toInt(), plan.flashCount);
+      QCOMPARE(progress.last()[1].toInt(), plan.flashCount);
+      QCOMPARE(progress.last()[2].toString(), QString("全部步骤成功"));
+    } else {
+      QCOMPARE(runner.device.slot, initialSlot);
+      for (const QString &cmd : runner.trace) {
+        QVERIFY2(!cmd.startsWith("set_active") && !cmd.startsWith("flash ") &&
+                 !cmd.startsWith("create-logical-partition") &&
+                 !cmd.startsWith("erase ") && cmd != "-w" &&
+                 !cmd.startsWith("reboot"), qPrintable(cmd));
+        QVERIFY2(!cmd.startsWith("delete-logical-partition") ||
+                 cmd == "delete-logical-partition system_a-cow", qPrintable(cmd));
+      }
+      for (const auto &row : progress)
+        QVERIFY(row[2].toString() != "全部步骤成功");
+    }
+    QVERIFY(plan.device.sizes.contains("system_a-cow"));
+    QVERIFY(!service.busy());
+    QVERIFY(!DeviceOperationLease::owner());
   }
   void planOverflow_data() {
     QTest::addColumn<bool>("dual");

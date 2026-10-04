@@ -16,6 +16,7 @@ struct Builder {
   bool mode = true;
   QMap<QString, QString> written;
   QSet<QString> rebuilt;
+  QSet<QString> cleanedCows;
   QString target(const QString &name, const QString &requestedSlot) {
     return p.device.targetPartition(name, requestedSlot, &error);
   }
@@ -167,8 +168,10 @@ struct Builder {
     std::sort(names.begin(), names.end());
     for (const QString &n : names)
       if (n.contains("cow", Qt::CaseInsensitive) && safeName(n) &&
-          p.device.sizes.contains(n))
+          p.device.sizes.contains(n)) {
         command("清理 COW " + n, {"delete-logical-partition", n}, n, true);
+        cleanedCows.insert(n);
+      }
   }
   bool rebuild(const QVector<Partition> &images) {
     quint64 freed = 0, needed = 0;
@@ -203,8 +206,11 @@ struct Builder {
       freed += p.device.sizes[t];
     }
     quint64 used = 0;
+    // Only earlier COW deletes free space at this stage. Keep the original
+    // device snapshot intact so execution can still verify it before writing.
     for (auto it = p.device.sizes.cbegin(); it != p.device.sizes.cend(); ++it)
-      if (p.device.isLogical(it.key()) && !deletes.contains(it.key())) {
+      if (p.device.isLogical(it.key()) && !deletes.contains(it.key()) &&
+          !cleanedCows.contains(it.key())) {
         if (it.value() > quint64(LLONG_MAX) - used) {
           error = "逻辑占用容量溢出";
           return false;
