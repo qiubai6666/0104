@@ -10,6 +10,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScreen>
 #include <QTextStream>
 #include <QUuid>
 #include "xiaomiflashservice.h"
@@ -426,6 +427,38 @@ private slots:
         QVERIFY(Xiaomi::inspectPackage(makePackage(), Xiaomi::Mode::Wipe, &p, &error));
         XiaomiFlashService service; service.configure(artifactDir() + "/absent.exe");
         QVERIFY(!service.start(p, &error)); QVERIFY(!DeviceOperationLease::owner());
+    }
+    void defaultGeometryAndCentering_data() {
+        QTest::addColumn<bool>("withLauncher");
+        QTest::newRow("launcher-screen") << true;
+        QTest::newRow("standalone-screen") << false;
+    }
+    void defaultGeometryAndCentering() {
+        QFETCH(bool, withLauncher);
+        QWidget launcher;
+        QScreen *targetScreen = QApplication::primaryScreen();
+        QVERIFY(targetScreen);
+        const QRect available = targetScreen->availableGeometry();
+        launcher.resize(200, 100);
+        launcher.move(available.topLeft() + QPoint(20, 30));
+        if (withLauncher) launcher.show();
+
+        XiaomiFlashWindow window(withLauncher ? &launcher : nullptr);
+        QCOMPARE(window.minimumSize(), QSize(779, 656));
+        window.show();
+        QTRY_COMPARE(window.size(), QSize(779, 656));
+        auto centered = [&] {
+            QScreen *screen = withLauncher ? launcher.screen() : window.screen();
+            if (!screen) return false;
+            const QPoint delta = window.frameGeometry().center() - screen->availableGeometry().center();
+            return qAbs(delta.x()) <= 1 && qAbs(delta.y()) <= 1;
+        };
+        QTRY_VERIFY(centered());
+
+        window.hide();
+        window.move(available.topLeft() + QPoint(30, 40));
+        window.show();
+        QTRY_VERIFY(centered());
     }
     void uiAndCloseProtection() {
         qputenv("XIAOMI_TEST_BEHAVIOR", "slow");

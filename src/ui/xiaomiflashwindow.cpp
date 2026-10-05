@@ -15,6 +15,9 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressBar>
+#include <QScreen>
+#include <QShowEvent>
+#include <QTimer>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QVBoxLayout>
@@ -30,8 +33,9 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
     if (launcher) connect(launcher, &QObject::destroyed, this, &QObject::deleteLater);
     setWindowTitle("秋白工作室 · 小米线刷");
     setObjectName("XiaomiFlashView");
-    setMinimumSize(780, 650);
-    resize(900, 740);
+    const QSize initialSize(qRound(866 * 0.9), qRound(729 * 0.9));
+    setMinimumSize(initialSize);
+    resize(initialSize);
     QFont font("Microsoft YaHei UI"); font.setPixelSize(13); setFont(font);
     auto root = new QVBoxLayout(this);
     root->setContentsMargins(18, 16, 18, 16); root->setSpacing(10);
@@ -182,6 +186,19 @@ void XiaomiFlashWindow::startFlash() {
 void XiaomiFlashWindow::setBusy(bool busy) {
     m_path->setEnabled(!busy); m_choose->setEnabled(!busy); m_start->setEnabled(!busy);
     m_wipe->setEnabled(!busy); m_keep->setEnabled(!busy); m_lock->setEnabled(!busy);
+}
+void XiaomiFlashWindow::showEvent(QShowEvent *event) {
+    QWidget::showEvent(event);
+    if (event->spontaneous()) return;
+    // Wait for native frame margins before centering on the launcher's screen.
+    QTimer::singleShot(0, this, [this] {
+        if (!isVisible() || isMinimized() || isMaximized()) return;
+        QScreen *targetScreen = m_launcher ? m_launcher->screen() : screen();
+        if (!targetScreen) return;
+        QRect frame = frameGeometry();
+        frame.moveCenter(targetScreen->availableGeometry().center());
+        move(frame.topLeft());
+    });
 }
 void XiaomiFlashWindow::closeEvent(QCloseEvent *event) {
     if (isBusy()) { event->ignore(); return; }

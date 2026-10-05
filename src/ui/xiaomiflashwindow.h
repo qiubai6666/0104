@@ -16,6 +16,7 @@ public:
     bool isBusy() const { return m_service->isBusy(); }
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 private:
     XiaomiFlashService *m_service;
     QPointer<QWidget> m_launcher;
