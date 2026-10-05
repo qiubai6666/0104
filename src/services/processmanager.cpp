@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QList>
 #include <QPointer>
+#include <QVariant>
 #include <algorithm>
 
 #ifdef Q_OS_WIN
@@ -33,6 +34,8 @@ QProcess *ProcessManager::createProcess(QObject *parent, bool newConsole)
     QProcess *process = new QProcess(parent);
 #ifdef Q_OS_WIN
     if (newConsole) {
+        // 用户交互控制台只受退出管理，不视为占用设备通道的后台操作。
+        process->setProperty("orangeInteractiveConsole", true);
         // 让 CMD 本身成为受管进程，并使用新控制台的标准输入/输出。
         process->setProcessChannelMode(QProcess::ForwardedChannels);
         process->setInputChannelMode(QProcess::ForwardedInputChannel);
@@ -106,7 +109,8 @@ bool ProcessManager::hasActiveDeviceProcesses()
 {
     discardDestroyedProcesses();
     for (const auto &p : ownedProcesses()) {
-        if (p && p->state()!=QProcess::NotRunning && !(p->parent() && p->parent()->inherits("DeviceManager"))) return true;
+        if (p && p->state()!=QProcess::NotRunning && !p->property("orangeInteractiveConsole").toBool()
+            && !(p->parent() && p->parent()->inherits("DeviceManager"))) return true;
     }
     return false;
 }

@@ -91,7 +91,13 @@ void DeviceCheckWindow::closeEvent(QCloseEvent *event)
 
 bool DeviceCheckWindow::beginOperation()
 {
-    if (operationInProgress || !DeviceOperationLease::acquire(this)) {
+    if (operationInProgress) {
+        return false;
+    }
+    QString error;
+    if (!DeviceOperationLease::acquire(this, &error)) {
+        // 设备通道被占用时明确提示，避免点击后无任何反馈。
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备通道占用", error, this);
         return false;
     }
     operationInProgress = true;

@@ -51,6 +51,7 @@ private slots:
     void shutdownDoesNotRunCompletionHandlers();
     void failedStartReturnsNull();
     void newConsoleUsesItsOwnStandardHandles();
+    void interactiveConsoleDoesNotBlockDeviceOperations();
     void applicationQuitStopsOwnedProcesses();
     void sharedDescendantIsNotStopped();
 
@@ -246,6 +247,21 @@ void ProcessManagerTests::newConsoleUsesItsOwnStandardHandles()
 #else
     QSKIP("Windows console creation flags");
 #endif
+}
+
+void ProcessManagerTests::interactiveConsoleDoesNotBlockDeviceOperations()
+{
+    // 用户打开的 CMD 不应让“执行重启”等操作误判设备通道占用。
+    QObject owner;
+    QVERIFY(ProcessManager::createProcess(&owner, true)->property("orangeInteractiveConsole").toBool());
+    QProcess *process = ProcessManager::createProcess(&owner);
+    process->start(helperPath("adb.exe"), {"--process-helper"});
+    QVERIFY(process->waitForStarted());
+    QVERIFY(waitForReady(process));
+    QVERIFY(ProcessManager::hasActiveDeviceProcesses());
+    process->setProperty("orangeInteractiveConsole", true);
+    QVERIFY(!ProcessManager::hasActiveDeviceProcesses());
+    ProcessManager::stopAllProcesses();
 }
 
 void ProcessManagerTests::applicationQuitStopsOwnedProcesses()
