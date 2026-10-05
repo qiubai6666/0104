@@ -30,13 +30,13 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
     if (launcher) connect(launcher, &QObject::destroyed, this, &QObject::deleteLater);
     setWindowTitle("秋白工作室 · 小米线刷");
     setObjectName("XiaomiFlashView");
-    setMinimumSize(660, 510);
-    resize(780, 610);
+    setMinimumSize(780, 650);
+    resize(900, 740);
     QFont font("Microsoft YaHei UI"); font.setPixelSize(13); setFont(font);
     auto root = new QVBoxLayout(this);
-    root->setContentsMargins(22, 20, 22, 20); root->setSpacing(14);
+    root->setContentsMargins(18, 16, 18, 16); root->setSpacing(10);
     auto card = new QGroupBox(this); card->setObjectName("XiaomiFlashCard");
-    auto body = new QVBoxLayout(card); body->setContentsMargins(20, 20, 20, 20); body->setSpacing(14);
+    auto body = new QVBoxLayout(card); body->setContentsMargins(16, 14, 16, 14); body->setSpacing(8);
     auto title = new QLabel("小米官方线刷", card);
     title->setStyleSheet("font-size:20px;font-weight:600;color:#263142;");
     body->addWidget(title);
@@ -53,7 +53,8 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
     m_choose->setMinimumSize(84, 36);
     pathRow->addWidget(m_path, 1); pathRow->addWidget(m_choose); body->addLayout(pathRow);
     auto actionRow = new QHBoxLayout;
-    auto modes = new QVBoxLayout;
+    auto modes = new QHBoxLayout;
+    modes->setSpacing(14);
     m_wipe = new QRadioButton("清除数据刷机", card); m_wipe->setObjectName("CompleteWipeCheckBox");
     m_keep = new QRadioButton("保留数据刷机", card); m_keep->setObjectName("KeepDataCheckBox");
     m_lock = new QRadioButton("清除数据并回锁 BL", card); m_lock->setObjectName("WipeAndLockBLCheckBox");
@@ -66,20 +67,26 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
     m_start = new QPushButton("开始线刷", card); m_start->setObjectName("StartXiaomiFlashButton");
     m_start->setProperty("tone", "purple"); m_start->setMinimumSize(126, 42);
     actionRow->addWidget(m_start); body->addLayout(actionRow);
-    auto hint = new QLabel("仅支持小米 / Redmi 官方 Fastboot 线刷包；需已解锁 BL。请只连接一台设备（由原脚本处理设备选择）。\n清除数据 / 回锁会带来数据丢失和无法开机风险，开始前请备份并核对机型。", card);
+    auto hint = new QLabel("仅支持小米 / Redmi 官方 Fastboot 线刷包；需已解锁 BL。开始前自动检测设备，请只连接一台目标设备。\n清除数据 / 回锁会带来数据丢失和无法开机风险，开始前请备份并核对机型。", card);
     hint->setWordWrap(true); hint->setStyleSheet("color:#64748B;font-size:12px;"); body->addWidget(hint);
     root->addWidget(card);
+    m_cancelCheck = new QPushButton("取消检测", this);
+    m_cancelCheck->setObjectName("CancelXiaomiCheckButton");
+    m_cancelCheck->hide();
     m_progress = new QProgressBar(this); m_progress->setObjectName("XiaomiFlashProgressBar");
     m_progress->setRange(0, 100); m_progress->setValue(0); m_progress->setFormat("准备就绪"); root->addWidget(m_progress);
     m_status = new QLabel("0MB/s  |  Time:0s", this);
-    m_status->setObjectName("XiaomiFlashStatusLabel"); root->addWidget(m_status);
+    m_status->setObjectName("XiaomiFlashStatusLabel");
+    auto statusRow = new QHBoxLayout; statusRow->addWidget(m_status, 1);
+    statusRow->addWidget(m_cancelCheck); root->addLayout(statusRow);
     m_warning = new QLabel(this); m_warning->setWordWrap(true);
     m_warning->setObjectName("XiaomiFlashWarningLabel");
     m_warning->setStyleSheet("color:#B45309;font-size:12px;");
     m_warning->hide(); root->addWidget(m_warning);
     root->addWidget(new QLabel("线刷日志", this));
     m_log = new QPlainTextEdit(this); m_log->setObjectName("XiaomiFlashLogTextBox"); m_log->setReadOnly(true);
-    m_log->setMaximumBlockCount(6000); root->addWidget(m_log, 1);
+    m_log->setMaximumBlockCount(6000);
+    m_log->setMinimumHeight(240); root->addWidget(m_log, 1);
     auto notice = new QLabel("刷写中不提供强制停止：请勿拔线、关闭程序或结束进程。", this);
     notice->setStyleSheet("color:#B45309;font-size:12px;"); root->addWidget(notice);
     setStyleSheet(R"(
@@ -101,6 +108,11 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
         if (!path.isEmpty()) m_path->setText(QDir::toNativeSeparators(path));
     });
     connect(m_start, &QPushButton::clicked, this, &XiaomiFlashWindow::startFlash);
+    connect(m_cancelCheck, &QPushButton::clicked, m_service, &XiaomiFlashService::cancelCheck);
+    connect(m_service, &XiaomiFlashService::checkingChanged, this, [this](bool checking) {
+        m_cancelCheck->setVisible(checking);
+        if (checking) m_progress->setFormat("检测设备中，尚未开始刷机");
+    });
     connect(m_service, &XiaomiFlashService::log, this, [this](const QString &text) {
         m_log->moveCursor(QTextCursor::End); m_log->insertPlainText(text);
         if (!text.endsWith('\n')) m_log->insertPlainText("\n");
@@ -117,7 +129,8 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
     });
     connect(m_service, &XiaomiFlashService::finished, this, [this](bool success, const QString &) {
         m_progress->setRange(0, 100);
-        m_progress->setFormat(success ? "脚本执行完成，请核对日志" : "未成功，请检查日志"); setBusy(false);
+        m_progress->setFormat(success ? "脚本执行完成，请核对日志" :
+            (m_service->hasStartedScript() ? "未成功，请检查日志" : "未开始刷机，请检查日志")); setBusy(false);
     });
 }
 Xiaomi::Mode XiaomiFlashWindow::mode() const {

@@ -20,7 +20,7 @@ private:
     XiaomiFlashService *m_service;
     QPointer<QWidget> m_launcher;
     QLineEdit *m_path;
-    QPushButton *m_choose, *m_start;
+    QPushButton *m_choose, *m_start, *m_cancelCheck;
     QRadioButton *m_wipe, *m_keep, *m_lock;
     QProgressBar *m_progress;
     QLabel *m_status, *m_warning;

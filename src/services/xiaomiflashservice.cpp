@@ -87,11 +87,28 @@ bool Xiaomi::inspectPackage(const QString &directory, Mode mode, Package *packag
 
 XiaomiFlashService::XiaomiFlashService(QObject *parent) : QObject(parent) {
     m_process.setProcessChannelMode(QProcess::MergedChannels);
+    m_probe.setProcessChannelMode(QProcess::MergedChannels);
+    m_probeTimer.setSingleShot(true);
+    m_probeTimer.setInterval(5000);
+    connect(&m_probeTimer, &QTimer::timeout, this, [this] {
+        if (!m_checking) return;
+        m_probeTimedOut = true;
+        m_probe.kill(); // Read-only devices/getvar probe, never the flashing process.
+    });
+    connect(&m_probe, &QProcess::started, this, [this] {
+        if (m_probeCancelled || m_probeTimedOut) m_probe.kill();
+    });
+    connect(&m_probe, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this, &XiaomiFlashService::completeProbe);
+    connect(&m_probe, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart && m_checking)
+            finish(false, "Fastboot 检测工具无法启动，未执行刷机：" + m_probe.errorString());
+    });
     m_mismatchTimer.setSingleShot(true);
     m_mismatchTimer.setInterval(10000);
     m_statusTimer.setInterval(1000);
     connect(&m_statusTimer, &QTimer::timeout, this, [this] {
-        if (m_busy) emit progressInfo(QString("%1  |  Time:%2s").arg(m_transferRate).arg(m_elapsed.elapsed() / 1000));
+        if (m_busy && !m_checking) emit progressInfo(QString("%1  |  Time:%2s").arg(m_transferRate).arg(m_elapsed.elapsed() / 1000));
     });
     connect(&m_process, &QProcess::readyReadStandardOutput, this, &XiaomiFlashService::readOutput);
     connect(&m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, &XiaomiFlashService::completeProcess);
@@ -113,11 +130,16 @@ bool XiaomiFlashService::start(const Xiaomi::Package &package, QString *error) {
     if (m_busy) return fail("小米线刷操作尚未结束。");
     if (!QFileInfo(m_fastboot).isFile()) return fail("程序内置 fastboot.exe 不存在，请重新启动并检查资源提取。");
     if (!QFileInfo(package.script).isFile()) return fail("刷机脚本不存在，请重新选择刷机包。");
+    m_package = package;
+    if (!scriptUnchanged(error)) return false;
     if (!DeviceOperationLease::acquire(this, error)) return false;
 
     m_package = package;
     m_busy = true;
     m_failed = false;
+    m_scriptStarted = false;
+    m_probeCancelled = m_probeTimedOut = false;
+    m_detectedSerial.clear();
     m_mismatchPending = false;
     m_item = -1;
     m_lastPercent = 0;
@@ -130,23 +152,96 @@ bool XiaomiFlashService::start(const Xiaomi::Package &package, QString *error) {
     m_transferRate = "0MB/s";
     m_pendingOutput.clear();
     m_elapsed.restart();
+    emit log("正在检测 Fastboot 设备，尚未执行刷机脚本。\n");
+    m_checking = true;
+    emit checkingChanged(true);
+    beginProbe(false);
+    return true;
+}
+bool XiaomiFlashService::scriptUnchanged(QString *error) const {
+    QFile script(m_package.script);
+    if (!script.open(QIODevice::ReadOnly)) {
+        if (error) *error = "无法读取刷机脚本：" + script.errorString();
+        return false;
+    }
+    const QByteArray bytes = script.readAll();
+    if (script.error() != QFile::NoError) {
+        if (error) *error = "无法完整读取刷机脚本。";
+        return false;
+    }
+    if (!m_package.scriptSha256.isEmpty() &&
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256) != m_package.scriptSha256) {
+        if (error) *error = "确认后刷机脚本已变化，已拒绝执行，请重新选择并确认。";
+        return false;
+    }
+    return true;
+}
+void XiaomiFlashService::beginProbe(bool product) {
+    m_checkProduct = product;
+    emit progressInfo(product ? "正在检查设备响应（未开始刷机，可取消）" : "正在检测 Fastboot（未开始刷机，可取消）");
+    m_probe.setProgram(m_fastboot);
+    m_probe.setWorkingDirectory(QFileInfo(m_fastboot).absolutePath());
+    // Select only the read-only probe. The original BAT still receives no -s.
+    m_probe.setArguments(product ? QStringList{"-s", m_detectedSerial, "getvar", "product"} : QStringList{"devices"});
+    m_probeTimer.start();
+    m_probe.start();
+    m_probe.closeWriteChannel();
+}
+void XiaomiFlashService::cancelCheck() {
+    if (!m_checking) return;
+    m_probeCancelled = true;
+    m_probeTimer.stop();
+    m_probe.kill();
+}
+void XiaomiFlashService::completeProbe(int code, QProcess::ExitStatus status) {
+    if (!m_checking) return;
+    m_probeTimer.stop();
+    const QString output = QString::fromLocal8Bit(m_probe.readAllStandardOutput());
+    if (m_probeCancelled) { finish(false, "已取消设备检测，未执行刷机脚本。"); return; }
+    if (m_probeTimedOut) { finish(false, "Fastboot 设备检测超时，未执行刷机脚本。请检查驱动、连接和 Fastboot 模式后重试。"); return; }
+    if (status != QProcess::NormalExit || code != 0) {
+        emit log(output);
+        finish(false, "Fastboot 设备检测失败，未执行刷机脚本。请检查驱动及设备连接。"); return;
+    }
+    if (!m_checkProduct) {
+        static const QRegularExpression device(R"(^\s*(\S+)\s+fastboot\s*$)", QRegularExpression::CaseInsensitiveOption);
+        QStringList serials;
+        for (const QString &line : output.split('\n')) {
+            const auto match = device.match(line);
+            if (match.hasMatch() && !serials.contains(match.captured(1))) serials.append(match.captured(1));
+        }
+        if (serials.size() != 1) {
+            finish(false, serials.isEmpty() ? "未检测到 Fastboot 设备，未执行刷机脚本。请进入 Fastboot 模式、检查驱动并连接设备后重试。" :
+                   "检测到多台 Fastboot 设备，未执行刷机脚本。请只连接目标设备后重试。"); return;
+        }
+        m_detectedSerial = serials.first();
+        beginProbe(true);
+        return;
+    }
+    static const QRegularExpression product(R"((?:^|\n)\s*(?:\(bootloader\)\s*)?product:\s*(\S+))",
+                                           QRegularExpression::CaseInsensitiveOption);
+    const auto match = product.match(output);
+    if (!match.hasMatch() || output.contains("FAILED", Qt::CaseInsensitive)) {
+        emit log(output);
+        finish(false, "设备未返回有效的 Fastboot product，未执行刷机脚本。请检查设备状态后重试。"); return;
+    }
+    emit log(QString("检测到 Fastboot 设备：%1，product：%2\n").arg(m_detectedSerial, match.captured(1)));
+    // Recheck the script after both asynchronous probes (not just after the dialog).
+    QString error;
+    if (!scriptUnchanged(&error)) { finish(false, error); return; }
+    m_checking = false;
+    emit checkingChanged(false);
+    m_elapsed.restart();
     emit progress(m_package.progressPlanValid ? 0 : -1);
     emit log("开始执行小米官方线刷脚本：" + m_package.script + "\n保留脚本原有的机型、防回滚和 BL 检查；刷写中禁止中断。");
     emit progressInfo("0MB/s  |  Time:0s");
     m_statusTimer.start();
     launchScript();
-    return true;
 }
 void XiaomiFlashService::launchScript() {
-    QFile script(m_package.script);
-    if (!script.open(QIODevice::ReadOnly)) { finish(false, "无法读取刷机脚本：" + script.errorString()); return; }
-    const QByteArray bytes = script.readAll();
-    if (script.error() != QFile::NoError) { finish(false, "无法完整读取刷机脚本。"); return; }
-    const auto hash = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
-    if (!m_package.scriptSha256.isEmpty() && hash != m_package.scriptSha256) {
-        finish(false, "确认后刷机脚本已变化，已拒绝执行，请重新选择并确认。"); return;
-    }
-
+    QString error;
+    if (!scriptUnchanged(&error)) { finish(false, error); return; }
+    m_scriptStarted = true;
     const QString toolDirectory = QFileInfo(m_fastboot).absolutePath();
     auto env = QProcessEnvironment::systemEnvironment();
     env.insert("ORANGE_XIAOMI_SCRIPT", QDir::toNativeSeparators(m_package.script));
@@ -158,7 +253,7 @@ void XiaomiFlashService::launchScript() {
     m_process.setArguments({});
     // No -s is appended: the selected official BAT receives exactly the same
     // command line as in the reference implementation.
-    m_process.setNativeArguments("/d /v:off /s /c \"\"%ORANGE_XIAOMI_SCRIPT%\"\"");
+    m_process.setNativeArguments("/d /v:off /s /c \"@echo off & \"%ORANGE_XIAOMI_SCRIPT%\"\"");
     m_process.start();
     // Avoid an accidental PAUSE keeping the operation and lease alive forever.
     m_process.closeWriteChannel();
@@ -175,9 +270,19 @@ void XiaomiFlashService::readOutput() {
         handleLine(QString::fromLocal8Bit(bytes));
     }
 }
+bool XiaomiFlashService::isCommandEcho(const QString &line) {
+    // ECHO ON scripts may print: C:\...>fastboot ... || echo Missmatching...
+    // Ignore only shell command syntax, never actual Fastboot error/result lines.
+    static const QRegularExpression prompt(R"(^\s*(?:[A-Za-z]:[\\/]|\\\\)[^>]*>)");
+    static const QRegularExpression command(
+        R"(^\s*(?:[|&]{2}\s*)?@?(?:echo|if|for|set|exit|findstr|rem|cd|pause|fastboot(?:\.exe)?)\b(?:\s|$))",
+        QRegularExpression::CaseInsensitiveOption);
+    return prompt.match(line).hasMatch() || command.match(line).hasMatch();
+}
 void XiaomiFlashService::handleLine(const QString &line) {
     if (line.trimmed().isEmpty()) return;
     emit log(line + "\n");
+    if (isCommandEcho(line)) return; // A displayed conditional error is not an executed error.
     if (m_mismatchPending) { m_mismatchTimer.stop(); m_mismatchPending = false; }
     if (line.contains("Missmatching", Qt::CaseInsensitive)) {
         m_mismatchPending = true;
@@ -242,10 +347,14 @@ void XiaomiFlashService::finish(bool success, const QString &message) {
     if (!m_busy) return;
     m_mismatchTimer.stop();
     m_statusTimer.stop();
+    m_probeTimer.stop();
+    const bool wasChecking = m_checking;
+    m_checking = false;
     m_mismatchPending = false;
     m_busy = false;
     m_transferRate = "0MB/s";
-    emit progressInfo(QString("0MB/s  |  Time:%1s").arg(m_elapsed.elapsed() / 1000));
+    if (wasChecking) emit checkingChanged(false);
+    emit progressInfo(m_scriptStarted ? QString("0MB/s  |  Time:%1s").arg(m_elapsed.elapsed() / 1000) : "未开始刷机");
     DeviceOperationLease::release(this);
     if (success) emit progress(100);
     emit log(message + "\n");

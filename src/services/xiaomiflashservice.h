@@ -29,6 +29,9 @@ class XiaomiFlashService : public QObject {
 public:
     explicit XiaomiFlashService(QObject *parent = nullptr);
     bool isBusy() const { return m_busy; }
+    bool isChecking() const { return m_checking; }
+    bool hasStartedScript() const { return m_scriptStarted; }
+    void cancelCheck(); // Only the read-only preflight may be cancelled.
     void configure(const QString &fastbootPath);
     bool start(const Xiaomi::Package &package, QString *error);
 signals:
@@ -36,11 +39,15 @@ signals:
     void progress(int percent); // -1: indeterminate/fallback progress
     void warning(const QString &text);
     void progressInfo(const QString &text);
+    void checkingChanged(bool checking);
     void finished(bool success, const QString &message);
 private:
     friend class XiaomiTests;
-    QProcess m_process;
-    QTimer m_mismatchTimer, m_statusTimer;
+    QProcess m_process, m_probe;
+    QTimer m_mismatchTimer, m_statusTimer, m_probeTimer;
+    bool m_checking = false, m_checkProduct = false, m_probeTimedOut = false;
+    bool m_probeCancelled = false, m_scriptStarted = false;
+    QString m_detectedSerial;
     QString m_fastboot;
     QByteArray m_pendingOutput;
     Xiaomi::Package m_package;
@@ -58,7 +65,11 @@ private:
     void readOutput();
     void handleLine(const QString &line);
     void completeProcess(int code, QProcess::ExitStatus status);
+    bool scriptUnchanged(QString *error) const;
+    void beginProbe(bool product);
+    void completeProbe(int code, QProcess::ExitStatus status);
     void launchScript();
+    static bool isCommandEcho(const QString &line);
     void finish(bool success, const QString &message);
     void parseFallbackProgress(const QString &line);
     void updateProgress();

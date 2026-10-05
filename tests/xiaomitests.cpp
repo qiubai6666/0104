@@ -47,6 +47,19 @@ int fakeFastboot(const QStringList &args) {
     QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT"));
     if (audit.open(QIODevice::Append)) audit.write((args.mid(1).join('|') + '\n').toUtf8());
     QTextStream out(stdout);
+    if (args.contains("devices")) {
+        if (behavior == "detect-timeout") QThread::msleep(3000);
+        if (behavior == "detect-error") return 2;
+        if (behavior == "no-device") return 0;
+        if (behavior == "multiple-devices") out << "MOCK1\tfastboot\nMOCK2\tfastboot\n";
+        else out << "MOCK1\tfastboot\n";
+        out.flush(); return 0;
+    }
+    if (args.contains("getvar") && args.contains("product")) {
+        if (behavior == "product-timeout") QThread::msleep(3000);
+        if (behavior == "product-error") { out << "FAILED (remote: no product)\n"; out.flush(); return 1; }
+        out << "product: fuxi\nFinished. Total time: 0.001s\n"; out.flush(); return 0;
+    }
     const int flashIndex = args.indexOf("flash");
     if (flashIndex >= 0) {
         const QString partition = args.value(flashIndex + 1);
@@ -141,8 +154,10 @@ private slots:
         QVERIFY(!service.isBusy()); QVERIFY(!DeviceOperationLease::owner());
         QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT")); QVERIFY(audit.open(QIODevice::ReadOnly));
         const auto trace = audit.readAll();
-        QVERIFY(!trace.contains("devices"));
-        QVERIFY(!trace.contains("-s|"));
+        QVERIFY(trace.contains("devices\n"));
+        QVERIFY(trace.contains("-s|MOCK1|getvar|product"));
+        // Only the read-only product probe is serial-selected; the BAT is unchanged.
+        QVERIFY(!trace.contains("-s|MOCK1|flash"));
         QVERIFY2(trace.contains("flash|boot|"), trace.constData());
         QVERIFY2(trace.contains("ROM"), trace.constData());
         if (success) QCOMPARE(progress.last()[0].toInt(), 100);
@@ -179,12 +194,124 @@ private slots:
         put(path + "/flash_all.bat", batch() + "echo changed\r\n");
         XiaomiFlashService service; service.configure(toolPath);
         QSignalSpy finished(&service, &XiaomiFlashService::finished);
-        QVERIFY(service.start(p, &error));
-        QCOMPARE(finished.size(), 1);
-        QVERIFY(!finished[0][0].toBool());
-        QVERIFY(finished[0][1].toString().contains("变化"));
+        QVERIFY(!service.start(p, &error));
+        QCOMPARE(finished.size(), 0);
+        QVERIFY(error.contains("变化"));
         QVERIFY(!QFileInfo::exists(qEnvironmentVariable("XIAOMI_TEST_AUDIT")));
         QVERIFY(!DeviceOperationLease::owner());
+    }
+    void preflightRejects_data() {
+        QTest::addColumn<QByteArray>("behavior");
+        QTest::newRow("none") << QByteArray("no-device");
+        QTest::newRow("multiple") << QByteArray("multiple-devices");
+        QTest::newRow("failed") << QByteArray("detect-error");
+        QTest::newRow("devices-timeout") << QByteArray("detect-timeout");
+        QTest::newRow("product-timeout") << QByteArray("product-timeout");
+        QTest::newRow("product-error") << QByteArray("product-error");
+    }
+    void preflightRejects() {
+        QFETCH(QByteArray, behavior);
+        qputenv("XIAOMI_TEST_BEHAVIOR", behavior);
+        Xiaomi::Package p; QString error;
+        QVERIFY(Xiaomi::inspectPackage(makePackage(), Xiaomi::Mode::Wipe, &p, &error));
+        XiaomiFlashService service; service.configure(toolPath);
+        service.m_probeTimer.setInterval(500);
+        QSignalSpy finished(&service, &XiaomiFlashService::finished);
+        QSignalSpy progress(&service, &XiaomiFlashService::progress);
+        QVERIFY(service.start(p, &error)); QVERIFY(service.isChecking());
+        QVERIFY(!service.hasStartedScript()); QVERIFY(progress.isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+        QVERIFY(!finished[0][0].toBool()); QVERIFY(!service.isBusy());
+        QVERIFY(!service.hasStartedScript()); QVERIFY(progress.isEmpty());
+        QVERIFY(!DeviceOperationLease::owner());
+        QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT"));
+        if (audit.open(QIODevice::ReadOnly)) QVERIFY(!audit.readAll().contains("flash|"));
+        // The same service can retry immediately; no stale cancelled probe may finish it.
+        qputenv("XIAOMI_TEST_BEHAVIOR", "success");
+        service.m_probeTimer.setInterval(5000);
+        QVERIFY(service.start(p, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
+        QVERIFY(finished[1][0].toBool());
+    }
+    void cancelReadOnlyProbe() {
+        for (const QByteArray &behavior : {QByteArray("detect-timeout"), QByteArray("product-timeout")}) {
+            qputenv("XIAOMI_TEST_BEHAVIOR", behavior);
+            Xiaomi::Package p; QString error;
+            QVERIFY(Xiaomi::inspectPackage(makePackage(), Xiaomi::Mode::Wipe, &p, &error));
+            XiaomiFlashService service; service.configure(toolPath);
+            QSignalSpy finished(&service, &XiaomiFlashService::finished);
+            QSignalSpy progress(&service, &XiaomiFlashService::progress);
+            QVERIFY(service.start(p, &error));
+            if (behavior == "product-timeout") QTRY_VERIFY(service.m_checkProduct);
+            service.cancelCheck();
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 2000);
+            QVERIFY(!finished[0][0].toBool()); QVERIFY(finished[0][1].toString().contains("取消"));
+            QVERIFY(progress.isEmpty()); QVERIFY(!service.isBusy()); QVERIFY(!DeviceOperationLease::owner());
+        }
+    }
+    void scriptChangedDuringProbe() {
+        qputenv("XIAOMI_TEST_BEHAVIOR", "product-timeout");
+        const QString rom = makePackage(); Xiaomi::Package p; QString error;
+        QVERIFY(Xiaomi::inspectPackage(rom, Xiaomi::Mode::Wipe, &p, &error));
+        XiaomiFlashService service; service.configure(toolPath);
+        QSignalSpy finished(&service, &XiaomiFlashService::finished);
+        QVERIFY(service.start(p, &error));
+        QTRY_VERIFY(service.m_checkProduct);
+        QVERIFY(!put(p.script, "echo changed\r\n").isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 6000);
+        QVERIFY(!finished[0][0].toBool()); QVERIFY(finished[0][1].toString().contains("变化"));
+        QVERIFY(!service.hasStartedScript()); QVERIFY(!DeviceOperationLease::owner());
+    }
+    void echoedVendorScript_data() {
+        QTest::addColumn<bool>("echoOn");
+        QTest::newRow("default-echo") << false;
+        QTest::newRow("explicit-echo-on") << true;
+    }
+    void echoedVendorScript() {
+        QFETCH(bool, echoOn);
+        const QString rom = makePackage();
+        QByteArray script = echoOn ? "@echo on\r\n" : "";
+        script += "fastboot %* getvar product 2>&1 | findstr /r /c:\"^product: *fuxi\" || echo Missmatching image and device\r\n";
+        script += "fastboot %* getvar product 2>&1 | findstr /r /c:\"^product: *fuxi\" || exit /B 1\r\n";
+        script += "fastboot %* flash boot \"%~dp0images\\boot.img\" || @echo \"Flash boot error\" && exit /B 1\r\n";
+        script += "fastboot %* reboot || @echo \"Reboot error\" && exit /B 1\r\n";
+        QVERIFY(!put(rom + "/flash_all.bat", script).isEmpty());
+        Xiaomi::Package p; QString error;
+        QVERIFY(Xiaomi::inspectPackage(rom, Xiaomi::Mode::Wipe, &p, &error));
+        XiaomiFlashService service; service.configure(toolPath);
+        QSignalSpy finished(&service, &XiaomiFlashService::finished);
+        QSignalSpy warnings(&service, &XiaomiFlashService::warning);
+        QSignalSpy progress(&service, &XiaomiFlashService::progress);
+        QVERIFY(service.start(p, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY2(finished[0][0].toBool(), qPrintable(finished[0][1].toString()));
+        QVERIFY(warnings.isEmpty());
+        bool advanced = false;
+        for (const auto &entry : progress) if (entry[0].toInt() > 0 && entry[0].toInt() < 100) advanced = true;
+        QVERIFY(advanced); QCOMPARE(progress.last()[0].toInt(), 100);
+    }
+    void commandEchoIsNotAResult() {
+        XiaomiFlashService service; service.m_elapsed.start();
+        service.m_package.progressPlanValid = true;
+        service.m_package.images = {{"boot", 1024}};
+        service.m_package.totalBytes = 1024;
+        QSignalSpy warnings(&service, &XiaomiFlashService::warning);
+        for (const QString &line : {
+            QStringLiteral("C:\\Users\\Administrator\\qiubai>fastboot getvar product 2>&1 | findstr /r /c:\"^product: *fuxi\" || echo Missmatching image and device"),
+            QStringLiteral("fastboot flash boot images\\boot.img || @echo \"Flash boot error\" && exit 1"),
+            QStringLiteral("if 0 equ 0 (fastboot flash boot images\\boot.img || @echo error)"),
+            QStringLiteral("echo \"Antirollback check error\" && exit /B 1")}) {
+            service.handleLine(line);
+        }
+        QVERIFY(!service.m_failed); QVERIFY(warnings.isEmpty());
+        QVERIFY(!service.m_mismatchTimer.isActive());
+        QSignalSpy progress(&service, &XiaomiFlashService::progress);
+        service.handleLine("Sending 'boot' (1 KB) OKAY [0.001s]");
+        service.handleLine("Writing 'boot' OKAY [0.001s]");
+        service.handleLine("Finished. Total time: 0.002s");
+        QCOMPARE(progress.last()[0].toInt(), 99);
+        service.handleLine("Flash boot error");
+        QVERIFY(service.m_failed); QCOMPARE(warnings.size(), 1);
     }
     void sparseAndMultipleImagesProgress() {
         XiaomiFlashService service;
@@ -321,6 +448,12 @@ private slots:
             ok->click(); timer.stop();
         }); timer.start(); start->click();
         QVERIFY(window.isBusy()); QVERIFY(!start->isEnabled()); QVERIFY(!window.close());
+        auto cancel = window.findChild<QPushButton *>("CancelXiaomiCheckButton"); QVERIFY(cancel);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<XiaomiFlashService *>()->hasStartedScript(), 5000);
+        QVERIFY(cancel->isHidden());
+        const auto log = window.findChild<QPlainTextEdit *>("XiaomiFlashLogTextBox");
+        QVERIFY(log->height() >= 240);
+        QVERIFY(log->height() >= window.height() / 3);
         QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 15000);
         QVERIFY(start->isEnabled());
         QVERIFY(window.findChild<QPlainTextEdit *>("XiaomiFlashLogTextBox")->toPlainText().contains("完成"));
