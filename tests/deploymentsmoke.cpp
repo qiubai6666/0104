@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QDebug>
 #include <QImageReader>
 #include <QLibrary>
@@ -77,8 +78,24 @@ int main(int argc, char *argv[]) {
       return 8;
     }
   }
+  auto work = QtConcurrent::run([] { return 6 * 7; });
+  if (work.result() != 42) { qCritical() << "Qt Concurrent execution failed"; return 9; }
+  QLibrary bzip(application.applicationDirPath() + "/libbz2-1");
+  using Compress = int (*)(char *, unsigned int *, char *, unsigned int, int, int, int);
+  using Decompress = int (*)(char *, unsigned int *, char *, unsigned int, int, int);
+  auto compress = reinterpret_cast<Compress>(bzip.resolve("BZ2_bzBuffToBuffCompress"));
+  auto decompress = reinterpret_cast<Decompress>(bzip.resolve("BZ2_bzBuffToBuffDecompress"));
+  QByteArray original("Orange Tools offline bzip2 smoke");
+  QByteArray compressed(256, char(0)), restored(256, char(0));
+  unsigned int compressedSize = compressed.size(), restoredSize = restored.size();
+  if (!compress || !decompress ||
+      compress(compressed.data(), &compressedSize, original.data(), original.size(), 9, 0, 30) != 0 ||
+      decompress(restored.data(), &restoredSize, compressed.data(), compressedSize, 0, 0) != 0 ||
+      restored.left(restoredSize) != original) {
+    qCritical() << "bzip2 buffer round-trip failed:" << bzip.errorString(); return 10;
+  }
   qInfo() << "Deployment smoke passed: Windows plugin, widget rendering, PNG, "
-             "Schannel TLS 1.2, Qt Concurrent, Ouga SVG icons";
+             "Schannel TLS 1.2, Qt Concurrent execution, Ouga SVG icons, bzip2 round-trip";
   qInfo() << "Plugin paths:" << application.libraryPaths();
   qInfo() << "TLS backends:" << QSslSocket::availableBackends();
   return 0;

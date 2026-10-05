@@ -12,7 +12,10 @@
 ├── README.md                   # 使用、源码导航和开发说明（本文）
 ├── deploy.ps1                  # 部署 Release、精简可选依赖，可选择 UPX
 ├── compress-release.ps1        # 只压缩未签名主程序/MinGW 运行库，并解压校验
-├── package-release.ps1         # 高压缩率 7z 下载包、完整性和逐文件 SHA-256 校验
+├── package-release.ps1         # 保留的 7z 下载包入口
+├── release.ps1                 # TEMP 完整构建、回归、四候选、部署；默认单 EXE
+├── package-single-exe.ps1      # 已验证的干净部署目录 → 安装型 SFX 单 EXE
+├── scripts/SingleExe.Common.ps1 # 清单、许可、签名/依赖验证和 SFX 公共函数
 ├── resources.qrc               # 需要编进 exe 的工具资源清单
 ├── resources.pri               # 主程序/测试共用资源配置；默认不压缩，可选 zlib
 ├── app.rc / app.manifest        # Windows 图标、权限和兼容性配置
@@ -44,7 +47,7 @@
 │   └── check-deployment.ps1     # 隔离开发环境后运行发布检查并清理临时 exe
 ├── build/                      # 编译/测试时生成，可清理，Git 忽略
 ├── OrangeToolsApp/             # 部署后的完整程序目录，Git 忽略
-└── dist/                       # 7z 下载包及 SHA-256 校验文件，Git 忽略
+└── dist/                       # 单 EXE / 7z 下载包及校验文件，Git 忽略
 ```
 
 ### 每个源码文件负责什么？
@@ -189,7 +192,7 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 
 ### 工具资源与 Git 推送
 
-`resources.qrc` 当前需要 23 项工具资源。仅提交资源清单不会上传其中引用的文件；工具 exe/DLL 也必须纳入提交。之前全局 `*.exe`、`*.dll` 规则误将这些输入文件排除，已针对 `/qiubai/*.exe` 和 `/qiubai/*.dll` 添加例外，不放开其他目录。
+`resources.qrc` 当前列出 40 项资源；发布测试从清单动态核对数量、大小及 SHA-256。仅提交资源清单不会上传其中引用的文件；工具 exe/DLL 也必须纳入提交。之前全局 `*.exe`、`*.dll` 规则误将这些输入文件排除，已针对 `/qiubai/*.exe` 和 `/qiubai/*.dll` 添加例外，不放开其他目录。
 
 修改或更换工具文件后，将对应的 `qiubai/` 文件与资源清单变更一起提交，再推送。可用以下只读命令核对：
 
@@ -575,6 +578,103 @@ foreach ($relativePath in $cleanupTargets) {
 }
 ```
 
-这份清单表示“已核实可清理”，不代表文件已经自动删除。清理不触碰手机或 `%LOCALAPPDATA%` 中的运行数据，也不改变 `resources.qrc` 中的 23 项内嵌资源。
+这份清单表示“已核实可清理”，不代表文件已经自动删除。清理不触碰手机或 `%LOCALAPPDATA%` 中的运行数据，也不改变 `resources.qrc` 中列出的内嵌资源。
 
 本项目自身源码采用 MIT 许可证；Qt、ADB、scrcpy、Payload 及其他分发工具遵循各自许可证。
+
+## 10. 全功能单 EXE 发布（新默认入口）
+
+**新入口是 `release.ps1`**：默认从当前工作树快照完整构建，比较四种单 EXE 候选，全部验证通过后更新本工作树 `OrangeToolsApp`，交付 `dist/OrangeTools-Single.exe` 和可选的 `.sha256`。不提交运行包、不自动推送、不覆盖已有交付文件；桌面工作目录 `D:\Users\Administrator\Desktop\新版本\OrangeToolsApp` 不会自动更新。
+
+接收者只需一个 EXE：包含现有离线工具、Qt 动态库、MinGW/bzip2 运行库及许可材料，不联网下载依赖，也不要求安装 PowerShell 或 7-Zip。**单文件指分发文件只有一个，不是零解压、零磁盘占用。**普通 qmake 默认资源配置、`deploy.ps1`、旧 7z 入口和旧包不变；没有改成静态 Qt。
+
+### 10.1 脚本职责与复现
+
+- `release.ps1`：选定同一 Qt Release kit；源码快照、构建、回归、干净部署、四候选比较、依赖/签名验证、工作树部署和交付。实验和日志全部位于独立系统 TEMP，不以旧运行目录为打包输入。
+- `package-single-exe.ps1`：低层打包器，**必须显式传入已验证的全新 `-ReleaseDirectory`**；严格检查文件清单、模块 pin 和许可证，复制到 TEMP 后可选 UPX，再创建 SFX、实际解压并逐文件比对。单独使用不能代替完整构建/回归流程。
+- `scripts/SingleExe.Common.ps1`：安全路径、SHA-256 清单、许可证收集、Qt 文件签名、PE 依赖和部署烟雾验证。
+- `tests/test-single-exe.ps1` / `tests/fixtures/sfxprobe.cpp`：以只写测试标记并短暂等待的无害程序验证 SFX 生命周期，**不启动真实主程序**。
+- `tests/test-release-scripts.ps1`：验证禁止已有文件覆盖、模块篡改、TEMP 越界和测试残留串包等保护。
+
+以下命令从项目根目录运行；UPX 路径替换为你保留的 UPX 可执行文件。Qt 许可证和匹配离线 Qt Docs 默认从 Qt 安装根目录查找，也可以传 `-QtLicensePath`、`-QtDocsPath`。未找到工具/许可材料时停止，不自动下载替代品。
+
+```powershell
+pwsh -NoProfile -File .\release.ps1 `
+  -QtBinPath 'D:\Qt\6.11.2\mingw_64\bin' `
+  -CompilerBinPath 'D:\Qt\Tools\mingw1310_64\bin' `
+  -SevenZipPath 'D:\Program Files\7-Zip\7z.exe' `
+  -UpxPath 'C:\Tools\upx\upx.exe' `
+  -OutputPath .\dist\OrangeTools-Single.exe
+```
+
+可选参数：`-SfxPath`（字节必须匹配固定模块）、`-Jobs`（默认 4）。已有输出需自行保留并另选 `-OutputPath`，脚本拒绝覆盖 EXE 和校验文件。显式选择旧格式时，在同一命令中改用：
+
+```powershell
+-Format 7z -OutputPath .\dist\OrangeTools-Portable-New.7z
+```
+
+### 10.2 固定模块、压缩与启动行为
+
+安装型模块是 **官方 7-Zip Extra 9.20（2010）的 `7zS.sfx`**，不是普通只解压的 `7z.sfx`，也不是第三方改装壳。模块随源码保存在 `third_party/7zip-sfx/`，`module.json` 固定官方来源、版本、140,288 bytes 和 SHA-256：
+
+```text
+998F55C1B61BE2C7E0C5F11673B03C36BD7BB941273FCF956CAA1B746C08178F
+```
+
+来源与对应源码链接见该目录 README；原版许可和说明也嵌入发布包。**这是历史模块，不是最新版本；hash 固定不代表没有安全缺陷。**更新模块必须重新审查并重跑完整候选和探针；接收者应从可信发布渠道获取并核验校验值。
+
+组成：`7zS.sfx + UTF-8 配置 + 固实 7z 数据`。四候选统一使用兼容模块的 LZMA、`-mx=9 -m0=LZMA -mf=off -ms=on -md=64m -mfb=273 -mmt=2`，关闭创建/访问/修改时间元数据。配置直接调用带引号的释放目录绝对路径 `Orange Tools.exe`，不通过批处理或 PowerShell。
+
+双击后释放到独立系统 TEMP 子目录，启动主程序并等待退出，正常退出后由 SFX 清理自己的释放目录；并发启动使用不同目录。强制终止、崩溃、杀毒占用或子工具未退出可能留下残留；**不清理既有 AppData 工具、配置或用户数据**。EXE 未签名，系统或杀毒软件可能提示风险；不保证绕过 SmartScreen/杀毒检测。
+
+### 10.3 当前源码的四候选实测
+
+下表是 2026-10-05 本次相同源码和 kit 的完整离线单 EXE；不是以前 28.08 MiB 或 23 项资源版本的数据。按验证通过后的 EXE 字节数选择最小；相同时先选不用 UPX，再选 raw。不声称全局理论最小。
+
+| 候选 | 资源配置 | UPX | 单 EXE 字节数 | 下载 MiB | 解压文件总字节数 | 解压 MiB |
+|---|---|---|---:|---:|---:|---:|
+| **A（最终选择）** | raw，不压缩 | 否 | **34,365,334** | **32.77** | 91,825,341 | 87.57 |
+| B | zlib | 否 | 40,247,638 | 38.38 | 67,889,341 | 64.74 |
+| C | raw，不压缩 | 是 | 34,876,049 | 33.26 | 60,091,069 | 57.31 |
+| D | zlib | 是 | 40,660,323 | 38.78 | 65,801,405 | 62.75 |
+
+MiB = 1,048,576 bytes；解压大小是包内 99 个文件的内容总和，不包含文件系统簇、后续 AppData 数据或子工具运行缓存。A 比 C 小 510,715 bytes：本次 UPX 减少了运行目录大小，但没有减少外层压缩后的下载大小，因此不采用。
+
+交付：`dist/OrangeTools-Single.exe`（仅此文件即可运行），`dist/OrangeTools-Single.exe.sha256` 为可选校验文件。最终 EXE 的 SHA-256：
+
+```text
+2B9DA0F1300E4EAE2276AB0FCC5679C253F55F19539AD8D977BCA5EE2AA69F7E
+```
+
+本次工具：Qt 6.11.2 MinGW 64-bit Release、GCC 13.1.0、7-Zip 26.02 x64、UPX 5.0.2。UPX 仅用于 C/D 比较；胜出 A 不含 UPX 加壳。默认入口以后仍会按当前源码重新比较，不硬编码永远选 A。
+
+UPX 只在 TEMP 副本中处理未签名主程序和三项允许的 MinGW DLL；签名 Qt DLL、原始工具不加壳。每项执行 `upx -t` 和解壳代码/资源段内容验证。UPX 会重建 PE 头与导入表，因此记录整体 SHA-256，但不错误地要求解壳文件整体 hash 等于原始文件。
+
+### 10.4 验收范围与限制
+
+本次完整流水线验证通过（以下为 QtTest 报告的 passed 数，全部 **0 failed / 0 skipped**）：
+
+| 回归套件 | 通过数 |
+|---|---:|
+| ReadabilityTests — raw | 11 |
+| ReadabilityTests — zlib | 11 |
+| ProcessManagerTests | 16 |
+| DeviceOperationTests | 34 |
+| OugaDependencyTests | 83 |
+| OugaTests — Windows 原生平台 | 1,004 |
+| OugaNetworkTests — 本机 loopback | 24 |
+
+- raw/zlib 两套均按当前 `resources.qrc` **40 项**核对内嵌文件大小和 SHA-256；每种配置的主程序、ReadabilityTests 和 DeploymentSmoke 的生成 `qrc_resources.cpp` SHA-256 相同，匹配资源配置和 Release kit。
+- A/B/C/D 每个候选均通过压缩数据完整性、实际解压的 **99 文件**清单/大小/SHA-256 检查、传递 PE 依赖检查、**10 个 Qt DLL/插件签名**及 kit 文件 hash 检查、许可材料检查，以及 Windows 绘制、PNG、Schannel TLS 能力、Concurrent 实际执行、SVG 渲染和 bzip2 压缩/解压往返烟雾验证。
+- C/D 对四个允许的未签名 PE 文件执行 UPX 完整性和解壳内容段校验。原始部署输入与内嵌工具未被修改。
+- 9 项发布脚本安全测试通过；无害 SFX 探针通过中文/空格路径、释放目录作为工作目录、等待退出、并发目录隔离、正常退出清理、损坏包拒绝启动。还用真实依赖/许可副本加 65 MiB 无害数据验证了完整多文件、64 MiB 字典解码（`LZMA:26`、固实单块）；所有探针均先用无害程序替换任务副本中的真实主 EXE，未混入正式包。
+- 最终 EXE 在创建交付文件前再次通过 `7z t`、实际解压及逐文件 SHA-256；交付副本 SHA-256 等于候选 A。没有测试程序、日志、探针或构建产物入包。
+- 按明确的本次 Release 产物、Qt 和工作树目标参数调用 `deploy.ps1`，仅更新本工作树 `OrangeToolsApp`；当前 99 个正式文件与获胜候选逐项一致，部署烟雾验证通过，已有配置/数据/未知文件保留。桌面发布目录未覆盖。
+
+本次成功验收证据保留在 `C:\Users\Administrator\AppData\Local\Temp\orangetools-single-970ca530d87c4c449cc78f0ca7e93f58`（`result.json`、`candidates.json`、清单/签名/烟雾/回归日志及 SFX 探针结果）；短路径测试夹具在 `C:\Users\Administrator\AppData\Local\Temp\ot-tests-7547ca14`。这些是本机证据，不是运行依赖。
+
+保留 Core/Gui/Widgets/Network/Concurrent/Svg、bzip2、三项 MinGW 运行库和 Windows/样式/网络信息/Schannel 必需插件；排除已确认可选的软件 OpenGL、D3D 编译器和未使用插件。Qt 签名和文件 hash 均匹配本次 kit，许可证随解压目录保留。
+
+验收不连接手机，不刷写，不执行真实外网下载；回归网络测试只使用本机 loopback，工具版本/归档/镜像测试只处理无害本地夹具。最终 EXE 没有被执行，只由 7-Zip 解压做清单与 hash 比对。没有把这些检查说成真实手机联调或所有设备兼容性验证。
+
+脚本失败时保留证据，不交付未经验证的新包；运行包更新失败时可能不完整，不继续分发。TEMP 实验不会自动删除，确认排错结束且无进程占用后再手动清理本任务路径。

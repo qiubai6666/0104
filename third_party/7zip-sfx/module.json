@@ -1,0 +1,7 @@
+{
+  "version": "7-Zip Extra 9.20",
+  "source": "https://www.7-zip.org/a/7z920_extra.7z",
+  "module": "7zS.sfx",
+  "bytes": 140288,
+  "sha256": "998F55C1B61BE2C7E0C5F11673B03C36BD7BB941273FCF956CAA1B746C08178F"
+}
