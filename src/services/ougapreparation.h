@@ -1,6 +1,7 @@
 #ifndef OUGAPREPARATION_H
 #define OUGAPREPARATION_H
 #include "ougapackage.h"
+#include "ougapayloadreader.h"
 #include "ougapayloadprocess.h"
 #include <atomic>
 #include <QFutureWatcher>
@@ -16,6 +17,8 @@ public:
   void payload(const QString &tool, const QString &file, const QString &output,
                const QStringList &selected = {},
                const QString &oldDirectory = {});
+  void payloadUrl(const QUrl &url, const QString &output,
+                  const QStringList &selected = {});
   void listPayload(const QString &tool, const QString &file);
   void extractArchive(const QString &tool, const QString &file,
                       const QString &output, bool scanImages = true);
@@ -56,6 +59,10 @@ private:
   void parsePayloadCounter();
   void startPayloadRow(const QString &name);
   void nativePayload(const QString &file, const OugaPayloadLayout &layout,
+                     const QVector<OugaPayloadEntry> &entries,
+                     const QString &output, const QStringList &selected);
+  void nativePayload(const QSharedPointer<OugaRandomAccessReader> &reader,
+                     const OugaPayloadLayout &layout,
                      const QVector<OugaPayloadEntry> &entries,
                      const QString &output, const QStringList &selected);
   QString m_output;

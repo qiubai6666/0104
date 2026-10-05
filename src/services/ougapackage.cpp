@@ -688,37 +688,56 @@ bool OugaPackage::payloadManifest(const QString &file,
                                   QVector<OugaPayloadEntry> *entries,
                                   bool *delta, QString *error,
                                   OugaPayloadLayout *layout) {
+  OugaLocalFileReader reader(file, error);
+  if (!reader.valid()) {
+    entries->clear();
+    *delta = false;
+    return false;
+  }
+  return payloadManifest(reader, entries, delta, error, layout);
+}
+
+bool OugaPackage::payloadManifest(const OugaRandomAccessReader &reader,
+                                  QVector<OugaPayloadEntry> *entries,
+                                  bool *delta, QString *error,
+                                  OugaPayloadLayout *layout) {
   entries->clear();
   *delta = false;
-  QFile f(file);
-  if (!f.open(QIODevice::ReadOnly))
-    return fail(error, "Payload 不可读");
-  quint64 base = 0, length = quint64(f.size());
-  switch (OugaPayloadExtractor::locate(file, &base, &length)) {
+  quint64 base = 0, length = reader.size();
+  QString readError;
+  switch (OugaPayloadExtractor::locate(reader, &base, &length, &readError)) {
   case OugaPayloadExtractor::Zip::NotZip:
     base = 0;
-    length = quint64(f.size());
+    length = reader.size();
     break;
   case OugaPayloadExtractor::Zip::Stored:
     break;
   case OugaPayloadExtractor::Zip::Other:
-    return fail(error, "ZIP 内 payload.bin 未以存储方式保存，需先解压");
+    return fail(error, !readError.isEmpty() ? readError : reader.isRemote()
+        ? "远程 ZIP 需要唯一、未加密且未压缩的 payload.bin；不会下载完整 ZIP，请提供直接 Payload 链接或本地文件"
+        : "ZIP 内 payload.bin 未以存储方式保存，需先解压");
   }
-  if (!f.seek(qint64(base)))
-    return fail(error, "Payload 不可读");
-  QByteArray h = f.read(24);
-  if (h.size() != 24 || h.left(4) != "CrAU" ||
+  if (base > reader.size() || length > reader.size() - base || length < 24)
+    return fail(error, "Payload 头/范围越界");
+  const QByteArray h = reader.read(base, 24, &readError);
+  if (h.size() != 24)
+    return fail(error, readError.isEmpty() ? "Payload 头读取失败" : readError);
+  if (h.left(4) != "CrAU" ||
       qFromBigEndian<quint64>(
           reinterpret_cast<const uchar *>(h.constData() + 4)) != 2)
     return fail(error, "仅支持有效的 v2 Payload");
-  quint64 n = qFromBigEndian<quint64>(
+  const quint64 n = qFromBigEndian<quint64>(
       reinterpret_cast<const uchar *>(h.constData() + 12));
-  quint32 sig = qFromBigEndian<quint32>(
+  const quint32 sig = qFromBigEndian<quint32>(
       reinterpret_cast<const uchar *>(h.constData() + 20));
-  if (length < 24 || !n || n > 64 * 1024 * 1024 || n + sig > length - 24)
+  if (!n || n > 64 * 1024 * 1024 || n > length - 24 ||
+      sig > length - 24 - n)
     return fail(error, "Payload manifest 越界");
+  const QByteArray manifest = reader.read(base + 24, n, &readError);
+  if (quint64(manifest.size()) != n)
+    return fail(error, readError.isEmpty() ? "Payload manifest 读取失败" : readError);
   QVector<Field> fields;
-  if (!proto(f.read(qint64(n)), &fields))
+  if (!proto(manifest, &fields))
     return fail(error, "Payload protobuf 损坏");
   OugaPayloadLayout geometry;
   geometry.base = base;

@@ -286,7 +286,9 @@ void OugaFlashWindow::extractPayload(bool all) {
     log("错误：请先选择Payload.bin文件、全量包ZIP文件，或输入有效的全量包链接");
     return;
   }
-  if (all && !QFileInfo(m_payloadSource).isFile()) {
+  if (all && QUrl(m_payloadSource).scheme() != "https" &&
+      QUrl(m_payloadSource).scheme() != "http" &&
+      !QFileInfo(m_payloadSource).isFile()) {
     log("错误：本地Payload/ZIP文件不存在；链接请使用快捷云提取");
     return;
   }
@@ -324,23 +326,8 @@ void OugaFlashWindow::extractPayload(bool all) {
       endTask(false, "无效或不安全的下载地址");
       return;
     }
-    QString name = QFileInfo(url.path()).fileName();
-    if (name.isEmpty())
-      name = "payload.bin";
-    QString destination = QFileDialog::getSaveFileName(
-        this, "保存完整全量包（下载完成后本地提取，不自动删除）", name);
-    if (!continueTask(generation))
-      return;
-    if (destination.isEmpty()) {
-      endTask(false, "用户取消下载");
-      return;
-    }
-    m_task = Task::PayloadDownload;
-    m_downloaded.clear();
-    m_transferClock.invalidate();
-    m_lastBytes = 0;
-    log("开始云提取：本版先完整下载，再本地提取所选分区");
-    m_rom->download(url, destination);
+    log("开始云提取：使用 HTTP Range 按需读取远程 Payload，不下载完整全量包");
+    preparePayloadSource();
   } else
     preparePayloadSource();
 }
@@ -348,7 +335,9 @@ void OugaFlashWindow::preparePayloadSource() {
   const quint64 generation = m_generation;
   if (!continueTask(generation))
     return;
-  if (!m_unpackPayload) {
+  const QUrl sourceUrl(m_payloadSource);
+  if (!m_unpackPayload || sourceUrl.scheme() == "https" ||
+      sourceUrl.scheme() == "http") {
     startPayloadPreparation();
     return;
   }
@@ -391,7 +380,10 @@ void OugaFlashWindow::startPayloadPreparation() {
   log(m_unpackPayload ? "开始解包，输出将实时显示在日志窗口中。"
                       : m_extractNames.isEmpty() ? "开始提取镜像..."
                                                : "开始提取分区: " + m_extractNames.join(", "));
-  log("源文件: " + m_payloadSource);
+  const QUrl sourceUrl(m_payloadSource);
+  const bool remote = sourceUrl.scheme() == "https" || sourceUrl.scheme() == "http";
+  log("源文件: " + (remote ? sourceUrl.toDisplayString(QUrl::RemoveQuery |
+      QUrl::RemoveFragment | QUrl::RemoveUserInfo) : m_payloadSource));
   log("输出目录: " + m_payloadOutput);
   runPayload();
 }
@@ -418,6 +410,22 @@ void OugaFlashWindow::runPayload() {
   const quint64 generation = m_generation;
   if (!continueTask(generation))
     return;
+  const QUrl sourceUrl(m_payloadSource);
+  if (sourceUrl.scheme() == "https" || sourceUrl.scheme() == "http") {
+    if (m_unpackPayload) {
+      const QString output = availablePayloadOutput(m_payloadOutput);
+      if (output != m_payloadOutput)
+        log("输出目录已有文件，原文件保留；本次解包输出目录: " + output);
+      m_payloadOutput = output;
+    }
+    m_task = Task::PayloadExtract;
+    m_payloadLogBlocks.clear();
+    m_progress->setValue(0);
+    m_progress->setProperty("rate", "云提取中...");
+    updateBusy();
+    m_prepare->payloadUrl(sourceUrl, m_payloadOutput, m_extractNames);
+    return;
+  }
   struct Inspection {
     QString error, output;
     QStringList selected, missing;
@@ -621,42 +629,36 @@ void OugaFlashWindow::preparationFinished(bool success,
 void OugaFlashWindow::networkFinished(bool success, const QString &message) {
   if (m_task == Task::RescueSelection)
     return;
-  if (m_task != Task::PayloadDownload && m_task != Task::RescueDownload)
+  if (m_task != Task::RescueDownload)
     return;
   log(message);
   if (!success || m_stopRequested || m_downloaded.isEmpty()) {
     endTask(false, m_stopRequested ? "下载已取消，断点文件保留" : message);
     return;
   }
-  const Task completed = m_task;
   const quint64 generation = m_generation;
-  QTimer::singleShot(0, this, [this, completed, generation] {
+  QTimer::singleShot(0, this, [this, generation] {
     if (!continueTask(generation))
       return;
-    if (completed == Task::PayloadDownload) {
-      m_payloadSource = m_downloaded;
-      preparePayloadSource();
-    } else {
-      QString tool = requireTool("7z", "7z.exe");
-      if (!continueTask(generation))
-        return;
-      if (tool.isEmpty()) {
-        endTask(false, "下载包已保留；未配置7z，无法解压");
-        return;
-      }
-      QString output =
-          QFileDialog::getExistingDirectory(this, "选择售后包独立空解压目录");
-      if (!continueTask(generation))
-        return;
-      if (output.isEmpty()) {
-        endTask(false, "下载包已保留，用户取消解压");
-        return;
-      }
-      m_task = Task::RescueArchive;
-      m_progress->setValue(0);
-      m_progress->setProperty("rate", "解压中...");
-      m_prepare->extractArchive(tool, m_downloaded, output);
+    QString tool = requireTool("7z", "7z.exe");
+    if (!continueTask(generation))
+      return;
+    if (tool.isEmpty()) {
+      endTask(false, "下载包已保留；未配置7z，无法解压");
+      return;
     }
+    QString output =
+        QFileDialog::getExistingDirectory(this, "选择售后包独立空解压目录");
+    if (!continueTask(generation))
+      return;
+    if (output.isEmpty()) {
+      endTask(false, "下载包已保留，用户取消解压");
+      return;
+    }
+    m_task = Task::RescueArchive;
+    m_progress->setValue(0);
+    m_progress->setProperty("rate", "解压中...");
+    m_prepare->extractArchive(tool, m_downloaded, output);
   });
 }
 

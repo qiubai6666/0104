@@ -31,11 +31,6 @@ quint64 le64(const QByteArray &b, qsizetype at) {
   return qFromLittleEndian<quint64>(
       reinterpret_cast<const uchar *>(b.constData() + at));
 }
-QByteArray readAt(QFile &f, quint64 offset, qint64 size) {
-  if (!f.seek(qint64(offset)))
-    return {};
-  return f.read(size);
-}
 // One decoded operation must fit a bounded buffer; AOSP chunks are <= 2 MiB.
 constexpr quint64 maxOperationBytes = 256ull * 1024 * 1024;
 constexpr quint64 xzMemoryLimit = 256ull * 1024 * 1024;
@@ -199,47 +194,104 @@ bool bz2(const QByteArray &in, QByteArray *out) {
 }
 } // namespace
 
-OugaPayloadExtractor::Zip OugaPayloadExtractor::locate(const QString &file,
-                                                       quint64 *offset,
-                                                       quint64 *size) {
-  QFile f(file);
-  if (!f.open(QIODevice::ReadOnly) || f.read(2) != "PK")
+OugaPayloadExtractor::Zip OugaPayloadExtractor::locate(
+    const QString &file, quint64 *offset, quint64 *size, QString *error) {
+  QString localError;
+  OugaLocalFileReader reader(file, &localError);
+  if (!reader.valid()) {
+    if (error && !localError.isEmpty())
+      *error = localError;
+    return Zip::Other;
+  }
+  return locate(reader, offset, size, error);
+}
+
+OugaPayloadExtractor::Zip OugaPayloadExtractor::locate(
+    const OugaRandomAccessReader &reader, quint64 *offset, quint64 *size,
+    QString *error) {
+  if (!offset || !size)
+    return Zip::Other;
+  *offset = 0;
+  *size = 0;
+  bool readFailed = false;
+  auto readAt = [&](quint64 position, quint64 length) {
+    if (length > quint64(std::numeric_limits<qsizetype>::max())) {
+      readFailed = true;
+      return QByteArray();
+    }
+    QString readError;
+    const QByteArray data = reader.read(position, length, &readError);
+    if (data.size() != qsizetype(length)) {
+      readFailed = true;
+      if (error && !readError.isEmpty())
+        *error = readError;
+      return QByteArray();
+    }
+    return data;
+  };
+  const quint64 total = reader.size();
+  const QByteArray prefix = readAt(0, qMin<quint64>(2, total));
+  if (readFailed)
+    return Zip::Other;
+  if (prefix != "PK")
     return Zip::NotZip;
-  const quint64 total = quint64(f.size());
+  if (total < 22)
+    return Zip::Other;
+
   // End of central directory: 22 bytes plus a comment of at most 65535.
   const quint64 tailSize = qMin<quint64>(total, 22 + 65535);
-  const QByteArray tail = readAt(f, total - tailSize, qint64(tailSize));
+  const QByteArray tail = readAt(total - tailSize, tailSize);
+  if (readFailed)
+    return Zip::Other;
   qsizetype eocd = -1;
-  for (qsizetype i = tail.size() - 22; i >= 0; --i)
-    if (le32(tail, i) == 0x06054b50 &&
-        quint64(i) + 22 + le16(tail, i + 20) == tailSize) {
-      eocd = i;
-      break;
+  if (tail.size() >= 22) {
+    for (qsizetype i = tail.size() - 22; i >= 0; --i) {
+      if (le32(tail, i) == 0x06054b50 &&
+          quint64(i) + 22 + le16(tail, i + 20) == tailSize) {
+        eocd = i;
+        break;
+      }
     }
+  }
   if (eocd < 0)
     return Zip::Other;
+
+  if (le16(tail, eocd + 4) != 0 || le16(tail, eocd + 6) != 0 ||
+      le16(tail, eocd + 8) != le16(tail, eocd + 10))
+    return Zip::Other; // Multi-volume ZIP is not a contiguous Range source.
   quint64 entries = le16(tail, eocd + 10), cdSize = le32(tail, eocd + 12),
           cdOffset = le32(tail, eocd + 16);
   if (entries == 0xffff || cdSize == 0xffffffff || cdOffset == 0xffffffff) {
-    if (eocd < 20 || le32(tail, eocd - 20) != 0x07064b50)
+    if (eocd < 20 || le32(tail, eocd - 20) != 0x07064b50 ||
+        le32(tail, eocd - 16) != 0 || le32(tail, eocd - 4) != 1)
       return Zip::Other;
     const quint64 record = le64(tail, eocd - 20 + 8);
-    const QByteArray z = readAt(f, record, 56);
-    if (z.size() != 56 || le32(z, 0) != 0x06064b50)
+    const quint64 locator = total - tailSize + quint64(eocd) - 20;
+    if (record > locator || locator - record < 56)
+      return Zip::Other;
+    const QByteArray z = readAt(record, 56);
+    if (readFailed || z.size() != 56 || le32(z, 0) != 0x06064b50 ||
+        le64(z, 4) < 44 || le64(z, 4) > locator - record - 12 ||
+        le32(z, 16) != 0 || le32(z, 20) != 0 ||
+        le64(z, 24) != le64(z, 32))
       return Zip::Other;
     entries = le64(z, 32);
     cdSize = le64(z, 40);
     cdOffset = le64(z, 48);
   }
-  if (cdOffset > total || cdSize > total - cdOffset ||
-      cdSize > 64ull * 1024 * 1024)
+  const quint64 directoryEnd = total - tailSize + quint64(eocd);
+  if (cdOffset > directoryEnd || cdSize > directoryEnd - cdOffset ||
+      cdSize > 64ull * 1024 * 1024 ||
+      entries > (cdSize / 46) + 1)
     return Zip::Other;
-  const QByteArray cd = readAt(f, cdOffset, qint64(cdSize));
-  if (quint64(cd.size()) != cdSize)
+  const QByteArray cd = readAt(cdOffset, cdSize);
+  if (readFailed || quint64(cd.size()) != cdSize)
     return Zip::Other;
+
   int matches = 0;
   quint16 flags = 0, method = 0;
   quint64 compressed = 0, uncompressed = 0, local = 0;
+  QByteArray payloadName;
   qsizetype p = 0;
   for (quint64 n = 0; n < entries; ++n) {
     if (cd.size() - p < 46 || le32(cd, p) != 0x02014b50)
@@ -247,19 +299,23 @@ OugaPayloadExtractor::Zip OugaPayloadExtractor::locate(const QString &file,
     const quint16 nameLength = le16(cd, p + 28), extraLength = le16(cd, p + 30),
                   commentLength = le16(cd, p + 32);
     const qsizetype next = p + 46 + nameLength + extraLength + commentLength;
-    if (next > cd.size())
+    if (next < p || next > cd.size())
       return Zip::Other;
     const QString name =
         QString::fromUtf8(cd.mid(p + 46, nameLength)).replace('\\', '/');
     if (name.section('/', -1).compare("payload.bin", Qt::CaseInsensitive) ==
         0) {
       ++matches;
+      payloadName = cd.mid(p + 46, nameLength);
+      if (le16(cd, p + 34) != 0)
+        return Zip::Other;
       flags = le16(cd, p + 8);
       method = le16(cd, p + 10);
       compressed = le32(cd, p + 20);
       uncompressed = le32(cd, p + 24);
       local = le32(cd, p + 42);
-      // ZIP64 extended information replaces only the saturated fields.
+      // ZIP64 extended information replaces only the saturated fields, in
+      // central-directory order: uncompressed, compressed, local offset.
       qsizetype x = p + 46 + nameLength;
       const qsizetype extraEnd = x + extraLength;
       while (extraEnd - x >= 4) {
@@ -285,17 +341,28 @@ OugaPayloadExtractor::Zip OugaPayloadExtractor::locate(const QString &file,
     }
     p = next;
   }
-  // Same rule as the 7z path: exactly one payload.bin, never a guess.
-  if (matches != 1 || (flags & 0x0001) || method != 0 ||
-      compressed != uncompressed)
+
+  // Exactly one unencrypted STORED payload.bin is required. Compressed or
+  // ambiguous remote ZIPs must never fall back to downloading the full ZIP.
+  if (p != cd.size() || matches != 1 || (flags & 0x0041) || method != 0 ||
+      compressed != uncompressed || !uncompressed)
     return Zip::Other;
-  const QByteArray header = readAt(f, local, 30);
-  if (header.size() != 30 || le32(header, 0) != 0x04034b50 ||
-      le16(header, 8) != 0)
+  if (local > cdOffset || cdOffset - local < 30)
     return Zip::Other;
-  const quint64 data = local + 30 + le16(header, 26) + le16(header, 28);
-  if (data > total || uncompressed > total - data ||
-      readAt(f, data, 4) != "CrAU")
+  const QByteArray header = readAt(local, 30);
+  if (readFailed || header.size() != 30 || le32(header, 0) != 0x04034b50 ||
+      le16(header, 6) != flags || le16(header, 8) != 0)
+    return Zip::Other;
+  const quint64 nameLength = le16(header, 26), extraLength = le16(header, 28);
+  if (nameLength + extraLength > cdOffset - local - 30)
+    return Zip::Other;
+  if (readAt(local + 30, nameLength) != payloadName || readFailed)
+    return Zip::Other;
+  const quint64 data = local + 30 + nameLength + extraLength;
+  if (data > cdOffset || uncompressed > cdOffset - data || uncompressed < 4)
+    return Zip::Other;
+  const QByteArray magic = readAt(data, 4);
+  if (readFailed || magic != "CrAU")
     return Zip::Other;
   *offset = data;
   *size = uncompressed;
@@ -371,16 +438,31 @@ bool OugaPayloadExtractor::supported(const QVector<OugaPayloadEntry> &entries,
     }
   return count > 0;
 }
-QString OugaPayloadExtractor::extract(const QString &file,
-                                      const OugaPayloadLayout &layout,
-                                      const QVector<OugaPayloadEntry> &entries,
-                                      const QString &output, int workers,
-                                      const std::atomic_bool &cancel,
-                                      const Callbacks &callbacks) {
+QString OugaPayloadExtractor::extract(
+    const QString &file, const OugaPayloadLayout &layout,
+    const QVector<OugaPayloadEntry> &entries, const QString &output, int workers,
+    const std::atomic_bool &cancel, const Callbacks &callbacks) {
+  QString error;
+  auto local = QSharedPointer<OugaLocalFileReader>::create(file, &error);
+  if (!local->valid())
+    return error.isEmpty() ? "Payload 不可读" : error;
+  QSharedPointer<OugaRandomAccessReader> reader = local;
+  return extract(reader, layout, entries, output, workers, cancel, callbacks);
+}
+
+QString OugaPayloadExtractor::extract(
+    const QSharedPointer<OugaRandomAccessReader> &reader,
+    const OugaPayloadLayout &layout,
+    const QVector<OugaPayloadEntry> &entries, const QString &output, int workers,
+    const std::atomic_bool &cancel, const Callbacks &callbacks) {
+  if (reader.isNull())
+    return "Payload 读取器不可用";
   quint64 total = 0;
   for (const auto &entry : entries) {
     if (!supported(entry, layout))
       return "Payload 分区包含应用内提取不支持的操作：" + entry.name;
+    if (entry.size > std::numeric_limits<quint64>::max() - total)
+      return "Payload 总大小溢出";
     total += entry.size;
   }
   std::atomic<quint64> done{0};
@@ -392,12 +474,12 @@ QString OugaPayloadExtractor::extract(const QString &file,
   if (callbacks.progress)
     callbacks.progress(0, total);
   workers = qMax(1, workers);
-  // Like Task.Run in the reference, reuse worker threads across partitions.
-  // Do not occupy/change the application's shared pool or GUI priority.
   QThreadPool pool;
   pool.setMaxThreadCount(workers);
   pool.setThreadPriority(QThread::LowPriority);
   pool.setExpiryTimeout(-1);
+  const auto localReader =
+      dynamic_cast<const OugaLocalFileReader *>(reader.data());
   for (const auto &entry : entries) {
     if (cancel)
       return "准备已取消；保留已完成的镜像";
@@ -410,10 +492,10 @@ QString OugaPayloadExtractor::extract(const QString &file,
     bool ownsPartial = false;
     const auto cleanup = qScopeGuard([&] {
       // Never remove a pre-existing path, including when NewOnly lost a race.
-      if (ownsPartial) QFile::remove(partial);
+      if (ownsPartial)
+        QFile::remove(partial);
     });
     {
-      // Preallocate; regions not written later (ZERO/DISCARD) read as zero.
       QFile out(partial);
       if (!out.open(QIODevice::ReadWrite | QIODevice::NewOnly))
         return "无法创建 Payload 输出：" + partial;
@@ -431,10 +513,11 @@ QString OugaPayloadExtractor::extract(const QString &file,
         error = text;
       failed = true;
     };
-    auto worker = [&] {
-      // Each thread owns its handles: positioned reads/writes never contend.
-      QFile in(file), out(partial);
-      if (!in.open(QIODevice::ReadOnly) ||
+    auto worker = [&, reader, localReader] {
+      // Local files keep one positioned handle per worker. Remote reads go
+      // through the bounded Range reader and never materialize the archive.
+      QFile in(localReader ? localReader->file() : QString()), out(partial);
+      if ((localReader && !in.open(QIODevice::ReadOnly)) ||
           !out.open(QIODevice::ReadWrite | QIODevice::ExistingOnly |
                     QIODevice::Unbuffered)) {
         fail("无法打开 Payload 读写句柄：" + entry.name);
@@ -455,9 +538,19 @@ QString OugaPayloadExtractor::extract(const QString &file,
           continue;
         }
         data.resize(qsizetype(op.dataLength));
-        if (!in.seek(qint64(layout.dataOffset + op.dataOffset)) ||
-            in.read(data.data(), data.size()) != data.size()) {
-          fail("Payload 数据读取失败：" + entry.name);
+        QString readError;
+        bool readOk = false;
+        if (localReader) {
+          readOk = in.seek(qint64(layout.dataOffset + op.dataOffset)) &&
+                   in.read(data.data(), data.size()) == data.size();
+        } else {
+          data = reader->read(layout.dataOffset + op.dataOffset,
+                              op.dataLength, &readError);
+          readOk = data.size() == qsizetype(op.dataLength);
+        }
+        if (!readOk) {
+          fail(readError.isEmpty() ? "Payload 数据读取失败：" + entry.name
+                                   : readError + "：" + entry.name);
           return;
         }
         if (hasher.hash(data) != op.dataHash) {

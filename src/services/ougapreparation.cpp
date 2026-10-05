@@ -489,11 +489,71 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
         m_payloadProcess.start(tool, args, output);
       });
 }
+void OugaPreparation::payloadUrl(const QUrl &url, const QString &output,
+                                  const QStringList &selected) {
+  if (!begin())
+    return;
+  auto reader = std::make_shared<QSharedPointer<OugaHttpRangeReader>>();
+  auto entries = std::make_shared<QVector<OugaPayloadEntry>>();
+  auto layout = std::make_shared<OugaPayloadLayout>();
+  auto chosen = std::make_shared<QStringList>();
+  work([this, url, output, selected, reader, entries, layout, chosen] {
+    QString error;
+    // A URL is not a local source path. Only validate the destination here;
+    // no archive or payload.bin is ever created for the remote source.
+    const QFileInfo info(output);
+    if (info.dir().canonicalPath().isEmpty() || info.isSymLink() ||
+        info.isJunction() || (info.exists() && !info.isDir()) ||
+        (info.exists() && !QDir(output).entryList(QDir::AllEntries |
+            QDir::NoDotAndDotDot | QDir::Hidden | QDir::System).isEmpty()))
+      return QString("远程提取输出必须是独立空目录，父目录必须存在，不能覆盖文件或链接");
+    *reader = OugaHttpRangeReader::create(url, &m_abort, &error);
+    if (!*reader)
+      return error;
+    bool delta = false;
+    if (!OugaPackage::payloadManifest(**reader, entries.get(), &delta,
+                                      &error, layout.get()))
+      return error;
+    for (const auto &entry : *entries)
+      if (selected.isEmpty() || selected.contains(entry.name))
+        *chosen << entry.name;
+    for (const auto &name : selected)
+      if (!chosen->contains(name))
+        QMetaObject::invokeMethod(this, [this, name] {
+          emit log("警告：未找到分区 '" + name + "'，该ROM可能不包含此分区");
+        }, Qt::QueuedConnection);
+    if (chosen->isEmpty())
+      return QString("Payload中没有所请求分区");
+    for (const auto &entry : *entries)
+      if (chosen->contains(entry.name) && entry.requiresOldImage)
+        return QString("远程增量 Payload 需要匹配的旧镜像，拒绝按需提取：") + entry.name;
+    if (!OugaPayloadExtractor::supported(*entries, *chosen, *layout))
+      return QString("远程 Payload 含不支持或无效的操作；不会回退为完整下载");
+    if (!QDir().mkpath(output))
+      return QString("无法创建输出目录");
+    return QString();
+  }, [this, reader, entries, layout, chosen, output] {
+    nativePayload(*reader, *layout, *entries, output, *chosen);
+  });
+}
+
 void OugaPreparation::nativePayload(const QString &file,
                                     const OugaPayloadLayout &layout,
                                     const QVector<OugaPayloadEntry> &entries,
                                     const QString &output,
                                     const QStringList &selected) {
+  QString error;
+  auto reader = QSharedPointer<OugaLocalFileReader>::create(file, &error);
+  if (!reader->valid()) {
+    end(false, error);
+    return;
+  }
+  nativePayload(reader, layout, entries, output, selected);
+}
+void OugaPreparation::nativePayload(
+    const QSharedPointer<OugaRandomAccessReader> &reader,
+    const OugaPayloadLayout &layout, const QVector<OugaPayloadEntry> &entries,
+    const QString &output, const QStringList &selected) {
   QVector<OugaPayloadEntry> chosen;
   QStringList names;
   for (const auto &p : entries)
@@ -515,7 +575,7 @@ void OugaPreparation::nativePayload(const QString &file,
   // Same parallelism as VioletToolBox: Environment.ProcessorCount.
   const int workers = qMax(1, QThread::idealThreadCount());
   work(
-      [this, file, layout, chosen, output, images, last, workers] {
+      [this, reader, layout, chosen, output, images, last, workers] {
         OugaPayloadExtractor::Callbacks callbacks;
         callbacks.started = [this](const QString &name) {
           QMetaObject::invokeMethod(this, [this, name] {
@@ -548,7 +608,7 @@ void OugaPreparation::nativePayload(const QString &file,
               }
             }, Qt::QueuedConnection);
         };
-        QString e = OugaPayloadExtractor::extract(file, layout, chosen, output,
+        QString e = OugaPayloadExtractor::extract(reader, layout, chosen, output,
                                                   workers, m_abort, callbacks);
         if (!e.isEmpty())
           return e;

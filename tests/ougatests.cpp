@@ -36,6 +36,9 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QThread>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QRegularExpression>
 #include <QUuid>
 #include <QtEndian>
 #include <QtTest>
@@ -265,6 +268,105 @@ QByteArray zipBytes(const QByteArray &name, const QByteArray &data,
   le32(end, 16, quint32(out.size()));
   return out + cd + end;
 }
+QByteArray zip64PayloadBytes(const QByteArray &payload) {
+  const QByteArray name = "payload.bin";
+  QByteArray local(30, 0), extra(20, 0);
+  le32(local, 0, 0x04034b50); le16(local, 4, 45);
+  le32(local, 18, 0xffffffff); le32(local, 22, 0xffffffff);
+  le16(local, 26, name.size()); le16(local, 28, extra.size());
+  le16(extra, 0, 1); le16(extra, 2, 16);
+  le64(extra, 4, payload.size()); le64(extra, 12, payload.size());
+  QByteArray data = local + name + extra + payload;
+  QByteArray central(46, 0), ce(28, 0);
+  le32(central, 0, 0x02014b50); le16(central, 6, 45);
+  le32(central, 20, 0xffffffff); le32(central, 24, 0xffffffff);
+  le16(central, 28, name.size()); le16(central, 30, ce.size());
+  le32(central, 42, 0xffffffff);
+  le16(ce, 0, 1); le16(ce, 2, 24);
+  le64(ce, 4, payload.size()); le64(ce, 12, payload.size()); le64(ce, 20, 0);
+  const QByteArray cd = central + name + ce;
+  QByteArray record(56, 0), locator(20, 0), end(22, 0);
+  le32(record, 0, 0x06064b50); le64(record, 4, 44);
+  le64(record, 24, 1); le64(record, 32, 1);
+  le64(record, 40, cd.size()); le64(record, 48, data.size());
+  le32(locator, 0, 0x07064b50); le64(locator, 8, data.size() + cd.size());
+  le32(locator, 16, 1);
+  le32(end, 0, 0x06054b50); le16(end, 8, 0xffff); le16(end, 10, 0xffff);
+  le32(end, 12, 0xffffffff); le32(end, 16, 0xffffffff);
+  return data + cd + record + locator + end;
+}
+// Local-only Range fixture: records exactly what extraction asked for. No
+// production ROM service, adb or fastboot is involved in these tests.
+class PayloadRangeServer : public QTcpServer {
+public:
+  QByteArray source;
+  QString fault;
+  quint64 bytesSent = 0;
+  int requests = 0, missingRange = 0;
+  QList<QPair<quint64, quint64>> ranges;
+  PayloadRangeServer(const QByteArray &bytes, const QString &mode = {})
+      : source(bytes), fault(mode) {
+    connect(this, &QTcpServer::newConnection, this, [this] {
+      while (hasPendingConnections()) {
+        QTcpSocket *socket = nextPendingConnection();
+        auto input = std::make_shared<QByteArray>();
+        auto handled = std::make_shared<bool>(false);
+        connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+        connect(socket, &QTcpSocket::readyRead, this, [this, socket, input, handled] {
+          *input += socket->readAll();
+          if (*handled || !input->contains("\r\n\r\n"))
+            return;
+          *handled = true;
+          ++requests;
+          const auto match = QRegularExpression("Range: bytes=([0-9]+)-([0-9]+)",
+              QRegularExpression::CaseInsensitiveOption).match(QString::fromLatin1(*input));
+          if (!match.hasMatch()) { ++missingRange; socket->disconnectFromHost(); return; }
+          const quint64 begin = match.captured(1).toULongLong(),
+                        end = match.captured(2).toULongLong();
+          ranges.append({begin, end});
+          if (begin > end || end >= quint64(source.size())) {
+            socket->write("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n");
+            socket->disconnectFromHost(); return;
+          }
+          const bool late = requests > 1;
+          if (fault == "stall" && late)
+            return;
+          if (fault == "200" || (fault == "late200" && late)) {
+            // Intentionally never send the large body. Client must reject
+            // headers immediately, rather than wait for the advertised body.
+            socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000000000\r\n\r\n");
+            return;
+          }
+          if (fault == "redirect") {
+            socket->write("HTTP/1.1 302 Found\r\nLocation: /other\r\nContent-Length: 0\r\n\r\n");
+            socket->disconnectFromHost(); return;
+          }
+          QByteArray body = source.mid(qsizetype(begin), qsizetype(end - begin + 1));
+          const quint64 total = quint64(source.size()) + (fault == "total" && late ? 1 : 0);
+          QByteArray header = "HTTP/1.1 206 Partial Content\r\nConnection: close\r\n";
+          if (fault != "missing")
+            header += "Content-Range: bytes " + QByteArray::number(begin + (fault == "range" ? 1 : 0)) +
+                "-" + QByteArray::number(end) + "/" + QByteArray::number(total) + "\r\n";
+          if (fault == "encoding") header += "Content-Encoding: gzip\r\n";
+          header += "ETag: " + QByteArray(fault == "etag" && late ? "\"v2\"" : "\"v1\"") + "\r\n";
+          if (fault != "overlong")
+            header += "Content-Length: " + QByteArray::number(body.size() + (fault == "length" ? 1 : 0)) + "\r\n";
+          else
+            body += 'X';
+          if (fault == "truncated") body.chop(1);
+          bytesSent += quint64(body.size());
+          socket->write(header + "\r\n" + body);
+          socket->disconnectFromHost();
+        });
+      }
+    });
+    if (!listen(QHostAddress::LocalHost, 0))
+      qFatal("Range test server cannot listen");
+  }
+  QUrl url() const {
+    return QUrl(QString("http://127.0.0.1:%1/ota.zip?token=SECRET").arg(serverPort()));
+  }
+};
 QByteArray superBytes() {
   QByteArray b(2 * 1024 * 1024, 0), g(52, 0);
   le32(g, 0, 0x616c4467);
@@ -3966,6 +4068,172 @@ private slots:
     QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
     QVERIFY(!OugaPayloadExtractor::supported(entries, {}, layout));
   }
+  void remotePayloadRange_data() {
+    QTest::addColumn<QString>("kind");
+    for (const QString kind : {"raw", "large", "stored", "zip64", "compressed", "duplicate",
+         "200", "late200", "range", "missing", "total", "length", "etag",
+         "encoding", "truncated", "overlong", "redirect", "cancel", "delta",
+         "unsupported", "missingPartition", "existingOutput"})
+      QTest::newRow(qPrintable(kind)) << kind;
+  }
+  void remotePayloadRange() {
+    QFETCH(QString, kind);
+    QByteArray boot, vendor;
+    QByteArray payload = nativePayloadBytes(&boot, &vendor);
+    if (kind == "large") {
+      // Exercise exact requests beyond the metadata cache and read buffer,
+      // including several concurrent workers writing disjoint extents.
+      boot = nativeImage(256, 'l');
+      QVector<NativeOp> ops;
+      for (int i = 0; i < 8; ++i)
+        ops << NativeOp{0, quint64(i * 32), 32, boot.mid(i * 128 * 1024, 128 * 1024)};
+      QByteArray blob;
+      const QByteArray manifest = vi(3 << 3) + vi(4096) +
+          nativePartition("boot", boot, ops, &blob);
+      payload = payloadContainer(manifest) + blob;
+    }
+    if (kind == "delta") payload = payloadBytes(true, 9);
+    if (kind == "unsupported") payload = payloadBytes(false, 9);
+    // A large unselected tail lets us prove Range does not read the whole OTA.
+    payload += QByteArray(4 * 1024 * 1024, 't');
+    QByteArray source = payload;
+    if (kind == "stored" || kind == "compressed" || kind == "duplicate")
+      source = zipBytes("payload.bin", payload, kind == "compressed" ? 8 : 0,
+                        kind == "duplicate");
+    if (kind == "zip64") source = zip64PayloadBytes(payload);
+    const QString fault = kind == "cancel" ? "stall" : kind;
+    PayloadRangeServer server(source, fault);
+    OugaPreparation prep;
+    QSignalSpy finished(&prep, &OugaPreparation::finished),
+               prepared(&prep, &OugaPreparation::prepared),
+               progress(&prep, &OugaPreparation::payloadProgress);
+    QString logs;
+    connect(&prep, &OugaPreparation::log, &prep, [&](const QString &s) { logs += s; });
+    const QString output = dir + "/range-images";
+    if (kind == "existingOutput") {
+      QVERIFY(QDir().mkpath(output));
+      QVERIFY(put(output + "/keep.txt", "KEEP"));
+    }
+    int ticks = 0;
+    QTimer heartbeat;
+    heartbeat.setInterval(1);
+    connect(&heartbeat, &QTimer::timeout, &prep, [&] { ++ticks; });
+    heartbeat.start();
+    prep.payloadUrl(server.url(), output,
+                    {kind == "missingPartition" ? "not_in_payload" : "boot"});
+    if (kind == "cancel") {
+      QTRY_VERIFY_WITH_TIMEOUT(server.requests > 1, 3000);
+      QVERIFY(prep.busy());
+      prep.cancel();
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+    const bool success = kind == "raw" || kind == "large" ||
+                         kind == "stored" || kind == "zip64";
+    QCOMPARE(finished.first()[0].toBool(), success);
+    QCOMPARE(prepared.size(), success ? 1 : 0);
+    QCOMPARE(server.missingRange, 0);
+    QVERIFY2(!logs.contains("SECRET") && !finished.first()[1].toString().contains("SECRET"),
+             "Network credentials leaked in diagnostics");
+    QVERIFY2(server.bytesSent < quint64(source.size()) / 2, "Whole OTA was transferred");
+    QVERIFY(ticks > 0);
+    if (success) {
+      QCOMPARE(read(output + "/boot.img"), boot);
+      QVERIFY(!QFileInfo::exists(output + "/vendor.img"));
+      QCOMPARE(QDir(output).entryList(QDir::Files), QStringList{"boot.img"});
+      QCOMPARE(progress.last()[0].toInt(), 100);
+      QVERIFY(server.requests >= 2);
+    } else {
+      QVERIFY(!QFileInfo::exists(output + "/boot.img"));
+      for (const auto &frame : progress) QVERIFY(frame[0].toInt() < 100);
+      if (kind == "existingOutput") {
+        QCOMPARE(read(output + "/keep.txt"), QByteArray("KEEP"));
+        QCOMPARE(server.requests, 0);
+      }
+      if (kind == "200" || kind == "redirect" || kind == "range" || kind == "missing")
+        QCOMPARE(server.requests, 1);
+    }
+    QVERIFY(!prep.busy());
+  }
+
+  void widgetRemoteShortcutPartition() {
+    QByteArray boot, vendor;
+    PayloadRangeServer server(nativePayloadBytes(&boot, &vendor) +
+                               QByteArray(4 * 1024 * 1024, 'x'));
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    window.findChild<QLineEdit *>("BinUrlTextBox")->setText(server.url().toString());
+    window.findChild<QComboBox *>("PayloadPartitionComboBox")->setCurrentText("boot");
+    const QString output = dir + "/shortcut-images";
+    QVERIFY(QDir().mkpath(output));
+    int folderDialogs = 0, unexpectedDialogs = 0;
+    QTimer guard;
+    guard.setInterval(1);
+    connect(&guard, &QTimer::timeout, &window, [&] {
+      if (auto dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget())) {
+        if (dialog->fileMode() == QFileDialog::Directory && folderDialogs == 0) {
+          ++folderDialogs;
+          dialog->setDirectory(output);
+          QVERIFY(QMetaObject::invokeMethod(dialog, "accept"));
+        } else {
+          ++unexpectedDialogs;
+          dialog->reject();
+        }
+      }
+    });
+    guard.start();
+    window.findChild<QPushButton *>("ExtractPartitionButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 10000);
+    QCOMPARE(folderDialogs, 1);
+    QCOMPARE(unexpectedDialogs, 0);
+    QCOMPARE(read(output + "/boot.img"), boot);
+    QVERIFY(!QFileInfo::exists(output + "/vendor.img"));
+    const QString logs = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
+    QVERIFY2(logs.contains("分区 boot 提取完成！"), qPrintable(logs));
+    QVERIFY(!logs.contains("SECRET"));
+    QCOMPARE(server.missingRange, 0);
+    QVERIFY(server.bytesSent < quint64(server.source.size()) / 2);
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
+  }
+
+  void payloadZipLateHeaderAndBounds() {
+    QByteArray boot, vendor;
+    const QByteArray payload = nativePayloadBytes(&boot, &vendor);
+    const QByteArray first = zipBytes("padding.dat", QByteArray(128 * 1024, 'p'));
+    const QByteArray second = zipBytes("payload.bin", payload);
+    const quint32 firstCd = qFromLittleEndian<quint32>(
+        reinterpret_cast<const uchar *>(first.constData() + first.size() - 6));
+    const quint32 secondCd = qFromLittleEndian<quint32>(
+        reinterpret_cast<const uchar *>(second.constData() + second.size() - 6));
+    QByteArray cd2 = second.mid(secondCd, second.size() - secondCd - 22);
+    le32(cd2, 42, firstCd);
+    const QByteArray cd = first.mid(firstCd, first.size() - firstCd - 22) + cd2;
+    QByteArray end = second.right(22);
+    le16(end, 8, 2); le16(end, 10, 2);
+    le32(end, 12, cd.size()); le32(end, 16, firstCd + secondCd);
+    const QByteArray valid = first.left(firstCd) + second.left(secondCd) + cd + end;
+    const QString file = dir + "/late.zip";
+    QVERIFY(put(file, valid));
+    quint64 base = 0, size = 0;
+    QCOMPARE(OugaPayloadExtractor::locate(file, &base, &size), OugaPayloadExtractor::Zip::Stored);
+    QCOMPARE(base, quint64(firstCd + 30 + 11));
+    QCOMPARE(size, quint64(payload.size()));
+    QVector<OugaPayloadEntry> entries;
+    bool delta = false;
+    QString error;
+    QVERIFY2(OugaPackage::payloadManifest(file, &entries, &delta, &error), qPrintable(error));
+    // Local name differs from the central mapping: must not trust its data.
+    QByteArray corrupt = valid;
+    corrupt[firstCd + 30] = 'X';
+    QVERIFY(put(file, corrupt));
+    QCOMPARE(OugaPayloadExtractor::locate(file, &base, &size), OugaPayloadExtractor::Zip::Other);
+    corrupt = valid;
+    le32(corrupt, firstCd + secondCd + 57 + 42, 0xfffffff0);
+    QVERIFY(put(file, corrupt));
+    QCOMPARE(OugaPayloadExtractor::locate(file, &base, &size), OugaPayloadExtractor::Zip::Other);
+  }
+
   void payloadZipLocation() {
     QByteArray boot, vendor;
     const QByteArray payload = nativePayloadBytes(&boot, &vendor);
@@ -4715,6 +4983,65 @@ private slots:
     QVERIFY(!DeviceOperationLease::owner());
     QVERIFY(window.close());
   }
+  void widgetRemotePayloadNoFullDownload_data() {
+    QTest::addColumn<QString>("kind");
+    QTest::newRow("direct") << QString("raw");
+    QTest::newRow("stored-zip") << QString("stored");
+    QTest::newRow("compressed-zip") << QString("compressed");
+  }
+  void widgetRemotePayloadNoFullDownload() {
+    QFETCH(QString, kind);
+    QByteArray boot, vendor;
+    const QByteArray payload = nativePayloadBytes(&boot, &vendor) +
+                               QByteArray(4 * 1024 * 1024, 'x');
+    PayloadRangeServer server(kind == "raw" ? payload :
+        zipBytes("payload.bin", payload, kind == "compressed" ? 8 : 0));
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    const QString output = dir + "/output";
+    QVERIFY(QDir().mkpath(output));
+    window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(server.url().toString());
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(output);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 3000);
+    int dialogs = 0, ticks = 0;
+    QTimer monitor;
+    monitor.setInterval(1);
+    connect(&monitor, &QTimer::timeout, &window, [&] {
+      ++ticks;
+      // A full-download save dialog or exe picker is a regression. Reject it
+      // so the test fails instead of blocking on a human or downloading.
+      if (auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+        ++dialogs;
+        dialog->reject();
+      }
+    });
+    monitor.start();
+    window.findChild<QPushButton *>("UnpackPayloadButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 10000);
+    QCOMPARE(dialogs, 0);
+    QVERIFY(ticks > 0);
+    QCOMPARE(server.missingRange, 0);
+    QVERIFY(server.bytesSent < quint64(server.source.size()) / 2);
+    const QString logs = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
+    QVERIFY2(!logs.contains("SECRET"), logs.toUtf8().constData());
+    QVERIFY(logs.contains("HTTP Range"));
+    if (kind == "compressed") {
+      QVERIFY(logs.contains("不会下载完整 ZIP"));
+      QVERIFY(!QFileInfo::exists(output + "/images/boot.img"));
+      QVERIFY(window.findChild<QProgressBar *>("FlashProgressBar")->value() < 100);
+    } else {
+      QVERIFY2(logs.contains("Payload解包成功！"), logs.toUtf8().constData());
+      QCOMPARE(read(output + "/images/boot.img"), boot);
+      QCOMPARE(read(output + "/images/vendor.img"), vendor);
+      QCOMPARE(window.findChild<QProgressBar *>("FlashProgressBar")->value(), 100);
+    }
+    QVERIFY(runner.trace.isEmpty());
+    QVERIFY(window.close());
+  }
+
   void widgetStoredZipPayloadInPlace() {
     QSettings settings;
     const QVariant old7z = settings.value("Ouga/7z");

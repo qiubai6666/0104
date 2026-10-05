@@ -2,8 +2,8 @@
 # through it). xz/bzip2 come from the Qt MinGW kit (mingw64/opt); -idirafter
 # keeps that folder's unrelated headers from shadowing system ones.
 # Override with OUGA_CODEC_ROOT=<dir containing include/ and lib/>.
-SOURCES += $$PWD/src/services/ougapayloadextractor.cpp
-HEADERS += $$PWD/src/services/ougapayloadextractor.h
+SOURCES += $$PWD/src/services/ougapayloadextractor.cpp $$PWD/src/services/ougapayloadreader.cpp
+HEADERS += $$PWD/src/services/ougapayloadextractor.h $$PWD/src/services/ougapayloadreader.h
 # Pinned decoder-only Zstandard 1.5.7, statically compiled from upstream's
 # single-file library. No zstd executable, Python module or extra DLL is needed.
 SOURCES += $$PWD/third_party/zstd/zstddeclib.c

@@ -1,6 +1,7 @@
 #ifndef OUGAPACKAGE_H
 #define OUGAPACKAGE_H
 #include "ougaflashtypes.h"
+#include "ougapayloadreader.h"
 struct OugaPayloadExtent {
   quint64 start = 0, blocks = 0;
 };
@@ -49,6 +50,10 @@ public:
   static QStringList parsePayloadList(const QString &output);
   static QString findPayload(const QString &directory);
   static bool payloadManifest(const QString &file,
+                              QVector<OugaPayloadEntry> *entries, bool *delta,
+                              QString *error,
+                              OugaPayloadLayout *layout = nullptr);
+  static bool payloadManifest(const OugaRandomAccessReader &reader,
                               QVector<OugaPayloadEntry> *entries, bool *delta,
                               QString *error,
                               OugaPayloadLayout *layout = nullptr);

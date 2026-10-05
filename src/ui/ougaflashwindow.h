@@ -57,7 +57,6 @@ private:
     PathCheck,
     PayloadInspect,
     PayloadModelWait,
-    PayloadDownload,
     PayloadArchive,
     PayloadExtract,
     RescueSelection,
