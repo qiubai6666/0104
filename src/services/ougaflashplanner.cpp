@@ -222,8 +222,25 @@ struct Builder {
       }
     return true;
   }
+  bool eraseFrp() {
+    if (!p.device.partitions.contains("frp") ||
+        !p.device.sizes.contains("frp") || !p.device.sizes.value("frp")) {
+      error = "擦除 FRP 目标不存在或容量未知：frp";
+      return false;
+    }
+    command("擦除 FRP（不可逆）", {"erase", "frp"}, "frp");
+    p.warnings << "本计划包含 FRP 擦除（不可逆），仅用于本人或明确授权的设备；"
+                  "必须核对设备与计划后确认执行。";
+    return true;
+  }
   bool finish() {
     switchMode(true);
+    const bool afterSales = p.options.mode == FlashMode::AfterSalesBootloader ||
+                            p.options.mode == FlashMode::AfterSalesFastbootd;
+    // VioletToolBox full-package finalization always erases FRP before wiping;
+    // after-sales branches erase it only after a requested data wipe succeeds.
+    if (!afterSales && !eraseFrp())
+      return false;
     if (p.options.clearData) {
       for (const QString n : {"userdata", "metadata"}) {
         if (!p.device.partitions.contains(n) || !p.device.sizes.contains(n)) {
@@ -234,6 +251,8 @@ struct Builder {
       }
       if (p.device.platform == Platform::Qualcomm)
         command("格式化用户数据（不可逆）", {"-w"}, "userdata");
+      if (afterSales && !eraseFrp())
+        return false;
     }
     if (p.options.autoReboot)
       command("重启系统", {"reboot"});

@@ -85,8 +85,8 @@ bool OugaFlashWindow::confirm(const Plan &plan) {
   text->setObjectName("OugaConfirmedPlan");
   text->setReadOnly(true);
   layout->addWidget(text);
-  auto agree = new QCheckBox("已核对设备序列号、机型、平台、镜像来源、槽位及删"
-                             "除/清除步骤，并已备份数据",
+  auto agree = new QCheckBox("设备为本人所有或已获授权；已核对计划及其中列出的 FRP 等不可逆操作，"
+                             "并已备份数据",
                              &dialog);
   agree->setObjectName("OugaConfirmAgreement");
   layout->addWidget(agree);

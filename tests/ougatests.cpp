@@ -333,7 +333,7 @@ Device fixtureDevice(Platform platform = Platform::Qualcomm,
         d.logical.insert(t);
     }
   for (const QString n :
-       {"persist", "userdata", "metadata", "super", "system_a-cow"}) {
+       {"persist", "userdata", "metadata", "frp", "super", "system_a-cow"}) {
     d.partitions.insert(n);
     d.sizes[n] = n == "super" ? 64 * 1024 * 1024 : 1024 * 1024;
   }
@@ -553,10 +553,14 @@ class OugaTests : public QObject {
       if (platform == Platform::Qualcomm && modemLayout == 1)
         expected << "reboot fastboot";
     }
+    if (mode == FlashMode::Normal)
+      expected << "erase frp";
     if (clearData) {
       expected << "erase userdata" << "erase metadata";
       if (platform == Platform::Qualcomm)
         expected << "-w";
+      if (mode == FlashMode::AfterSalesFastbootd)
+        expected << "erase frp";
     }
     if (autoReboot)
       expected << "reboot";
@@ -574,6 +578,149 @@ class OugaTests : public QObject {
     s.configure(dir + "/fake-fastboot.exe", dir + "/logs");
   }
 private slots:
+  void frpReferencePolicy_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("slot");
+    QTest::addColumn<bool>("clear");
+    for (int mode = 0; mode < 7; ++mode)
+      for (int platform : {1, 2})
+        for (const QString slot : {"a", "b"})
+          for (bool clear : {false, true}) {
+            if (FlashMode(mode) == FlashMode::OnlyFastbootd && platform == 2)
+              continue;
+            QTest::newRow(qPrintable(QString("mode%1-pf%2-%3-clear%4")
+                .arg(mode).arg(platform).arg(slot).arg(clear)))
+                << mode << platform << slot << clear;
+          }
+  }
+  void frpReferencePolicy() {
+    QFETCH(int, mode); QFETCH(int, platform); QFETCH(QString, slot);
+    QFETCH(bool, clear);
+    const auto fm = FlashMode(mode);
+    const auto pf = Platform(platform);
+    const bool repair = fm == FlashMode::RepairFastbootd;
+    const bool afterSales = fm == FlashMode::AfterSalesBootloader ||
+                            fm == FlashMode::AfterSalesFastbootd;
+    Device device = fixtureDevice(pf, slot, !repair && fm != FlashMode::AfterSalesBootloader);
+    auto ps = images();
+    auto opts = options(fm, pf);
+    opts.targetSlot = slot == "a" ? "b" : "a";
+    opts.clearData = clear; opts.autoReboot = opts.formatToolsReady = true;
+    if (repair || fm == FlashMode::AfterSalesBootloader) {
+      ps.clear();
+      for (const QString &name : criticalImages(pf)) ps << image(name);
+      if (fm == FlashMode::AfterSalesBootloader) {
+        auto super = image("super", superBytes());
+        super.merged = {"system"}; ps << super;
+      }
+    }
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, device, opts, &plan, &error), qPrintable(error));
+    const QStringList cmds = commands(plan);
+    const bool eraseFrp = !repair && (!afterSales || clear);
+    QCOMPARE(cmds.count("erase frp"), eraseFrp ? 1 : 0);
+    QCOMPARE(planText(plan).contains("擦除 FRP（不可逆）"), eraseFrp);
+    if (!eraseFrp) return;
+    const int frp = cmds.indexOf("erase frp");
+    for (const Step &step : plan.steps) {
+      if (step.arguments == QStringList({"erase", "frp"})) {
+        QVERIFY(step.userspace); QVERIFY(!step.allowMissing);
+        QVERIFY(step.image.isEmpty()); QCOMPARE(step.target, QString("frp"));
+      }
+    }
+    if (clear) {
+      if (afterSales) {
+        QVERIFY(frp > cmds.indexOf("erase metadata"));
+        if (pf == Platform::Qualcomm) QVERIFY(frp > cmds.indexOf("-w"));
+      } else {
+        QVERIFY(frp < cmds.indexOf("erase userdata"));
+      }
+    }
+    QVERIFY(frp < cmds.indexOf("reboot"));
+    QVERIFY(!cmds.join('\n').contains("flash frp"));
+    QVERIFY(!cmds.join('\n').contains("flash misc"));
+  }
+  void frpPreflight_data() {
+    QTest::addColumn<int>("failure");
+    for (int failure = 0; failure < 5; ++failure)
+      QTest::newRow(qPrintable(QString::number(failure))) << failure;
+  }
+  void frpPreflight() {
+    QFETCH(int, failure);
+    Device device = fixtureDevice();
+    if (failure == 0) device.partitions.remove("frp");
+    if (failure == 1) device.sizes.remove("frp");
+    if (failure == 2) device.sizes["frp"] = 0;
+    if (failure == 3) device.unlocked = false;
+    if (failure == 4) device.unlockKnown = false;
+    Plan plan; QString error;
+    QVERIFY(!OugaFlashPlanner::build(images(), device, options(), &plan, &error));
+    QVERIFY(plan.steps.isEmpty()); QVERIFY(!error.isEmpty());
+    if (failure < 3) QVERIFY(error.contains("FRP"));
+    if (failure >= 3) return;
+    // Unchecked after-sales wipe and repair must not depend on FRP availability.
+    QVERIFY2(OugaFlashPlanner::build(images(), device,
+        options(FlashMode::AfterSalesFastbootd), &plan, &error), qPrintable(error));
+    QVERIFY(!commands(plan).contains("erase frp"));
+    auto opts = options(FlashMode::AfterSalesFastbootd);
+    opts.clearData = opts.formatToolsReady = true;
+    QVERIFY(!OugaFlashPlanner::build(images(), device, opts, &plan, &error));
+    QVERIFY(error.contains("FRP")); QVERIFY(plan.steps.isEmpty());
+    device.userspace = false;
+    QVector<Partition> ps;
+    for (const QString &name : criticalImages(device.platform)) ps << image(name);
+    QVERIFY2(OugaFlashPlanner::build(ps, device,
+        options(FlashMode::RepairFastbootd), &plan, &error), qPrintable(error));
+  }
+  void frpFailureStops_data() {
+    QTest::addColumn<int>("mode"); QTest::addColumn<int>("outcome");
+    for (auto mode : {FlashMode::Normal, FlashMode::AfterSalesFastbootd})
+      for (int outcome = 0; outcome < 6; ++outcome)
+        QTest::newRow(qPrintable(QString("mode%1-outcome%2").arg(int(mode)).arg(outcome)))
+            << int(mode) << outcome;
+  }
+  void frpFailureStops() {
+    QFETCH(int, mode); QFETCH(int, outcome);
+    FakeRunner runner;
+    OugaFlashService service(&runner); configure(service);
+    auto opts = options(FlashMode(mode));
+    opts.clearData = opts.autoReboot = opts.formatToolsReady = true;
+    for (const QString name : {"mke2fs.exe", "make_f2fs.exe", "mke2fs.conf"})
+      QVERIFY(put(dir + "/" + name, "fixture-only: never executed"));
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(images(), runner.device, opts, &plan, &error), qPrintable(error));
+    if (outcome == 4) {
+      runner.after = [&](const QStringList &args) {
+        if (args.value(0) == "flash" && args.value(1) == "modem_b") service.requestStop();
+      };
+    } else if (outcome == 5) {
+      runner.after = [&](const QStringList &args) {
+        if (args == QStringList({"erase", "frp"})) service.requestStop();
+      };
+    } else {
+      runner.failAt = "erase frp";
+      runner.failCode = outcome == 0 ? 0 : (outcome == 2 ? -1 : 1);
+      runner.normal = outcome != 2;
+      runner.failOutput = outcome == 3 ? "FAILED (remote: partition does not exist)"
+                                     : "FAILED (remote: denied)";
+    }
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(!done[0][0].toBool());
+    QVERIFY(!runner.trace.contains("reboot"));
+    if (outcome == 4) QVERIFY(!runner.trace.contains("erase frp"));
+    else QVERIFY(runner.trace.contains("erase frp"));
+    if (FlashMode(mode) == FlashMode::Normal) {
+      QVERIFY(!runner.trace.contains("erase userdata"));
+      QVERIFY(!runner.trace.contains("erase metadata"));
+      QVERIFY(!runner.trace.contains("-w"));
+    }
+    QVERIFY(!DeviceOperationLease::owner());
+    for (const QString &line : runner.boundTrace)
+      QVERIFY(line.startsWith("-s TEST-SERIAL "));
+  }
   void initTestCase() {
     testRoot = qEnvironmentVariable("ORANGE_TEST_ARTIFACTS");
     QVERIFY2(!testRoot.isEmpty(),
@@ -1447,7 +1594,11 @@ private slots:
         QVERIFY(!targets.contains(s.target));
         targets.insert(s.target);
       }
-      QVERIFY(!s.arguments.contains("frp"));
+      if (s.arguments.contains("frp")) {
+        QCOMPARE(s.arguments, QStringList({"erase", "frp"}));
+        QVERIFY(s.userspace);
+        QVERIFY(m != FlashMode::RepairFastbootd);
+      }
       QVERIFY(!s.arguments.contains("misc"));
       QVERIFY(!s.arguments.contains("flashing"));
     }
@@ -1711,6 +1862,7 @@ private slots:
       if (pf == Platform::Qualcomm)
         expected << "reboot fastboot";
     }
+    expected << "erase frp";
     QCOMPARE(commands(plan), expected);
     QCOMPARE(plan.flashCount, slotlessModem ? 9 : 10);
     QCOMPARE(plan.totalBytes, qint64(slotlessModem ? 5312 : 5376));
@@ -1859,7 +2011,8 @@ private slots:
     QCOMPARE(cmds.count("flash persist"), 1);
     QVERIFY(cmds.indexOf("flash boot_a") < cmds.indexOf("set_active a"));
     QVERIFY(cmds.indexOf("flash persist") < cmds.indexOf("set_active a"));
-    QCOMPARE(cmds.last(), QString("flash modem_a"));
+    QCOMPARE(cmds.last(), QString("erase frp"));
+    QVERIFY(cmds.indexOf("flash modem_a") < cmds.indexOf("erase frp"));
     QCOMPARE(cmds.count("flash modem_a"), 1);
     QVERIFY(!cmds.contains("flash modem_b"));
     for (const auto &step : plan.steps)
@@ -2779,6 +2932,7 @@ private:
     if (clear) {
       cmds << "erase userdata" << "erase metadata";
       if (platform == Platform::Qualcomm) cmds << "-w";
+      cmds << "erase frp";
     }
     if (reboot) cmds << "reboot";
     return cmds;
@@ -5117,9 +5271,10 @@ private slots:
     QCOMPARE(written, outcome != 0);
     auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
     QCOMPARE(progress->value() == 100, outcome == 1);
+    QCOMPARE(runner.trace.count("erase frp"), outcome == 1 ? 1 : 0);
     for (const QString &command : runner.trace)
-      QVERIFY(!command.startsWith("erase ") && command != "-w" &&
-              command != "reboot");
+      QVERIFY((!command.startsWith("erase ") || command == "erase frp") &&
+              command != "-w" && command != "reboot");
     if (outcome >= 2) {
       QCOMPARE(std::count_if(
                    runner.trace.cbegin(), runner.trace.cend(),
