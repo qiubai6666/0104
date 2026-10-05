@@ -176,6 +176,8 @@ DeviceInfoWindow::DeviceInfoWindow(QWidget *parent)
     
     // 创建 scrcpy 进程对象
     scrcpyProcess = ProcessManager::createProcess(this);
+    // 投屏只是查看画面，设备重启后会自然断开，不阻止重启/刷写操作。
+    scrcpyProcess->setProperty("orangeNonBlockingTool", true);
     
     // 监听scrcpy进程结束信号
     connect(scrcpyProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
