@@ -1016,6 +1016,42 @@ void OugaFlashWindow::buildAndExecute() {
     for (auto &image : planImages)
       image.selected = required.contains(baseName(image.name));
   }
+  if (std::any_of(planImages.cbegin(), planImages.cend(),
+                  [](const Partition &p) {
+                    return p.selected && p.sha256.size() != 32;
+                  })) {
+    m_task = Task::PathCheck;
+    updateBusy();
+    log("正在并行计算所选镜像 SHA-256（文件夹加载时不校验）…");
+    struct Hashed {
+      QVector<Partition> images;
+      QString error;
+    };
+    auto watcher = new QFutureWatcher<Hashed>(this);
+    connect(watcher, &QFutureWatcher<Hashed>::finished, this,
+            [this, watcher, taskGeneration] {
+              const Hashed result = watcher->result();
+              watcher->deleteLater();
+              if (!continueTask(taskGeneration))
+                return;
+              if (!result.error.isEmpty()) {
+                endTask(false, "镜像校验失败：" + result.error);
+                return;
+              }
+              for (Partition &image : m_pages[m_page].images)
+                for (const Partition &h : result.images)
+                  if (h.path == image.path && h.sha256.size() == 32)
+                    image.sha256 = h.sha256;
+              log("所选镜像 SHA-256 计算完成");
+              buildAndExecute();
+            });
+    watcher->setFuture(QtConcurrent::run([planImages] {
+      Hashed result{planImages, {}};
+      OugaPackage::hashImages(&result.images, &result.error);
+      return result;
+    }));
+    return;
+  }
   if (!m_currentArb.isEmpty() && m_currentArbSerial == m_device.serial) {
     quint32 current = 0;
     QString error;

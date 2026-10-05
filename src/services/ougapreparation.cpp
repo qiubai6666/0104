@@ -310,12 +310,15 @@ void OugaPreparation::scan(const QString &directory) {
   work(
       [images, directory] {
         QString error;
-        *images = OugaPackage::scan(directory, &error);
+        // Like the reference loader, selecting a folder only enumerates and
+        // structurally checks images; SHA-256 is computed for the selected
+        // images when flashing starts.
+        *images = OugaPackage::scan(directory, &error, {}, false);
         return error;
       },
       [this, images, directory] {
         emit prepared(*images, directory);
-        end(true, "镜像扫描与 SHA-256 校验完成");
+        end(true, "镜像扫描完成（SHA-256 将在开始刷写时对所选镜像计算）");
       });
 }
 void OugaPreparation::listPayload(const QString &tool, const QString &file) {

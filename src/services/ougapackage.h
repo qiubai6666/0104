@@ -32,10 +32,14 @@ public:
   // value becomes the expected digest that flashing re-verifies on disk.
   static QVector<Ouga::Partition>
   scan(const QString &directory, QString *error,
-       const QMap<QString, QByteArray> &known = {});
+       const QMap<QString, QByteArray> &known = {}, bool hash = true);
+  // hash=false validates structure only and leaves sha256 empty; such images
+  // must be hashed (hashImages) before planning, like the reference loader.
   static bool inspect(const QString &name, const QString &file,
                       Ouga::Partition *image, QString *error,
-                      const QByteArray &knownSha256 = {});
+                      const QByteArray &knownSha256 = {}, bool hash = true);
+  // Fills missing SHA-256 of selected images in parallel; size must still match.
+  static bool hashImages(QVector<Ouga::Partition> *images, QString *error);
   static QByteArray digest(const QString &file, QString *error);
   static qint64 expandedSize(const QString &file, QString *error);
   static bool readArb(const QString &file, quint32 *index, QString *error);

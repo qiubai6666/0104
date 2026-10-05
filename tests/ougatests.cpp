@@ -883,6 +883,33 @@ private slots:
     QVERIFY(OugaPackage::scan(dir, &e).isEmpty());
     QVERIFY(e.contains("多个"));
   }
+  void scanWithoutHashThenHashSelected() {
+    const QByteArray a(512, 'a'), b(1024, 'b');
+    QVERIFY(put(dir + "/boot.img", a));
+    QVERIFY(put(dir + "/dtbo.img", b));
+    QString e;
+    auto images = OugaPackage::scan(dir, &e, {}, false);
+    QVERIFY2(e.isEmpty(), qPrintable(e));
+    QCOMPARE(images.size(), 2);
+    for (auto &i : images) {
+      QVERIFY(i.sha256.isEmpty());
+      QVERIFY(i.expandedBytes > 0);
+      i.selected = i.name == "boot";
+    }
+    QVERIFY2(OugaPackage::hashImages(&images, &e), qPrintable(e));
+    for (const auto &i : images)
+      if (i.name == "boot")
+        QCOMPARE(i.sha256, QCryptographicHash::hash(a, QCryptographicHash::Sha256));
+      else
+        QVERIFY(i.sha256.isEmpty());
+    for (auto &i : images) {
+      i.selected = true;
+      i.sha256.clear();
+    }
+    QVERIFY(put(dir + "/dtbo.img", QByteArray(2048, 'c')));
+    QVERIFY(!OugaPackage::hashImages(&images, &e));
+    QVERIFY2(e.contains("已变更"), qPrintable(e));
+  }
   void referenceImageFormats_data() {
     QTest::addColumn<QString>("subdirectory");
     QTest::addColumn<QString>("filename");

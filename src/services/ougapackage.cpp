@@ -10,6 +10,7 @@
 #include <QRegularExpression>
 #include <QXmlStreamReader>
 #include <QtEndian>
+#include <QThread>
 #include <QThreadPool>
 #include <QtConcurrent>
 #include <algorithm>
@@ -288,7 +289,7 @@ qint64 OugaPackage::expandedSize(const QString &file, QString *error) {
 
 bool OugaPackage::inspect(const QString &name, const QString &file,
                           Ouga::Partition *p, QString *error,
-                          const QByteArray &knownSha256) {
+                          const QByteArray &knownSha256, bool hash) {
   if (!Ouga::safeName(name) || Ouga::blockedImageName(name))
     return fail(error, "禁止或无法确定用途的分区：" + name);
   const QFileInfo source(file);
@@ -303,8 +304,44 @@ bool OugaPackage::inspect(const QString &name, const QString &file,
   if (Ouga::baseName(name) == "super" &&
       !superContents(file, &p->merged, error))
     return false;
-  p->sha256 = knownSha256.size() == 32 ? knownSha256 : digest(file, error);
+  if (knownSha256.size() == 32)
+    p->sha256 = knownSha256;
+  else if (!hash)
+    return true;
+  else
+    p->sha256 = digest(file, error);
   return p->sha256.size() == 32;
+}
+bool OugaPackage::hashImages(QVector<Ouga::Partition> *images, QString *error) {
+  QVector<int> pending;
+  for (int i = 0; i < images->size(); ++i)
+    if ((*images)[i].selected && (*images)[i].sha256.size() != 32)
+      pending << i;
+  struct Hashed {
+    QByteArray sha256;
+    QString error;
+  };
+  QThreadPool pool;
+  pool.setMaxThreadCount(qMax(2, QThread::idealThreadCount()));
+  const auto hashed = QtConcurrent::blockingMapped<QVector<Hashed>>(
+      &pool, pending, [images](int i) {
+        Hashed h;
+        const Ouga::Partition &p = images->at(i);
+        if (QFileInfo(p.path).size() != p.bytes) {
+          h.error = "镜像自扫描后已变更：" + p.path;
+          return h;
+        }
+        h.sha256 = digest(p.path, &h.error);
+        if (h.sha256.size() != 32 && h.error.isEmpty())
+          h.error = "无法计算镜像 SHA-256：" + p.path;
+        return h;
+      });
+  for (int k = 0; k < pending.size(); ++k) {
+    if (hashed[k].sha256.size() != 32)
+      return fail(error, hashed[k].error);
+    (*images)[pending[k]].sha256 = hashed[k].sha256;
+  }
+  return true;
 }
 bool OugaPackage::hasImageCandidates(const QString &directory) {
   const QDir root(directory);
@@ -323,7 +360,8 @@ bool OugaPackage::hasImageCandidates(const QString &directory) {
 }
 QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
                                            QString *error,
-                                           const QMap<QString, QByteArray> &known) {
+                                           const QMap<QString, QByteArray> &known,
+                                           bool hash) {
   if (error)
     error->clear();
   QVector<Ouga::Partition> result;
@@ -446,10 +484,11 @@ QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
   QThreadPool pool;
   pool.setMaxThreadCount(2);
   const auto inspected = QtConcurrent::blockingMapped<QVector<Inspection>>(
-      &pool, sources, [&known](const QPair<QString, QString> &source) {
+      &pool, sources, [&known, hash](const QPair<QString, QString> &source) {
         Inspection checked;
         checked.valid = inspect(source.first, source.second, &checked.image,
-                                &checked.error, known.value(source.second));
+                                &checked.error, known.value(source.second),
+                                hash);
         return checked;
       });
   for (const auto &checked : inspected) {
