@@ -50,3 +50,4 @@ HEADERS += \
 include($$PWD/ouga.pri)
 SOURCES += $$PWD/src/services/deviceoperationlease.cpp
 HEADERS += $$PWD/src/services/deviceoperationlease.h
+include($$PWD/xiaomi.pri)

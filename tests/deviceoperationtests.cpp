@@ -17,6 +17,7 @@
 #include "resourceextractor.h"
 #include "shellcommand.h"
 #include "ougaflashwindow.h"
+#include "xiaomiflashwindow.h"
 #include "deviceoperationlease.h"
 #include <QSettings>
 #include <QUuid>
@@ -53,6 +54,7 @@ private slots:
     void initTestCase();
     void init();
     void ougaSingleWindowAndLease();
+    void xiaomiMenuAndSingleWindow();
     void cleanup();
     void repeatedActionsKeepRunningFlash();
     void windowCloseCannotInterruptFlash();
@@ -123,6 +125,32 @@ void DeviceOperationTests::ougaSingleWindowAndLease()
     QVERIFY(first->close());
 }
 
+void DeviceOperationTests::xiaomiMenuAndSingleWindow()
+{
+    RepairWindow repair;
+    QCOMPARE(repair.buttons.size(), 6);
+    QCOMPARE(repair.buttons[RepairWindow::OugaFlash]->text(), QString("欧加线刷"));
+    QCOMPARE(repair.buttons[RepairWindow::XiaomiFlash]->text(), QString("小米线刷"));
+    QCOMPARE(int(RepairWindow::XiaomiFlash), int(RepairWindow::OugaFlash) + 1);
+    repair.buttons[RepairWindow::XiaomiFlash]->click();
+    auto first = repair.xiaomiWindow;
+    QVERIFY(first);
+    QVERIFY(!first->parentWidget());
+    QVERIFY(first->isVisible());
+    repair.buttons[RepairWindow::XiaomiFlash]->click();
+    QCOMPARE(repair.xiaomiWindow, first);
+    QObject operation(first);
+    QVERIFY(DeviceOperationLease::acquire(&operation));
+    QVERIFY(repair.hasActiveOugaTask());
+    QVERIFY(!repair.close());
+    QVERIFY(!first->close());
+    DeviceOperationLease::release(&operation);
+    QVERIFY(!repair.hasActiveOugaTask());
+    QVERIFY(first->close());
+    repair.buttons[RepairWindow::XiaomiFlash]->click();
+    QCOMPARE(repair.xiaomiWindow, first);
+    QVERIFY(first->isVisible());
+}
 void DeviceOperationTests::init()
 {
     fixture.reset(new QTemporaryDir(QDir::tempPath() + "/OrangeOperationTests-XXXXXX"));

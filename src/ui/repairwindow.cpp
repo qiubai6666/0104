@@ -1,5 +1,6 @@
 #include "processmanager.h"
 #include "ougaflashwindow.h"
+#include "xiaomiflashwindow.h"
 #include "deviceoperationlease.h"
 #include <QCloseEvent>
 #include "shellcommand.h"
@@ -63,7 +64,8 @@ void RepairWindow::setupUI()
         "修复TMP",
         "安装APK",
         "安装模块",
-        "欧加线刷"
+        "欧加线刷",
+        "小米线刷"
     };
 
     buttons = UIHelper::createMenuButtons(this, mainLayout, buttonTexts);
@@ -113,6 +115,12 @@ void RepairWindow::onButtonClicked()
         break;
     case InstallModule:
         installModule();
+        break;
+    case XiaomiFlash:
+        if (!xiaomiWindow) xiaomiWindow = new XiaomiFlashWindow(this);
+        xiaomiWindow->showNormal();
+        xiaomiWindow->raise();
+        xiaomiWindow->activateWindow();
         break;
     case OugaFlash:
         if (!ougaWindow) ougaWindow = new OugaFlashWindow(this);
@@ -890,12 +898,11 @@ module_finished:
 }
 
 bool RepairWindow::hasActiveOugaTask() const {
-    if (!ougaWindow) return false;
-    if (ougaWindow->isBusy()) return true;
-    // The taskbar window has no QObject parent: preserve its logical launcher
-    // protection explicitly instead of relying on the lease's parent chain.
+    if ((xiaomiWindow && xiaomiWindow->isBusy()) || (ougaWindow && ougaWindow->isBusy())) return true;
+    // Taskbar flash windows have no QObject parent: protect both launchers
+    // explicitly, including read-only discovery and modal operations.
     for (QObject *owner = DeviceOperationLease::owner(); owner; owner = owner->parent())
-        if (owner == ougaWindow) return true;
+        if (owner == ougaWindow || owner == xiaomiWindow) return true;
     return false;
 }
 void RepairWindow::closeEvent(QCloseEvent *event) {

@@ -46,7 +46,7 @@ Write-Host "Release evidence (preserved on failure/success): $stage"
 $source = Join-Path $stage 'source'
 [IO.Directory]::CreateDirectory($source) | Out-Null
 # Snapshot only formal inputs. Never package the historical OrangeToolsApp directory.
-foreach ($relative in @('src','tests','qiubai','third_party','OrangeTools.pro','resources.pri','resources.qrc','ouga.pri','ougacodecs.pri','app.rc','app.manifest','LICENSE')) {
+foreach ($relative in @('src','tests','qiubai','third_party','OrangeTools.pro','resources.pri','resources.qrc','ouga.pri','xiaomi.pri','ougacodecs.pri','app.rc','app.manifest','LICENSE')) {
     $inputPath = Join-Path $PSScriptRoot $relative
     Assert-NoLinks $inputPath
     Copy-Item -LiteralPath $inputPath -Destination $source -Recurse
@@ -123,7 +123,7 @@ try {
     }
     # Existing regressions use inert tools/fixtures or loopback servers, never real devices or external services.
     foreach ($spec in @(@('processmanagertests','ProcessManagerTests'),@('deviceoperationtests','DeviceOperationTests'),
-                        @('ougadependencytests','OugaDependencyTests'),@('ougatests','OugaTests'),@('ouganetworktests','OugaNetworkTests'))) {
+                        @('ougadependencytests','OugaDependencyTests'),@('ougatests','OugaTests'),@('ouganetworktests','OugaNetworkTests'),@('xiaomitests','XiaomiTests'))) {
         Write-Host "Running regression: $($spec[1])"
         $build = Join-Path $stage ('regression\'+$spec[0])
         Build-ReleaseProject (Join-Path $source ('tests\'+$spec[0]+'.pro')) $build 'uncompressed_resources'
