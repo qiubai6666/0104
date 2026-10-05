@@ -19,6 +19,8 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QMouseEvent>
+#include <QAbstractItemView>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPlainTextEdit>
@@ -70,6 +72,22 @@ QLineEdit *OugaFlashWindow::entry(const QString &placeholder,
   return result;
 }
 namespace {
+// Like the reference ComboBox: clicking the editable text opens the list,
+// while typing a custom partition name still works.
+class PopupOnClick final : public QObject {
+public:
+  explicit PopupOnClick(QComboBox *box) : QObject(box), m_box(box) {}
+  bool eventFilter(QObject *watched, QEvent *event) override {
+    if (event->type() == QEvent::MouseButtonPress && m_box->isEnabled() &&
+        static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton &&
+        !m_box->view()->isVisible())
+      m_box->showPopup();
+    return QObject::eventFilter(watched, event);
+  }
+
+private:
+  QComboBox *m_box;
+};
 QGroupBox *card(const QString &title, QWidget *parent) {
   auto box = new QGroupBox(title, parent);
   box->setObjectName(title);
@@ -493,6 +511,7 @@ void OugaFlashWindow::buildPage(int index) {
   page.preset->setObjectName(sales ? "AfterSalesPayloadPartitionComboBox"
                                    : "PayloadPartitionComboBox");
   page.preset->setEditable(true);
+  page.preset->lineEdit()->installEventFilter(new PopupOnClick(page.preset));
   page.preset->setFixedHeight(32);
   page.preset->addItems(
       {"请选择快捷提取方案 ↓", "boot", "init_boot", "高通修复FastbootD关键分区",

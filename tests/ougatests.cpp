@@ -4119,6 +4119,12 @@ private slots:
     QCOMPARE(preset->count(), 6);
     QCOMPARE(preset->itemText(3), QString("高通修复FastbootD关键分区"));
     QCOMPARE(preset->itemText(4), QString("联发科修复FastbootD关键分区"));
+    // Clicking the editable text opens the scheme list, as in the reference.
+    QVERIFY(window.isVisible() || (window.show(), QTest::qWaitForWindowExposed(&window)));
+    QTest::mouseClick(preset->lineEdit(), Qt::LeftButton);
+    QTRY_VERIFY(preset->view()->isVisible());
+    preset->hidePopup();
+    QTRY_VERIFY(!preset->view()->isVisible());
     auto stop = window.findChild<QPushButton *>("OugaFlashStopPanel");
     QVERIFY(stop->isEnabled());
     stop->click();
