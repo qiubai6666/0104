@@ -44,6 +44,7 @@ protected:
 
 private:
     friend class DeviceOperationTests;
+    friend class DeviceInformationTests;
     bool beginOperation();
     void finishOperation();
     QProcess *createOperationProcess();

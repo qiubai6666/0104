@@ -35,11 +35,15 @@ DeviceManager::DeviceManager(QObject *parent)
     m_infoProcess = ProcessManager::createProcess(this);
     m_infoProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
+    m_infoTimer = new QTimer(this);
+    m_infoTimer->setSingleShot(true);
+    m_infoTimer->setInterval(5000);
     qDebug() << "DeviceManager 单例已创建";
 }
 
 DeviceManager::~DeviceManager()
 {
+    stopMonitoring();
     if (m_checkTimer && m_checkTimer->isActive()) {
         m_checkTimer->stop();
     }
@@ -157,40 +161,32 @@ void DeviceManager::releaseAdbOnlyMonitoring()
 
 void DeviceManager::stopMonitoring()
 {
-    if (m_checkTimer->isActive()) {
-        m_checkTimer->stop();
-        qDebug() << "DeviceManager 停止监控设备状态";
+    m_checkTimer->stop();
+    cancelInfoQuery();
+    // Disconnect before killing, including processes still in Starting state.
+    for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
+        disconnect(process, nullptr, this, nullptr);
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+            process->waitForFinished(1000);
+        }
     }
-
-    // 终止正在运行的进程
-    if (m_adbCheckProcess->state() == QProcess::Running) {
-        m_adbCheckProcess->kill();
-    }
-    if (m_fastbootCheckProcess->state() == QProcess::Running) {
-        m_fastbootCheckProcess->kill();
-    }
-    if (m_infoProcess->state() == QProcess::Running) {
-        m_infoProcess->kill();
-    }
-
     m_isChecking = false;
 }
 
 void DeviceManager::pauseMonitoring()
 {
-    if (!m_isPaused) {
-        m_isPaused = true;
-        qDebug() << "DeviceManager 暂停监控（用于fastboot操作）";
-
-        // Queries only; never kill a user's flash or shared ADB server.
-        for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess, m_infoProcess}) {
-            if (process->state() != QProcess::NotRunning) {
-                process->kill();
-                process->waitForFinished(1000);
-            }
+    if (m_isPaused) return;
+    m_isPaused = true;
+    cancelInfoQuery();
+    for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
+        disconnect(process, nullptr, this, nullptr);
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+            process->waitForFinished(1000);
         }
-        m_isChecking = false;
     }
+    m_isChecking = false;
 }
 
 void DeviceManager::resumeMonitoring(QObject *waitingOwner)
@@ -247,7 +243,7 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
         return;
     }
 
-    bool adbConnected = false;
+    QStringList adbSerials;
 
     if (exitStatus == QProcess::NormalExit && exitCode == 0) {
         const QString adbOutput = QString::fromLocal8Bit(m_adbCheckProcess->readAllStandardOutput());
@@ -257,11 +253,13 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
             // ADB 输出的第二列必须是精确的 device，避免把序列号或其他文本中的
             // "device" 当成在线设备。
             if (fields.size() >= 2 && fields.at(1) == "device") {
-                adbConnected = true;
-                break;
+                adbSerials.append(fields.at(0));
             }
         }
     }
+
+    const bool adbConnected = !adbSerials.isEmpty();
+    const QString adbSerial = adbSerials.contains(m_deviceSerial) ? m_deviceSerial : adbSerials.value(0);
 
     // 如果没有 ADB 连接，且当前不是 ADB-only 模式，才检查 Fastboot
     if (!adbConnected && !m_adbOnly) {
@@ -280,23 +278,8 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
         m_fastbootCheckProcess->start(fastbootPath, QStringList() << "devices");
     } else {
         // 有 ADB 连接或处于 ADB-only 模式
-        DeviceMode newMode = adbConnected ? ADB : None;
-        if (newMode != m_currentMode) {
-            m_currentMode = newMode;
-            emit deviceModeChanged(m_currentMode);
-            if (m_currentMode == ADB) {
-                qDebug() << "设备状态变更: ADB 模式";
-            } else {
-                qDebug() << "设备状态变更: 未连接";
-            }
-        }
-
-        // 获取设备信息（仅在 ADB 模式下）
-        if (m_currentMode == ADB) {
-            updateDeviceInfo();
-        } else {
-            m_deviceInfo.clear();
-        }
+        setDetectedDevice(adbConnected ? ADB : None, adbSerial);
+        if (m_currentMode == ADB) updateDeviceInfo();
         m_isChecking = false;
     }
 }
@@ -325,11 +308,7 @@ void DeviceManager::onAdbCheckError(QProcess::ProcessError error)
         return;
     }
 
-    if (m_currentMode != None) {
-        m_currentMode = None;
-        emit deviceModeChanged(m_currentMode);
-    }
-    m_deviceInfo.clear();
+    setDetectedDevice(None, QString());
     m_isChecking = false;
 }
 void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus exitStatus)
@@ -340,7 +319,7 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
         return;
     }
 
-    bool fastbootConnected = false;
+    QStringList fastbootSerials;
 
     if (exitStatus == QProcess::NormalExit && exitCode == 0) {
         const QString fastbootOutput = QString::fromLocal8Bit(m_fastbootCheckProcess->readAllStandardOutput());
@@ -349,31 +328,14 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
             const QStringList fields = rawLine.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
             // fastboot devices 的第二列必须精确为 fastboot。
             if (fields.size() >= 2 && fields.at(1) == "fastboot") {
-                fastbootConnected = true;
-                break;
+                fastbootSerials.append(fields.at(0));
             }
         }
     }
 
-    // 更新状态
-    DeviceMode newMode = fastbootConnected ? Fastboot : None;
-    if (newMode != m_currentMode) {
-        m_currentMode = newMode;
-        emit deviceModeChanged(m_currentMode);
-
-        if (m_currentMode == Fastboot) {
-            qDebug() << "设备状态变更: Fastboot 模式";
-        } else {
-            qDebug() << "设备状态变更: 未连接";
-        }
-    }
-
-    // 获取设备信息
-    if (m_currentMode != None) {
-        updateDeviceInfo();
-    } else {
-        m_deviceInfo.clear();
-    }
+    const QString serial = fastbootSerials.contains(m_deviceSerial) ? m_deviceSerial : fastbootSerials.value(0);
+    setDetectedDevice(fastbootSerials.isEmpty() ? None : Fastboot, serial);
+    if (m_currentMode != None) updateDeviceInfo();
 
     m_isChecking = false;
 }
@@ -389,145 +351,132 @@ void DeviceManager::onFastbootCheckError(QProcess::ProcessError error)
         return;
     }
 
-    if (m_currentMode != None) {
-        m_currentMode = None;
-        emit deviceModeChanged(m_currentMode);
-    }
-    m_deviceInfo.clear();
+    setDetectedDevice(None, QString());
     m_isChecking = false;
 }
+void DeviceManager::setDetectedDevice(DeviceMode mode, const QString &serial)
+{
+    if (mode == m_currentMode && serial == m_deviceSerial) return;
+    cancelInfoQuery();
+    const bool modeChanged = mode != m_currentMode;
+    m_currentMode = mode;
+    m_deviceSerial = serial;
+    m_deviceInfo.clear();
+    // Invalidate cached UI data even when one ADB device replaces another.
+    emit deviceInfoUpdated(QString());
+    if (modeChanged) emit deviceModeChanged(mode);
+}
+
+void DeviceManager::cancelInfoQuery()
+{
+    ++m_infoGeneration;
+    m_infoQueryActive = false;
+    m_infoTimer->stop();
+    disconnect(m_infoTimer, nullptr, this, nullptr);
+    disconnect(m_infoProcess, nullptr, this, nullptr);
+    if (m_infoProcess->state() != QProcess::NotRunning) {
+        m_infoProcess->kill();
+        m_infoProcess->waitForFinished(1000);
+    }
+}
+
+bool DeviceManager::isCurrentInfoQuery(quint64 generation, QProcess *process, int step) const
+{
+    return m_infoQueryActive && !m_isPaused && generation == m_infoGeneration &&
+           process == m_infoProcess && step == m_infoStep &&
+           m_currentMode == m_infoMode && m_deviceSerial == m_infoSerial;
+}
+
 void DeviceManager::updateDeviceInfo()
 {
-    if (m_isPaused) return;
-    // 如果进程正在运行，先终止它
-    if (m_infoProcess->state() == QProcess::Running) {
+    if (m_isPaused || m_currentMode == None) return;
+    // Polling checks connectivity, but must not interrupt a slow property query.
+    if (m_infoQueryActive && m_infoMode == m_currentMode && m_infoSerial == m_deviceSerial) return;
+    cancelInfoQuery();
+    m_infoQueryActive = true;
+    m_infoMode = m_currentMode;
+    m_infoSerial = m_deviceSerial;
+    m_pendingDevice = m_pendingSlot = m_pendingUnlock = QStringLiteral("未知");
+    startInfoStep(0);
+}
+
+void DeviceManager::startInfoStep(int step)
+{
+    m_infoStep = step;
+    disconnect(m_infoProcess, nullptr, this, nullptr);
+    m_infoProcess->deleteLater();
+    QProcess *process = ProcessManager::createProcess(this);
+    m_infoProcess = process;
+    process->setWorkingDirectory(ResourceExtractor::getResourcePath());
+    const quint64 generation = m_infoGeneration;
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, process, generation, step](int code, QProcess::ExitStatus status) {
+        if (!isCurrentInfoQuery(generation, process, step)) return;
+        const bool success = status == QProcess::NormalExit && code == 0;
+        const QString output = QString::fromLocal8Bit(m_infoMode == ADB ?
+            process->readAllStandardOutput() : process->readAllStandardError() + process->readAllStandardOutput());
+        finishInfoStep(success, output);
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process, generation, step](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart && isCurrentInfoQuery(generation, process, step))
+            finishInfoStep(false, QString());
+    });
+    disconnect(m_infoTimer, nullptr, this, nullptr);
+    connect(m_infoTimer, &QTimer::timeout, this, [this, process, generation, step]() {
+        if (isCurrentInfoQuery(generation, process, step)) finishInfoStep(false, QString());
+    });
+    QStringList arguments;
+    if (!m_infoSerial.isEmpty()) arguments << "-s" << m_infoSerial;
+    const QStringList adbProperties = {"ro.product.device", "ro.boot.slot_suffix", "ro.boot.verifiedbootstate"};
+    const QStringList fastbootVariables = {"product", "current-slot", "unlocked"};
+    if (m_infoMode == ADB) arguments << "shell" << "getprop" << adbProperties.at(step);
+    else arguments << "getvar" << fastbootVariables.at(step);
+    m_infoTimer->start();
+    process->start(m_infoMode == ADB ? ResourceExtractor::getAdbPath() : ResourceExtractor::getFastbootPath(), arguments);
+}
+
+void DeviceManager::finishInfoStep(bool success, const QString &output)
+{
+    m_infoTimer->stop();
+    disconnect(m_infoProcess, nullptr, this, nullptr);
+    if (m_infoProcess->state() != QProcess::NotRunning) {
         m_infoProcess->kill();
-        m_infoProcess->waitForFinished(100);
+        m_infoProcess->waitForFinished(1000);
     }
-
-    // 异步获取设备信息 - 第一步：获取设备代号
-    QString adbPath = ResourceExtractor::getAdbPath();
-    QString fastbootPath = ResourceExtractor::getFastbootPath();
-
-    disconnect(m_infoProcess, nullptr, this, nullptr);
-
-    if (m_currentMode == ADB) {
-        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onDeviceInfoStep1Finished);
-        m_infoProcess->start(adbPath, QStringList() << "shell" << "getprop" << "ro.product.device");
-    } else if (m_currentMode == Fastboot) {
-        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onDeviceInfoStep1Finished);
-        m_infoProcess->start(fastbootPath, QStringList() << "getvar" << "product");
-    }
-}
-
-void DeviceManager::onDeviceInfoStep1Finished()
-{
-    if (m_isPaused) return;
-    disconnect(m_infoProcess, nullptr, this, nullptr);
-
-    // 检查模式是否已经变化
-    if (m_currentMode == None) {
-        return;
-    }
-
-    QString adbPath = ResourceExtractor::getAdbPath();
-    QString fastbootPath = ResourceExtractor::getFastbootPath();
-
-    if (m_currentMode == ADB) {
-        m_pendingDevice = QString::fromLocal8Bit(m_infoProcess->readAllStandardOutput()).trimmed();
-        if (m_pendingDevice.isEmpty()) m_pendingDevice = "未知";
-
-        // 第二步：获取活动分区
-        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onDeviceInfoStep2Finished);
-        m_infoProcess->start(adbPath, QStringList() << "shell" << "getprop" << "ro.boot.slot_suffix");
-    } else if (m_currentMode == Fastboot) {
-        QString output = QString::fromLocal8Bit(m_infoProcess->readAllStandardError());
-        m_pendingDevice = "未知";
-        if (output.contains("product:")) {
-            int start = output.indexOf("product:") + 8;
-            int end = output.indexOf('\n', start);
-            m_pendingDevice = output.mid(start, end - start).trimmed();
-        }
-
-        // 第二步：获取活动分区
-        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onDeviceInfoStep2Finished);
-        m_infoProcess->start(fastbootPath, QStringList() << "getvar" << "current-slot");
-    }
-}
-
-void DeviceManager::onDeviceInfoStep2Finished()
-{
-    if (m_isPaused) return;
-    disconnect(m_infoProcess, nullptr, this, nullptr);
-
-    // 检查模式是否已经变化
-    if (m_currentMode == None) {
-        return;
-    }
-
-    QString adbPath = ResourceExtractor::getAdbPath();
-    QString fastbootPath = ResourceExtractor::getFastbootPath();
-
-    if (m_currentMode == ADB) {
-        m_pendingSlot = QString::fromLocal8Bit(m_infoProcess->readAllStandardOutput()).trimmed();
-        if (m_pendingSlot.isEmpty()) m_pendingSlot = "无";
-        else m_pendingSlot = m_pendingSlot.replace("_", "");
-
-        // 第三步：获取解锁状态
-        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onDeviceInfoStep3Finished);
-        m_infoProcess->start(adbPath, QStringList() << "shell" << "getprop" << "ro.boot.verifiedbootstate");
-    } else if (m_currentMode == Fastboot) {
-        QString output = QString::fromLocal8Bit(m_infoProcess->readAllStandardError());
-        m_pendingSlot = "无";
-        if (output.contains("current-slot:")) {
-            int start = output.indexOf("current-slot:") + 13;
-            int end = output.indexOf('\n', start);
-            QString slotValue = output.mid(start, end - start).trimmed();
-            if (!slotValue.isEmpty() && slotValue != "not found") {
-                m_pendingSlot = slotValue;
-            }
-        }
-
-        // 第三步：获取解锁状态
-        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onDeviceInfoStep3Finished);
-        m_infoProcess->start(fastbootPath, QStringList() << "getvar" << "unlocked");
-    }
-}
-
-void DeviceManager::onDeviceInfoStep3Finished()
-{
-    if (m_isPaused) return;
-    disconnect(m_infoProcess, nullptr, this, nullptr);
-
-    // 检查模式是否已经变化
-    if (m_currentMode == None) {
-        return;
-    }
-
-    if (m_currentMode == ADB) {
-        QString unlocked = QString::fromLocal8Bit(m_infoProcess->readAllStandardOutput()).trimmed();
-        if (unlocked == "orange") m_pendingUnlock = "已解锁";
-        else if (unlocked == "green") m_pendingUnlock = "未解锁";
-        else m_pendingUnlock = "未知";
-    } else if (m_currentMode == Fastboot) {
-        QString output = QString::fromLocal8Bit(m_infoProcess->readAllStandardError());
-        m_pendingUnlock = "未知";
-        if (output.contains("unlocked:")) {
-            m_pendingUnlock = output.contains("yes") ? "已解锁" : "未解锁";
+    QString value;
+    bool found = success;
+    if (success && m_infoMode == ADB) {
+        value = output.trimmed();
+        if (value.contains('\n') || value.contains('\r')) found = false;
+    } else if (success) {
+        const QStringList keys = {"product", "current-slot", "unlocked"};
+        const QRegularExpression field("^(?:\\(bootloader\\)\\s*)?" + keys.at(m_infoStep) + ":\\s*(.*)$");
+        found = false;
+        for (const QString &line : output.split('\n')) {
+            const auto match = field.match(line.trimmed());
+            if (match.hasMatch()) { value = match.captured(1).trimmed(); found = true; break; }
         }
     }
-
-    // 构建并发送设备信息
-    QString info = QString("代号:%1\n分区:%2\n解锁:%3").arg(m_pendingDevice, m_pendingSlot, m_pendingUnlock);
-
+    if (found) {
+        if (m_infoStep == 0 && !value.isEmpty()) m_pendingDevice = value;
+        else if (m_infoStep == 1) {
+            if (value == "a" || value == "_a") m_pendingSlot = "a";
+            else if (value == "b" || value == "_b") m_pendingSlot = "b";
+            // Only a successful empty ADB property means no reported slot.
+            else if (m_infoMode == ADB && value.isEmpty()) m_pendingSlot = "无";
+        } else if (m_infoStep == 2) {
+            if ((m_infoMode == ADB && value == "orange") || (m_infoMode == Fastboot && value == "yes"))
+                m_pendingUnlock = "已解锁";
+            else if ((m_infoMode == ADB && value == "green") || (m_infoMode == Fastboot && value == "no"))
+                m_pendingUnlock = "未解锁";
+        }
+    }
+    if (m_infoStep < 2) { startInfoStep(m_infoStep + 1); return; }
+    m_infoQueryActive = false;
+    const QString info = QString("代号:%1\n分区:%2\n解锁:%3").arg(m_pendingDevice, m_pendingSlot, m_pendingUnlock);
     if (info != m_deviceInfo) {
         m_deviceInfo = info;
-        emit deviceInfoUpdated(m_deviceInfo);
+        emit deviceInfoUpdated(info);
     }
 }

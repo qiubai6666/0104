@@ -172,6 +172,9 @@ DeviceInfoWindow::DeviceInfoWindow(QWidget *parent)
     opacityTimer->setSingleShot(true);
     connect(opacityTimer, &QTimer::timeout, this, &DeviceInfoWindow::restoreOpacity);
     
+    queryTimer = new QTimer(this);
+    queryTimer->setSingleShot(true);
+    queryTimer->setInterval(5000);
     setupUI();
     
     // 创建 scrcpy 进程对象
@@ -189,6 +192,12 @@ DeviceInfoWindow::DeviceInfoWindow(QWidget *parent)
     connect(DeviceManager::instance(), &DeviceManager::deviceInfoUpdated,
             this, &DeviceInfoWindow::onDeviceInfoUpdated);
     
+    connect(DeviceOperationLease::instance(), &DeviceOperationLease::changed, this, [this](bool held) {
+        if (held) cancelDeviceQuery();
+        else if (DeviceManager::instance()->currentMode() == DeviceManager::ADB)
+            onDeviceInfoUpdated(DeviceManager::instance()->getDeviceInfo());
+    });
+
     // 确保设备监控已启动（仅 ADB 检测）
     DeviceManager::instance()->ensureAdbOnlyMonitoring();
     
@@ -211,14 +220,13 @@ DeviceInfoWindow::DeviceInfoWindow(QWidget *parent)
 
 DeviceInfoWindow::~DeviceInfoWindow()
 {
+    cancelDeviceQuery();
+    disconnect(DeviceOperationLease::instance(), nullptr, this, nullptr);
+    disconnect(scrcpyProcess, nullptr, this, nullptr);
     // 终止scrcpy进程
     if (scrcpyProcess && scrcpyProcess->state() == QProcess::Running) {
         scrcpyProcess->kill();
         scrcpyProcess->waitForFinished(100);
-    }
-    if (queryProcess) {
-        queryProcess->kill();
-        queryProcess->deleteLater();
     }
     if (transferProcess) {
         transferProcess->kill();
@@ -336,122 +344,146 @@ void DeviceInfoWindow::applyPresentation(bool connected)
 }
 void DeviceInfoWindow::startScrcpy()
 {
-    if (DeviceOperationLease::busyFor(this)) return;
-    // 使用绝对路径确保调用qiubai文件夹中的scrcpy
-    QString scrcpyPath = ResourceExtractor::getResourcePath() + "/scrcpy.exe";
+    if (DeviceOperationLease::busyFor(this) || DeviceManager::instance()->currentMode() != DeviceManager::ADB) return;
+    if (scrcpyProcess->state() != QProcess::NotRunning) return;
+    scrcpySerial = DeviceManager::instance()->deviceSerial();
+    QStringList args = {"--max-size", "1024", "--video-bit-rate", "4M"};
+    if (!scrcpySerial.isEmpty()) args << "--serial" << scrcpySerial;
     scrcpyProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-    scrcpyProcess->start(scrcpyPath, QStringList() << "--max-size" << "1024" << "--video-bit-rate" << "4M");
+    scrcpyProcess->start(ResourceExtractor::getResourcePath() + "/scrcpy.exe", args);
 }
 
 void DeviceInfoWindow::onDeviceModeChanged(DeviceManager::DeviceMode mode)
 {
-    if (DeviceOperationLease::busyFor(this)) return;
     if (mode == DeviceManager::ADB) {
-        // 设备连接（ADB 模式）- 显示设备信息并启动投屏
         showDeviceInfo();
-        // 立即显示设备信息
         onDeviceInfoUpdated(DeviceManager::instance()->getDeviceInfo());
-        // 启动 scrcpy
         startScrcpy();
     } else {
-        // 非 ADB 模式一律视为未检测到可投屏设备
+        cancelDeviceQuery();
         showNoDeviceMessage();
-        // 停止 scrcpy
-        if (scrcpyProcess && scrcpyProcess->state() == QProcess::Running) {
-            scrcpyProcess->kill();
-        }
+        if (scrcpyProcess->state() != QProcess::NotRunning) scrcpyProcess->kill();
     }
+}
+
+void DeviceInfoWindow::cancelDeviceQuery()
+{
+    ++queryGeneration;
+    queryActive = false;
+    queryTimer->stop();
+    disconnect(queryTimer, nullptr, this, nullptr);
+    QProcess *old = queryProcess;
+    queryProcess = nullptr;
+    if (old) {
+        // Invalidate and disconnect BEFORE kill: finished can run synchronously.
+        disconnect(old, nullptr, this, nullptr);
+        if (old->state() != QProcess::NotRunning) {
+            old->kill();
+            old->waitForFinished(1000);
+        }
+        old->deleteLater();
+    }
+}
+
+bool DeviceInfoWindow::isCurrentDeviceQuery(quint64 generation, QProcess *process, int step) const
+{
+    return queryActive && generation == queryGeneration && process == queryProcess && step == queryStep &&
+           DeviceManager::instance()->currentMode() == DeviceManager::ADB &&
+           DeviceManager::instance()->deviceSerial() == querySerial && !DeviceOperationLease::busyFor();
 }
 
 void DeviceInfoWindow::onDeviceInfoUpdated(const QString &info)
 {
-    if (DeviceOperationLease::busyFor(this)) return;
-    // 只在 ADB 模式下更新设备信息
-    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
+    auto *manager = DeviceManager::instance();
+    // An empty snapshot invalidates both mode changes and same-mode device replacement.
+    if (info.isEmpty()) {
+        cancelDeviceQuery();
+        pendingModel = pendingVersion = pendingCodename = pendingSlot = pendingUnlock = QStringLiteral("未知");
+        if (manager->currentMode() == DeviceManager::ADB) {
+            showDeviceInfo();
+            updateDeviceLabels(pendingModel, pendingCodename, pendingVersion, pendingSlot, pendingUnlock);
+        } else showNoDeviceMessage();
+        if (scrcpySerial != manager->deviceSerial() && scrcpyProcess->state() != QProcess::NotRunning)
+            scrcpyProcess->kill();
         return;
     }
-    
-    // 解析设备信息字符串 (格式: 代号:xxx\n分区:xxx\n解锁:xxx)
-    QStringList lines = info.split('\n');
-    pendingCodename = "未知";
-    pendingSlot = "未知";
-    pendingUnlock = "未知";
-    
-    for (const QString &line : lines) {
-        if (line.startsWith("代号:")) {
-            pendingCodename = line.mid(3).trimmed();
-        } else if (line.startsWith("分区:")) {
-            pendingSlot = line.mid(3).trimmed();
-        } else if (line.startsWith("解锁:")) {
-            pendingUnlock = line.mid(3).trimmed();
-        }
+    if (manager->currentMode() != DeviceManager::ADB) { cancelDeviceQuery(); return; }
+    if (DeviceOperationLease::busyFor()) { cancelDeviceQuery(); return; }
+    pendingCodename = pendingSlot = pendingUnlock = QStringLiteral("未知");
+    for (const QString &line : info.split('\n')) {
+        if (line.startsWith("代号:")) pendingCodename = line.mid(3).trimmed();
+        else if (line.startsWith("分区:")) pendingSlot = line.mid(3).trimmed();
+        else if (line.startsWith("解锁:")) pendingUnlock = line.mid(3).trimmed();
     }
-    
-    // 异步获取型号
+    // A slow model/version chain belongs to this device, not to each polling tick.
+    if (queryActive && querySerial == manager->deviceSerial()) return;
+    cancelDeviceQuery();
+    querySerial = manager->deviceSerial();
+    queryActive = true;
+    pendingModel = pendingVersion = QStringLiteral("未知");
+    startDeviceQueryStep(0);
+    startScrcpy();
+}
+
+void DeviceInfoWindow::startDeviceQueryStep(int step)
+{
+    queryStep = step;
     if (queryProcess) {
-        // 如果有进程在运行，先终止
-        if (queryProcess->state() == QProcess::Running) {
-            queryProcess->kill();
-            queryProcess->waitForFinished(100);
-        }
+        disconnect(queryProcess, nullptr, this, nullptr);
         queryProcess->deleteLater();
     }
-    queryProcess = ProcessManager::createProcess(this);
-    queryProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-    
-    QString adbPath = ResourceExtractor::getAdbPath();
-    
-    connect(queryProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &DeviceInfoWindow::onModelQueryFinished);
-    
-    queryProcess->start(adbPath, QStringList() << "shell" << "getprop" << "ro.product.model");
+    QProcess *process = ProcessManager::createProcess(this);
+    queryProcess = process;
+    process->setWorkingDirectory(ResourceExtractor::getResourcePath());
+    const quint64 generation = queryGeneration;
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, process, generation, step](int code, QProcess::ExitStatus status) {
+        if (isCurrentDeviceQuery(generation, process, step))
+            finishDeviceQueryStep(status == QProcess::NormalExit && code == 0,
+                                  QString::fromLocal8Bit(process->readAllStandardOutput()));
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process, generation, step](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart && isCurrentDeviceQuery(generation, process, step))
+            finishDeviceQueryStep(false, QString());
+    });
+    disconnect(queryTimer, nullptr, this, nullptr);
+    connect(queryTimer, &QTimer::timeout, this, [this, process, generation, step]() {
+        if (isCurrentDeviceQuery(generation, process, step)) finishDeviceQueryStep(false, QString());
+    });
+    QStringList args;
+    if (!querySerial.isEmpty()) args << "-s" << querySerial;
+    args << "shell" << "getprop" << (step == 0 ? "ro.product.model" : "ro.build.version.release");
+    queryTimer->start();
+    process->start(ResourceExtractor::getAdbPath(), args);
 }
 
-void DeviceInfoWindow::onModelQueryFinished()
+void DeviceInfoWindow::finishDeviceQueryStep(bool success, const QString &output)
 {
-    if (DeviceOperationLease::busyFor(this)) return;
+    queryTimer->stop();
     disconnect(queryProcess, nullptr, this, nullptr);
-    
-    // 检查设备是否仍然连接
-    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
-        queryProcess->deleteLater();
-        queryProcess = nullptr;
-        return;
+    if (queryProcess->state() != QProcess::NotRunning) {
+        queryProcess->kill();
+        queryProcess->waitForFinished(1000);
     }
-    
-    pendingModel = QString::fromLocal8Bit(queryProcess->readAllStandardOutput()).trimmed();
-    if (pendingModel.isEmpty()) pendingModel = "未知";
-    
-    // 删除旧进程，创建新进程获取版本
+    const QString value = output.trimmed();
+    const QString validated = success && !value.isEmpty() && !value.contains('\n') && !value.contains('\r')
+        ? value : QStringLiteral("未知");
+    if (queryStep == 0) { pendingModel = validated; startDeviceQueryStep(1); return; }
+    pendingVersion = validated;
+    queryActive = false;
     queryProcess->deleteLater();
-    queryProcess = ProcessManager::createProcess(this);
-    queryProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-    
-    QString adbPath = ResourceExtractor::getAdbPath();
-    
-    connect(queryProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &DeviceInfoWindow::onVersionQueryFinished);
-    
-    queryProcess->start(adbPath, QStringList() << "shell" << "getprop" << "ro.build.version.release");
-}
-
-void DeviceInfoWindow::onVersionQueryFinished()
-{
-    if (DeviceOperationLease::busyFor(this)) return;
-    disconnect(queryProcess, nullptr, this, nullptr);
-    
-    // 检查设备是否仍然连接
-    if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
-        queryProcess->deleteLater();
-        queryProcess = nullptr;
-        return;
-    }
-    
-    pendingVersion = QString::fromLocal8Bit(queryProcess->readAllStandardOutput()).trimmed();
-    if (pendingVersion.isEmpty()) pendingVersion = "未知";
-    
-    // 更新显示
+    queryProcess = nullptr;
     updateDeviceLabels(pendingModel, pendingCodename, pendingVersion, pendingSlot, pendingUnlock);
+    if (pendingModel == QStringLiteral("未知") || pendingVersion == QStringLiteral("未知")) {
+        const quint64 generation = queryGeneration;
+        QTimer::singleShot(1000, this, [this, generation]() {
+            if (generation == queryGeneration && !queryActive && !DeviceOperationLease::busyFor() &&
+                DeviceManager::instance()->currentMode() == DeviceManager::ADB &&
+                DeviceManager::instance()->deviceSerial() == querySerial)
+                onDeviceInfoUpdated(DeviceManager::instance()->getDeviceInfo());
+        });
+    }
 }
 
 void DeviceInfoWindow::updateDeviceLabels(const QString &model, const QString &codename, 

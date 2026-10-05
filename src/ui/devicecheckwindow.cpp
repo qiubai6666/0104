@@ -400,7 +400,8 @@ void DeviceCheckWindow::onDeviceModeChanged(DeviceManager::DeviceMode mode)
 
 void DeviceCheckWindow::onDeviceInfoUpdated(const QString &info)
 {
-    infoLabel->setText(info);
+    infoLabel->setText(DeviceManager::instance()->currentMode() == DeviceManager::None ? QStringLiteral("等待设备") :
+                       info.isEmpty() ? QStringLiteral("获取中...") : info);
 }
 
 void DeviceCheckWindow::updateUIForMode(DeviceManager::DeviceMode mode)

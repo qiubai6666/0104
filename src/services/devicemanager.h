@@ -28,6 +28,7 @@ public:
 
     // 获取设备信息
     QString getDeviceInfo() const;
+    QString deviceSerial() const { return m_deviceSerial; }
 
     // 确保监控已启动（引用计数）
     // 启动全模式监控（ADB + Fastboot）- 调用时增加引用计数
@@ -64,12 +65,15 @@ private slots:
     void onFastbootCheckFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void onFastbootCheckError(QProcess::ProcessError error);
     void updateDeviceInfo();
-    void onDeviceInfoStep1Finished();
-    void onDeviceInfoStep2Finished();
-    void onDeviceInfoStep3Finished();
 
 private:
     friend class DeviceOperationTests;
+    friend class DeviceInformationTests;
+    void setDetectedDevice(DeviceMode mode, const QString &serial);
+    void cancelInfoQuery();
+    void startInfoStep(int step);
+    void finishInfoStep(bool success, const QString &output);
+    bool isCurrentInfoQuery(quint64 generation, QProcess *process, int step) const;
     explicit DeviceManager(QObject *parent = nullptr);
     ~DeviceManager();
 
@@ -90,6 +94,13 @@ private:
     int m_adbOnlyRefCount;    // ADB-only 模式监控的引用计数
     bool m_isPaused;          // 监控是否被暂停
     QString m_deviceInfo;
+    QString m_deviceSerial;
+    QTimer *m_infoTimer;
+    quint64 m_infoGeneration = 0;
+    bool m_infoQueryActive = false;
+    DeviceMode m_infoMode = None;
+    QString m_infoSerial;
+    int m_infoStep = 0;
 
     // 异步设备信息查询中间变量
     QString m_pendingDevice;

@@ -30,12 +30,21 @@ private slots:
     void onScrcpyFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void onDeviceModeChanged(DeviceManager::DeviceMode mode);
     void onDeviceInfoUpdated(const QString &info);
-    void onModelQueryFinished();
-    void onVersionQueryFinished();
     void onTransferFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void restoreOpacity();
 
 private:
+    friend class DeviceInformationTests;
+    void cancelDeviceQuery();
+    void startDeviceQueryStep(int step);
+    void finishDeviceQueryStep(bool success, const QString &output);
+    bool isCurrentDeviceQuery(quint64 generation, QProcess *process, int step) const;
+    QTimer *queryTimer = nullptr;
+    quint64 queryGeneration = 0;
+    bool queryActive = false;
+    QString querySerial;
+    QString scrcpySerial;
+    int queryStep = 0;
     QLabel *modelLabel;
     QLabel *codenameLabel;
     QLabel *versionLabel;

@@ -483,7 +483,7 @@ int helperMain(QCoreApplication &application)
 {
     const QString base = QFileInfo(application.applicationFilePath()).baseName();
     const QString directory = application.applicationDirPath();
-    const QStringList args = application.arguments().mid(1);
+    QStringList args = application.arguments().mid(1);
     QJsonArray command;
     command.append(base);
     for (const QString &arg : args) command.append(arg);
@@ -494,6 +494,7 @@ int helperMain(QCoreApplication &application)
     const QByteArray record = QJsonDocument(command).toJson(QJsonDocument::Compact);
     if (auditFile.write(record) != record.size() || !auditFile.flush()) return 91;
     auditFile.close();
+    if (args.value(0) == "-s") { args.removeFirst(); args.removeFirst(); }
     const QByteArray mode = readFile(directory + "/mode.txt");
     if (args.value(0) == "devices") {
         if (base == "adb") {
