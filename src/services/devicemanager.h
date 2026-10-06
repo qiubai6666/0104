@@ -28,6 +28,8 @@ public:
 
     // 获取设备信息
     QString getDeviceInfo() const;
+    // Five-row detection snapshot; keep the legacy snapshot for existing consumers.
+    QString getDeviceDetails() const { return m_deviceDetails; }
     QString deviceSerial() const { return m_deviceSerial; }
 
     // 确保监控已启动（引用计数）
@@ -57,6 +59,7 @@ signals:
 
     // 设备信息更新信号
     void deviceInfoUpdated(const QString &info);
+    void deviceDetailsUpdated(const QString &details);
 
 private slots:
     void checkDeviceStatus();
@@ -94,6 +97,7 @@ private:
     int m_adbOnlyRefCount;    // ADB-only 模式监控的引用计数
     bool m_isPaused;          // 监控是否被暂停
     QString m_deviceInfo;
+    QString m_deviceDetails;
     QString m_deviceSerial;
     QTimer *m_infoTimer;
     quint64 m_infoGeneration = 0;
@@ -103,6 +107,8 @@ private:
     int m_infoStep = 0;
 
     // 异步设备信息查询中间变量
+    QString m_pendingModel;
+    QString m_pendingVersion;
     QString m_pendingDevice;
     QString m_pendingSlot;
     QString m_pendingUnlock;

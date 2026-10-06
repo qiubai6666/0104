@@ -36,6 +36,11 @@ void setting(const QString &key, const QJsonValue &value) {
 QString snapshot(const QString &device = "alpha", const QString &slot = "a", const QString &unlock = QStringLiteral("已解锁")) {
     return QStringLiteral("代号:%1\n分区:%2\n解锁:%3").arg(device, slot, unlock);
 }
+QString details(const QString &model = "Model A", const QString &device = "alpha", const QString &version = "Android 16",
+                const QString &slot = "a", const QString &unlock = QStringLiteral("已解锁")) {
+    return QStringLiteral("设备型号：%1\n设备代号：%2\n系统版本：%3\n活动分区：%4\n解锁状态：%5")
+        .arg(model, device, version, slot, unlock);
+}
 QStringList audit() {
     QStringList records;
     for (const QString &file : QDir(fixturePath).entryList({"command-*.json"})) records << QString::fromUtf8(load(fixturePath + "/" + file));
@@ -94,7 +99,7 @@ private slots:
         DeviceCheckWindow window;
         QSignalSpy spy(manager, &DeviceManager::deviceInfoUpdated);
         QTRY_COMPARE_WITH_TIMEOUT(manager->getDeviceInfo(), snapshot(), 6000);
-        QCOMPARE(window.infoLabel->text(), snapshot());
+        QTRY_COMPARE(window.infoLabel->text(), details());
         QCOMPARE(manager->deviceSerial(), QString("first"));
         QCOMPARE(queryCount("ro.product.device"), 1);
         for (const auto &args : spy) QVERIFY(!args.at(0).toString().contains("代号:orange"));
@@ -107,7 +112,7 @@ private slots:
         setting("mode", "fastboot"); setting("current-slot.delay", 1300);
         DeviceCheckWindow window;
         QTRY_COMPARE_WITH_TIMEOUT(manager->getDeviceInfo(), snapshot(), 6000);
-        QCOMPARE(window.infoLabel->text(), snapshot());
+        QTRY_COMPARE(window.infoLabel->text(), details(QStringLiteral("未知"), "alpha", QStringLiteral("未知")));
         QCOMPARE(queryCount("product"), 1);
     }
     void slotFailuresAndEmptyValues_data() {
@@ -167,10 +172,13 @@ private slots:
     void timeoutAndFailedStartPublishUnknownThenRecover() {
         setting("ro.boot.slot_suffix.delay", 5000); manager->m_infoTimer->setInterval(300);
         select(); QTRY_COMPARE(manager->getDeviceInfo(), snapshot("alpha", QStringLiteral("未知")));
+        QTRY_VERIFY(!manager->m_infoQueryActive);
         setting("ro.boot.slot_suffix.delay", 0); manager->updateDeviceInfo();
         QTRY_COMPARE(manager->getDeviceInfo(), snapshot());
+        QTRY_VERIFY(!manager->m_infoQueryActive);
         unavailable = true; manager->updateDeviceInfo();
         QTRY_COMPARE(manager->getDeviceInfo(), snapshot(QStringLiteral("未知"), QStringLiteral("未知"), QStringLiteral("未知")));
+        QTRY_VERIFY(!manager->m_infoQueryActive);
         unavailable = false; manager->updateDeviceInfo(); QTRY_COMPARE(manager->getDeviceInfo(), snapshot());
     }
     void canceledGenerationCannotPublishForReplacement() {
@@ -180,6 +188,7 @@ private slots:
         QTest::qWait(1400); QVERIFY(manager->getDeviceInfo().isEmpty());
         setting("ro.product.device.delay", 0); select(DeviceManager::ADB, "second");
         QTRY_COMPARE(manager->getDeviceInfo(), snapshot("beta"));
+        QTRY_VERIFY(!manager->m_infoQueryActive);
         setting("ro.boot.slot_suffix.delay", 1200); manager->updateDeviceInfo();
         QTRY_COMPARE(manager->m_infoStep, 1);
         select(DeviceManager::Fastboot, "third"); QTRY_COMPARE(manager->getDeviceInfo(), snapshot("beta"));
@@ -191,6 +200,7 @@ private slots:
         manager->pauseMonitoring(); QTest::qWait(1400); QCOMPARE(spy.count(), 0);
         manager->resumeMonitoring(); setting("ro.boot.verifiedbootstate.delay", 0); manager->updateDeviceInfo();
         QTRY_COMPARE(manager->getDeviceInfo(), snapshot());
+        QTRY_VERIFY(!manager->m_infoQueryActive);
         setting("ro.product.device.delay", 1200); manager->updateDeviceInfo();
         manager->stopMonitoring(); QTest::qWait(1400); QCOMPARE(manager->getDeviceInfo(), snapshot());
     }
@@ -211,7 +221,9 @@ private slots:
         QCOMPARE(window.codenameLabel->text(), QStringLiteral("手机代号: alpha"));
         QCOMPARE(window.slotLabel->text(), QStringLiteral("活动分区: a"));
         QCOMPARE(window.unlockLabel->text(), QStringLiteral("解锁状态: 已解锁"));
-        QCOMPARE(queryCount(slowProperty), 1);
+        // The shared detection snapshot also reads model/version once.
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        QCOMPARE(queryCount(slowProperty), 2);
     }
     void projectionReplacementAndDisconnectRejectStaleResults() {
         setting("ro.build.version.release.delay", 1300);
@@ -280,9 +292,8 @@ private slots:
         manager->pauseMonitoring();
         manager->m_currentMode = DeviceManager::DeviceMode(mode);
         DeviceCheckWindow window;
-        window.setFont(QFont("Microsoft YaHei"));
         window.setPosition(500, 100, menuHeight);
-        window.onDeviceInfoUpdated(QStringLiteral("设备型号: Xiaomi 14\n设备代号: houji\n系统版本: Android 15\n活动分区: a\n解锁状态: 已解锁"));
+        window.onDeviceInfoUpdated(details());
         window.show();
         QCoreApplication::processEvents();
         QCOMPARE(window.size(), QSize(252, menuHeight));
@@ -324,11 +335,74 @@ private slots:
         for (auto button : buttons) QVERIFY(!button->isEnabled());
         window.operationInProgress = false;
     }
+    void detectionFiveFieldsFromRealQueries() {
+        DeviceCheckWindow window;
+        QTRY_COMPARE(window.infoLabel->text(), details());
+        QCOMPARE(manager->getDeviceDetails(), details());
+        QCOMPARE(window.infoLabel->text().split('\n').size(), 5);
+        window.setPosition(500, 100, 360);
+        window.show(); QCoreApplication::processEvents();
+        QVERIFY(window.infoLabel->height() >= window.infoLabel->heightForWidth(window.infoLabel->width()));
+        QVERIFY(window.findChildren<QScrollArea *>().isEmpty());
+        QCOMPARE(queryCount("ro.product.model"), 1);
+        QCOMPARE(queryCount("ro.build.version.release"), 1);
+        freezePolling();
+        QSignalSpy changed(manager, &DeviceManager::deviceDetailsUpdated);
+        setting("ro.product.model.value", "Updated Model");
+        setting("ro.build.version.release.value", "18");
+        manager->updateDeviceInfo();
+        QTRY_COMPARE(window.infoLabel->text(), details("Updated Model", "alpha", "Android 18"));
+        QCOMPARE(changed.size(), 1);
+        QCOMPARE(manager->getDeviceInfo(), snapshot()); // Legacy consumer remains compatible.
+    }
+    void detectionUnknownModelAndVersion_data() {
+        QTest::addColumn<QString>("property");
+        QTest::addColumn<QString>("value");
+        QTest::addColumn<int>("code");
+        QTest::addColumn<int>("delay");
+        for (const QString &property : {QString("ro.product.model"), QString("ro.build.version.release")}) {
+            QTest::newRow(qPrintable(property + "-failed")) << property << "fabricated" << 1 << 0;
+            QTest::newRow(qPrintable(property + "-empty")) << property << "" << 0 << 0;
+            QTest::newRow(qPrintable(property + "-multiline")) << property << "value\nerror" << 0 << 0;
+            QTest::newRow(qPrintable(property + "-timeout")) << property << "fabricated" << 0 << 1500;
+        }
+    }
+    void detectionUnknownModelAndVersion() {
+        QFETCH(QString, property); QFETCH(QString, value); QFETCH(int, code); QFETCH(int, delay);
+        manager->m_infoTimer->setInterval(300);
+        setting(property + ".value", value); setting(property + ".code", code); setting(property + ".delay", delay);
+        DeviceCheckWindow window;
+        const bool modelFailed = property == "ro.product.model";
+        QTRY_COMPARE(window.infoLabel->text(), details(modelFailed ? QStringLiteral("未知") : "Model A", "alpha",
+                                                      modelFailed ? "Android 16" : QStringLiteral("未知")));
+    }
+    void detectionSlowDetailsRejectReplacementAndDisconnect() {
+        setting("ro.product.model.delay", 1200);
+        DeviceCheckWindow window;
+        QTRY_COMPARE(manager->m_infoStep, 3);
+        freezePolling(); setting("ro.product.model.delay", 0); select(DeviceManager::ADB, "second");
+        QCOMPARE(window.infoLabel->text(), QStringLiteral("获取中..."));
+        QTRY_COMPARE(window.infoLabel->text(), details("Model B", "beta", "Android 17"));
+        QTest::qWait(1300);
+        QCOMPARE(window.infoLabel->text(), details("Model B", "beta", "Android 17"));
+        setting("ro.build.version.release.delay", 1200); manager->updateDeviceInfo();
+        QTRY_COMPARE(manager->m_infoStep, 4);
+        manager->setDetectedDevice(DeviceManager::None, QString());
+        QTest::qWait(1300);
+        QVERIFY(manager->getDeviceDetails().isEmpty());
+        QCOMPARE(window.infoLabel->text(), QStringLiteral("等待设备"));
+    }
+    void detectionFastbootDoesNotReuseAdbModel() {
+        DeviceCheckWindow window; QTRY_COMPARE(window.infoLabel->text(), details()); freezePolling();
+        select(DeviceManager::Fastboot, "first");
+        QCOMPARE(window.infoLabel->text(), QStringLiteral("获取中..."));
+        QTRY_COMPARE(window.infoLabel->text(), details(QStringLiteral("未知"), "alpha", QStringLiteral("未知")));
+    }
     void detectionReplacementShowsFetchingNotOldDevice() {
-        DeviceCheckWindow window; QTRY_COMPARE(window.infoLabel->text(), snapshot()); freezePolling();
+        DeviceCheckWindow window; QTRY_COMPARE(window.infoLabel->text(), details()); freezePolling();
         setting("ro.product.device.delay", 500); select(DeviceManager::ADB, "second");
         QCOMPARE(window.infoLabel->text(), QStringLiteral("获取中..."));
-        QTRY_COMPARE(window.infoLabel->text(), snapshot("beta"));
+        QTRY_COMPARE(window.infoLabel->text(), details("Model B", "beta", "Android 17"));
         manager->setDetectedDevice(DeviceManager::None, QString());
         QCOMPARE(window.infoLabel->text(), QStringLiteral("等待设备"));
     }

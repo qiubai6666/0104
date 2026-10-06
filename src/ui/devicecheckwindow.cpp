@@ -51,7 +51,7 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     // 连接设备管理器的信号
     connect(DeviceManager::instance(), &DeviceManager::deviceModeChanged,
             this, &DeviceCheckWindow::onDeviceModeChanged);
-    connect(DeviceManager::instance(), &DeviceManager::deviceInfoUpdated,
+    connect(DeviceManager::instance(), &DeviceManager::deviceDetailsUpdated,
             this, &DeviceCheckWindow::onDeviceInfoUpdated);
     
     // 确保设备监控已启动
@@ -61,7 +61,7 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     updateUIForMode(DeviceManager::instance()->currentMode());
     
     // 如果有设备信息，立即显示
-    QString deviceInfo = DeviceManager::instance()->getDeviceInfo();
+    QString deviceInfo = DeviceManager::instance()->getDeviceDetails();
     if (!deviceInfo.isEmpty()) {
         infoLabel->setText(deviceInfo);
     }
