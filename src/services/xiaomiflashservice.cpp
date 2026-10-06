@@ -6,7 +6,14 @@
 #include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QSaveFile>
+#include <QStandardPaths>
+#include <QUuid>
 #include <QtMath>
+#include <algorithm>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 QString Xiaomi::scriptName(Mode mode) {
     switch (mode) {
@@ -150,6 +157,8 @@ bool XiaomiFlashService::start(const Xiaomi::Package &package, QString *error) {
     m_currentItemTransferredBytes = 0;
     m_currentCommandFinished = false;
     m_transferRate = "0MB/s";
+    m_runtimeScript.clear();
+    m_pendingSendingBytes = 0;
     m_pendingOutput.clear();
     m_elapsed.restart();
     emit log("正在检测 Fastboot 设备，尚未执行刷机脚本。\n");
@@ -241,10 +250,12 @@ void XiaomiFlashService::completeProbe(int code, QProcess::ExitStatus status) {
 void XiaomiFlashService::launchScript() {
     QString error;
     if (!scriptUnchanged(&error)) { finish(false, error); return; }
+    if (!prepareRuntimeScript(&error)) { finish(false, error); return; }
     m_scriptStarted = true;
     const QString toolDirectory = QFileInfo(m_fastboot).absolutePath();
     auto env = QProcessEnvironment::systemEnvironment();
-    env.insert("ORANGE_XIAOMI_SCRIPT", QDir::toNativeSeparators(m_package.script));
+    const QString scriptToRun = m_runtimeScript.isEmpty() ? m_package.script : m_runtimeScript;
+    env.insert("ORANGE_XIAOMI_SCRIPT", QDir::toNativeSeparators(scriptToRun));
     env.insert("PATH", QDir::toNativeSeparators(toolDirectory) + ';' + env.value("PATH"));
     m_process.setProcessEnvironment(env);
     m_process.setWorkingDirectory(toolDirectory);
@@ -257,6 +268,118 @@ void XiaomiFlashService::launchScript() {
     m_process.start();
     // Avoid an accidental PAUSE keeping the operation and lease alive forever.
     m_process.closeWriteChannel();
+}
+
+bool XiaomiFlashService::prepareRuntimeScript(QString *error) {
+    if (m_package.mode != Xiaomi::Mode::KeepData) return true;
+
+    QFile input(m_package.script);
+    if (!input.open(QIODevice::ReadOnly)) {
+        if (error) *error = "无法读取保留数据刷机脚本：" + input.errorString();
+        return false;
+    }
+    const QByteArray source = input.readAll();
+    if (input.error() != QFile::NoError) {
+        if (error) *error = "无法完整读取保留数据刷机脚本。";
+        return false;
+    }
+
+    if (!m_package.scriptSha256.isEmpty() &&
+        QCryptographicHash::hash(source, QCryptographicHash::Sha256) != m_package.scriptSha256) {
+        if (error) *error = "确认后刷机脚本已变化，已拒绝执行，请重新选择并确认。";
+        return false;
+    }
+
+    // Match only the known vendor template: a raw partition-type probe piped
+    // through findstr, an errorlevel==0 guard, then a single guarded erase.
+    // Never infer an erase target from comments or unrelated/unguarded probes.
+    static const QRegularExpression cotaBlock(
+        R"cota(^[ \t]*@?fastboot(?:\.exe)?[ \t]+%\*[ \t]+getvar[ \t]+partition-type:(?<probe>opcust|opconfig)[ \t]+2>&1[ \t]*\|[ \t]*findstr[ \t]+/r[ \t]+/c:"\^partition-type:(?<filter>opcust|opconfig): raw"[ \t]*\r?\n[ \t]*if[ \t]+%errorlevel%[ \t]+equ[ \t]+0[ \t]*\([ \t]*\r?\n[ \t]*@?fastboot(?:\.exe)?[ \t]+%\*[ \t]+erase[ \t]+(?<erase>opcust|opconfig)[ \t]+\|\|[^\r\n]+\r?\n[ \t]*\)[ \t]*\r?$)cota",
+        QRegularExpression::CaseInsensitiveOption | QRegularExpression::MultilineOption);
+    QByteArray patched = source;
+    struct Edit { qsizetype offset; qsizetype length; QByteArray replacement; };
+    QVector<Edit> replacements;
+    int corrections = 0;
+    // Latin1 gives each source byte one code unit, so edits preserve the original
+    // encoding, BOM, comments and line endings instead of re-encoding the BAT.
+    const QString byteView = QString::fromLatin1(source);
+    auto blocks = cotaBlock.globalMatch(byteView);
+    while (blocks.hasNext()) {
+        const auto block = blocks.next();
+        const QString expected = block.captured("probe");
+        if (expected.compare(block.captured("filter"), Qt::CaseInsensitive) != 0 ||
+            expected.compare(block.captured("erase"), Qt::CaseInsensitive) == 0) continue;
+        replacements.append({block.capturedStart("erase"), block.capturedLength("erase"),
+                             expected.toLatin1()});
+        ++corrections;
+    }
+    if (corrections == 0) return true;
+
+    static const QRegularExpression dp0(R"(%~dp0)", QRegularExpression::CaseInsensitiveOption);
+    auto paths = dp0.globalMatch(byteView);
+    QByteArray packageDirectory;
+    if (paths.hasNext()) {
+#ifdef Q_OS_WIN
+        // The runtime BAT is stored in TEMP. Its %~dp0 would therefore point
+        // to TEMP instead of the extracted ROM, and cmd.exe cannot reliably
+        // resolve Chinese paths in every legacy Xiaomi script. Resolve the ROM
+        // directory to its 8.3 path only when a COTA repair is actually needed.
+        QString compatiblePath = QDir::toNativeSeparators(QDir::cleanPath(m_package.directory));
+        const std::wstring packageWide = compatiblePath.toStdWString();
+        const DWORD shortLength = GetShortPathNameW(packageWide.c_str(), nullptr, 0);
+        if (shortLength > 0) {
+            std::wstring shortWide(shortLength, L'\0');
+            const DWORD written = GetShortPathNameW(packageWide.c_str(), shortWide.data(), shortLength);
+            if (written > 0 && written < shortLength)
+                compatiblePath = QString::fromWCharArray(shortWide.c_str(), int(written));
+        }
+        // 8.3 names may be disabled. An already-safe ASCII path also works;
+        // reject lossy encodings or shell metacharacters rather than running a
+        // rewritten unquoted vendor command against an ambiguous image path.
+        static const QRegularExpression safePath(R"(^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/\-]+$)");
+        if (safePath.match(compatiblePath).hasMatch()) packageDirectory = compatiblePath.toLatin1();
+#else
+        packageDirectory = QDir::toNativeSeparators(QDir::cleanPath(m_package.directory)).toLocal8Bit();
+#endif
+        if (packageDirectory.isEmpty()) {
+            if (error) *error = "无法为修正版脚本生成安全的刷机包路径，未执行刷机。请将刷机包解压到纯英文、无空格或特殊字符的目录后重试。";
+            return false;
+        }
+        packageDirectory += QDir::separator() == QChar('\\') ? '\\' : '/';
+        while (paths.hasNext()) {
+            const auto path = paths.next();
+            replacements.append({path.capturedStart(), path.capturedLength(), packageDirectory});
+        }
+    }
+    // Apply edits from right to left so earlier byte offsets stay valid.
+    std::sort(replacements.begin(), replacements.end(), [](const Edit &a, const Edit &b) {
+        return a.offset > b.offset;
+    });
+    for (const Edit &edit : replacements)
+        patched.replace(edit.offset, edit.length, edit.replacement);
+
+    const QString tempRoot = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    QDir tempDir(tempRoot);
+    if (tempRoot.isEmpty() || !tempDir.mkpath("OrangeTools_Xiaomi")) {
+        if (error) *error = "无法创建保留数据刷机临时脚本目录。";
+        return false;
+    }
+    const QString path = tempDir.filePath("OrangeTools_Xiaomi/flash_all_except_storage_" +
+                                          QUuid::createUuid().toString(QUuid::WithoutBraces) + ".bat");
+    QSaveFile output(path);
+    if (!output.open(QIODevice::WriteOnly) || output.write(patched) != patched.size() || !output.commit()) {
+        if (error) *error = "无法创建修正版保留数据刷机临时脚本：" + output.errorString();
+        return false;
+    }
+    m_runtimeScript = path;
+    emit log(QString("保留数据模式已修正脚本中的 COTA 分区目标（%1 处），原始脚本未修改。\n").arg(corrections));
+    return true;
+}
+
+void XiaomiFlashService::cleanupRuntimeScript() {
+    if (m_runtimeScript.isEmpty()) return;
+    QFile::remove(m_runtimeScript);
+    m_runtimeScript.clear();
 }
 void XiaomiFlashService::readOutput() {
     // Decode complete lines, not arbitrary pipe chunks (Chinese/multibyte log
@@ -282,12 +405,14 @@ bool XiaomiFlashService::isCommandEcho(const QString &line) {
 void XiaomiFlashService::handleLine(const QString &line) {
     if (line.trimmed().isEmpty()) return;
     emit log(line + "\n");
-    if (isCommandEcho(line)) return; // A displayed conditional error is not an executed error.
+    const bool commandEcho = isCommandEcho(line);
+    if (commandEcho) return; // A displayed shell command is not an executed result.
     if (m_mismatchPending) { m_mismatchTimer.stop(); m_mismatchPending = false; }
     if (line.contains("Missmatching", Qt::CaseInsensitive)) {
         m_mismatchPending = true;
         m_mismatchTimer.start();
     }
+
     static const QRegularExpression failed(
         R"(\bFAILED\b|\berror\b|失败|错误|missmatch|mismatch|anti.?rollback.*(?:error|fail))",
         QRegularExpression::CaseInsensitiveOption);
@@ -300,37 +425,71 @@ void XiaomiFlashService::handleLine(const QString &line) {
         R"((?<speed>\d+(?:\.\d+)?)\s*(?<unit>GB/s|MB/s|KB/s|B/s))",
         QRegularExpression::CaseInsensitiveOption);
     const auto speedMatch = speed.match(line);
-    if (speedMatch.hasMatch()) m_transferRate = speedMatch.captured("speed") + speedMatch.captured("unit");
-    emit progressInfo(QString("%1  |  Time:%2s").arg(m_transferRate).arg(m_elapsed.elapsed() / 1000));
-    if (m_failed) return;
-    if (!m_package.progressPlanValid) { parseFallbackProgress(line); return; }
+    if (speedMatch.hasMatch()) {
+        bool ok = false;
+        const double value = speedMatch.captured("speed").toDouble(&ok);
+        if (ok) {
+            QString unit = speedMatch.captured("unit");
+            unit.chop(2); // remove "/s"
+            updateTransferRate(sizeToBytes(QString::number(value), unit), 1.0);
+        }
+    }
 
+    // Standard fastboot reports size in Sending and duration in OKAY, either
+    // on the same line or on the next line. This also works without a complete
+    // image plan. Sparse chunks use their own size/time, not the last chunk's
+    // size divided by the whole command's total (which includes disk writes).
     static const QRegularExpression sending(
         R"(Sending(?:\s+sparse)?\s+'(?<partition>[^']+)'(?:\s+\d+/\d+)?\s*\((?<size>\d+(?:\.\d+)?)\s*(?<unit>GB|MB|KB|B)\))",
         QRegularExpression::CaseInsensitiveOption);
     const auto sendingMatch = sending.match(line);
-    if (sendingMatch.hasMatch() && activateItem(sendingMatch.captured("partition"))) {
-        m_currentChunkExpectedBytes = sizeToBytes(sendingMatch.captured("size"), sendingMatch.captured("unit"));
-        m_currentChunkReportedBytes = 0;
+    if (sendingMatch.hasMatch())
+        m_pendingSendingBytes = sizeToBytes(sendingMatch.captured("size"), sendingMatch.captured("unit"));
+    static const QRegularExpression sendingOkay(
+        R"(\bOKAY\s*\[\s*(?<seconds>\d+(?:\.\d+)?)\s*s\s*\])",
+        QRegularExpression::CaseInsensitiveOption);
+    const auto okay = sendingOkay.match(line);
+    const bool sendingResult = sendingMatch.hasMatch() || line.trimmed().startsWith("OKAY", Qt::CaseInsensitive);
+    if (sendingResult && okay.hasMatch() && m_pendingSendingBytes > 0 && !m_failed) {
+        bool ok = false;
+        const double seconds = okay.captured("seconds").toDouble(&ok);
+        if (ok) updateTransferRate(m_pendingSendingBytes, seconds);
+        m_pendingSendingBytes = 0;
     }
+    if (m_failed || line.trimmed().startsWith("Writing", Qt::CaseInsensitive) ||
+        line.contains("Finished.", Qt::CaseInsensitive)) m_pendingSendingBytes = 0;
 
-    static const QRegularExpression transfer(
-        R"(^\s*(?<partition>[^:]+):\s*(?<current>\d+(?:\.\d+)?)\s*(?<currentUnit>GB|MB|KB|B)\s*/\s*(?<total>\d+(?:\.\d+)?)\s*(?<totalUnit>GB|MB|KB|B)\s*\()", QRegularExpression::CaseInsensitiveOption);
-    const auto transferMatch = transfer.match(line);
-    if (transferMatch.hasMatch() && ensureItemActive(transferMatch.captured("partition"))) {
-        const qint64 current = sizeToBytes(transferMatch.captured("current"), transferMatch.captured("currentUnit"));
-        const qint64 total = sizeToBytes(transferMatch.captured("total"), transferMatch.captured("totalUnit"));
-        if (m_currentChunkExpectedBytes <= 0) m_currentChunkExpectedBytes = total;
-        m_currentChunkReportedBytes = qMax(m_currentChunkReportedBytes, current);
-        setCurrentTransferred(m_completedChunkBytes + m_currentChunkReportedBytes);
+    if (!m_failed) {
+        if (!m_package.progressPlanValid) {
+            parseFallbackProgress(line);
+        } else {
+            if (sendingMatch.hasMatch() && activateItem(sendingMatch.captured("partition"))) {
+                m_currentChunkExpectedBytes = sizeToBytes(sendingMatch.captured("size"), sendingMatch.captured("unit"));
+                m_currentChunkReportedBytes = 0;
+            }
+
+            static const QRegularExpression transfer(
+                "^\\s*(?<partition>[^:]+):\\s*(?<current>\\d+(?:\\.\\d+)?)\\s*(?<currentUnit>GB|MB|KB|B)\\s*/\\s*(?<total>\\d+(?:\\.\\d+)?)\\s*(?<totalUnit>GB|MB|KB|B)\\s*\\(",
+                QRegularExpression::CaseInsensitiveOption);
+            const auto transferMatch = transfer.match(line);
+            if (transferMatch.hasMatch() && ensureItemActive(transferMatch.captured("partition"))) {
+                const qint64 current = sizeToBytes(transferMatch.captured("current"), transferMatch.captured("currentUnit"));
+                const qint64 total = sizeToBytes(transferMatch.captured("total"), transferMatch.captured("totalUnit"));
+                if (m_currentChunkExpectedBytes <= 0) m_currentChunkExpectedBytes = total;
+                m_currentChunkReportedBytes = qMax(m_currentChunkReportedBytes, current);
+                setCurrentTransferred(m_completedChunkBytes + m_currentChunkReportedBytes);
+            }
+            static const QRegularExpression writing(
+                "^\\s*Writing\\s+'", QRegularExpression::CaseInsensitiveOption);
+            if (writing.match(line).hasMatch() && m_item >= 0 && !m_currentCommandFinished) {
+                m_currentChunkReportedBytes = qMax(m_currentChunkReportedBytes, m_currentChunkExpectedBytes);
+                setCurrentTransferred(m_completedChunkBytes + m_currentChunkReportedBytes);
+            }
+            if (line.contains("Finished.", Qt::CaseInsensitive)) completeItem();
+            updateProgress();
+        }
     }
-    if (QRegularExpression(R"(^\s*Writing\s+')", QRegularExpression::CaseInsensitiveOption).match(line).hasMatch() && m_item >= 0 && !m_currentCommandFinished) {
-        m_currentChunkReportedBytes = qMax(m_currentChunkReportedBytes, m_currentChunkExpectedBytes);
-        setCurrentTransferred(m_completedChunkBytes + m_currentChunkReportedBytes);
-    }
-    if (QRegularExpression(R"(^\s*Finished\.)", QRegularExpression::CaseInsensitiveOption).match(line).hasMatch())
-        completeItem();
-    updateProgress();
+    emit progressInfo(QString("%1  |  Time:%2s").arg(m_transferRate).arg(m_elapsed.elapsed() / 1000));
 }
 void XiaomiFlashService::completeProcess(int code, QProcess::ExitStatus status) {
     if (!m_busy) return;
@@ -352,14 +511,38 @@ void XiaomiFlashService::finish(bool success, const QString &message) {
     m_checking = false;
     m_mismatchPending = false;
     m_busy = false;
-    m_transferRate = "0MB/s";
+    const QString finalRate = m_transferRate;
+    cleanupRuntimeScript();
     if (wasChecking) emit checkingChanged(false);
-    emit progressInfo(m_scriptStarted ? QString("0MB/s  |  Time:%1s").arg(m_elapsed.elapsed() / 1000) : "未开始刷机");
+    emit progressInfo(m_scriptStarted ? QString("%1  |  Time:%2s").arg(finalRate).arg(m_elapsed.elapsed() / 1000) : "未开始刷机");
     DeviceOperationLease::release(this);
     if (success) emit progress(100);
     emit log(message + "\n");
     emit finished(success, message);
 }
+QString XiaomiFlashService::formatTransferRate(double bytesPerSecond) {
+    if (!(bytesPerSecond > 0.0) || !qIsFinite(bytesPerSecond)) return {};
+    const double kib = 1024.0;
+    const double mib = kib * kib;
+    const double gib = mib * kib;
+    double value = bytesPerSecond;
+    QString unit = "B/s";
+    if (value >= gib) { value /= gib; unit = "GB/s"; }
+    else if (value >= mib) { value /= mib; unit = "MB/s"; }
+    else if (value >= kib) { value /= kib; unit = "KB/s"; }
+    QString number = value >= 100.0 ? QString::number(value, 'f', 0) :
+        value >= 10.0 ? QString::number(value, 'f', 1) : QString::number(value, 'f', 2);
+    while (number.contains('.') && number.endsWith('0')) number.chop(1);
+    if (number.endsWith('.')) number.chop(1);
+    return number + unit;
+}
+
+void XiaomiFlashService::updateTransferRate(qint64 bytes, double seconds) {
+    if (bytes <= 0 || !(seconds > 0.0) || !qIsFinite(seconds)) return;
+    const QString formatted = formatTransferRate(static_cast<double>(bytes) / seconds);
+    if (!formatted.isEmpty()) m_transferRate = formatted;
+}
+
 qint64 XiaomiFlashService::sizeToBytes(const QString &value, const QString &unit) {
     bool ok = false; const double number = value.toDouble(&ok); if (!ok) return 0;
     const double multiplier = unit.compare("GB", Qt::CaseInsensitive) == 0 ? 1024.0 * 1024.0 * 1024.0 :

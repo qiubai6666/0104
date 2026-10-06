@@ -22,8 +22,9 @@ QString modeName(Mode mode);
 bool inspectPackage(const QString &directory, Mode mode, Package *package, QString *error);
 }
 
-// Executes the selected Xiaomi batch file unchanged. Package parsing is used
-// for progress estimation only; an unusual official script must still run.
+// Executes the selected Xiaomi batch file; only the known swapped COTA erase
+// targets in KeepData mode are repaired in a runtime copy. Package parsing is
+// otherwise used for progress estimation, not to replace vendor commands.
 class XiaomiFlashService : public QObject {
     Q_OBJECT
 public:
@@ -60,6 +61,8 @@ private:
     qint64 m_currentItemTransferredBytes = 0;
     bool m_currentCommandFinished = false;
     QString m_transferRate = "0MB/s";
+    QString m_runtimeScript;
+    qint64 m_pendingSendingBytes = 0;
     QElapsedTimer m_elapsed;
 
     void readOutput();
@@ -69,6 +72,8 @@ private:
     void beginProbe(bool product);
     void completeProbe(int code, QProcess::ExitStatus status);
     void launchScript();
+    bool prepareRuntimeScript(QString *error);
+    void cleanupRuntimeScript();
     static bool isCommandEcho(const QString &line);
     void finish(bool success, const QString &message);
     void parseFallbackProgress(const QString &line);
@@ -79,5 +84,7 @@ private:
     void completeItem();
     void setCurrentTransferred(qint64 bytes);
     static qint64 sizeToBytes(const QString &value, const QString &unit);
+    static QString formatTransferRate(double bytesPerSecond);
+    void updateTransferRate(qint64 bytes, double seconds);
 };
 #endif

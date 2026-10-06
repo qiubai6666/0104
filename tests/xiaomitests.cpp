@@ -46,7 +46,10 @@ QString makePackage(const QString &name = "rom") {
 int fakeFastboot(const QStringList &args) {
     const QString behavior = qEnvironmentVariable("XIAOMI_TEST_BEHAVIOR");
     QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT"));
-    if (audit.open(QIODevice::Append)) audit.write((args.mid(1).join('|') + '\n').toUtf8());
+    if (audit.open(QIODevice::Append)) {
+        audit.write((args.mid(1).join('|') + '\n').toUtf8());
+        audit.close();
+    }
     QTextStream out(stdout);
     if (args.contains("devices")) {
         if (behavior == "detect-timeout") QThread::msleep(3000);
@@ -61,9 +64,34 @@ int fakeFastboot(const QStringList &args) {
         if (behavior == "product-error") { out << "FAILED (remote: no product)\n"; out.flush(); return 1; }
         out << "product: fuxi\nFinished. Total time: 0.001s\n"; out.flush(); return 0;
     }
+    const int partitionTypeIndex = args.indexOf("getvar");
+    if (partitionTypeIndex >= 0 && partitionTypeIndex + 1 < args.size() &&
+        args[partitionTypeIndex + 1].startsWith("partition-type:", Qt::CaseInsensitive)) {
+        const QString partition = args[partitionTypeIndex + 1].section(':', 1);
+        if (behavior.startsWith("cota") && qEnvironmentVariable("XIAOMI_TEST_COTA").split(',').contains(partition)) out << "partition-type:" << partition << ": raw\n";
+        out << "Finished. Total time: 0.001s\n"; out.flush(); return 0;
+    }
+    const int eraseIndex = args.indexOf("erase");
+    if (eraseIndex >= 0 && eraseIndex + 1 < args.size()) {
+        const QString partition = args[eraseIndex + 1];
+        if (behavior.startsWith("cota") &&
+            (!qEnvironmentVariable("XIAOMI_TEST_COTA").split(',').contains(partition) ||
+             behavior == "cota-erase-failure")) {
+            out << "FAILED (remote: denied)\n"; out.flush(); return 1;
+        }
+        out << "Erasing '" << partition << "' OKAY [0.001s]\n";
+        out.flush(); return 0;
+    }
     const int flashIndex = args.indexOf("flash");
     if (flashIndex >= 0) {
         const QString partition = args.value(flashIndex + 1);
+        if (behavior.startsWith("cota")) {
+            const QFileInfo actual(args.value(flashIndex + 2));
+            const QFileInfo expected(qEnvironmentVariable("XIAOMI_TEST_IMAGE"));
+            if (!actual.isFile() || actual.canonicalFilePath() != expected.canonicalFilePath()) {
+                out << "FAILED (image path mismatch)\n"; out.flush(); return 1;
+            }
+        }
         if (behavior == "slow") QThread::msleep(700);
         if (behavior == "failed-zero") out << "FAILED (remote: denied)\n";
         else if (behavior == "failed-tail") out << "FAILED (remote: denied)";
@@ -92,6 +120,146 @@ private slots:
         QCOMPARE(Xiaomi::scriptName(Xiaomi::Mode::KeepData), QString("flash_all_except_storage.bat"));
         QCOMPARE(Xiaomi::scriptName(Xiaomi::Mode::WipeAndLock), QString("flash_all_lock.bat"));
     }
+    void keepDataRepairsSwappedCotaTargets_data() {
+        QTest::addColumn<QByteArray>("partitions");
+        QTest::addColumn<bool>("eraseFails");
+        QTest::newRow("both") << QByteArray("opcust,opconfig") << false;
+        QTest::newRow("opcust-only") << QByteArray("opcust") << false;
+        QTest::newRow("opconfig-only") << QByteArray("opconfig") << false;
+        QTest::newRow("neither") << QByteArray() << false;
+        QTest::newRow("real-erase-failure") << QByteArray("opcust,opconfig") << true;
+    }
+    void keepDataRepairsSwappedCotaTargets() {
+        QFETCH(QByteArray, partitions); QFETCH(bool, eraseFails);
+        qputenv("XIAOMI_TEST_COTA", partitions);
+        qputenv("XIAOMI_TEST_BEHAVIOR", eraseFails ? "cota-erase-failure" : "cota");
+        const QString path = makePackage("keep_data_cota");
+        put(path + "/flash_all_except_storage.bat",
+            "@echo off\r\n"
+            "fastboot %* getvar partition-type:opcust 2>&1 | findstr /r /c:\"^partition-type:opcust: raw\"\r\n"
+            "if %errorlevel% equ 0 (\r\n"
+            "fastboot %* erase opconfig || exit /B 1\r\n"
+            ")\r\n"
+            "fastboot %* getvar partition-type:opconfig 2>&1 | findstr /r /c:\"^partition-type:opconfig: raw\"\r\n"
+            "if %errorlevel% equ 0 (\r\n"
+            "fastboot %* erase opcust || exit /B 1\r\n"
+            ")\r\n"
+            "fastboot %* flash boot \"%~dp0images\\boot.img\"\r\n"
+            "fastboot %* reboot\r\n");
+        QFile before(path + "/flash_all_except_storage.bat");
+        QVERIFY(before.open(QIODevice::ReadOnly));
+        const QByteArray originalBytes = before.readAll(); before.close();
+        qputenv("XIAOMI_TEST_IMAGE", (path + "/images/boot.img").toUtf8());
+        Xiaomi::Package p; QString error;
+        QVERIFY2(Xiaomi::inspectPackage(path, Xiaomi::Mode::KeepData, &p, &error), qPrintable(error));
+        XiaomiFlashService service; service.configure(toolPath);
+        QSignalSpy logs(&service, &XiaomiFlashService::log);
+        QSignalSpy finished(&service, &XiaomiFlashService::finished);
+        QVERIFY(service.start(p, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 15000);
+        QCOMPARE(finished[0][0].toBool(), !eraseFails);
+        QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT")); QVERIFY(audit.open(QIODevice::ReadOnly));
+        const QByteArray trace = audit.readAll();
+        QCOMPARE(trace.contains("erase|opcust\n"), partitions.split(',').contains("opcust"));
+        QCOMPARE(trace.contains("erase|opconfig\n"), !eraseFails && partitions.split(',').contains("opconfig"));
+        QVERIFY(!trace.contains("erase|userdata"));
+        QVERIFY(!trace.contains("erase|metadata"));
+        QCOMPARE(trace.contains("flash|boot|"), !eraseFails);
+        bool repairedLog = false;
+        for (const auto &entry : logs) repairedLog |= entry[0].toString().contains("修正脚本中的 COTA");
+        QVERIFY(repairedLog);
+        QVERIFY(QFileInfo::exists(p.script));
+        QFile original(p.script); QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(original.readAll(), originalBytes);
+        QVERIFY(service.m_runtimeScript.isEmpty());
+    }
+
+    void transferRateFromFastbootTiming_data() {
+        QTest::addColumn<QStringList>("lines");
+        QTest::addColumn<bool>("hasPlan");
+        for (const bool plan : {false, true}) {
+            const QByteArray suffix = plan ? "-plan" : "-fallback";
+            QTest::newRow(("same-line" + suffix).constData())
+                << QStringList{"Sending 'super' (4 MB) OKAY [2.000s]"} << plan;
+            QTest::newRow(("split-line" + suffix).constData())
+                << QStringList{"Sending 'super' (4096 KB)", "OKAY [  2.000s]"} << plan;
+            QTest::newRow(("sparse" + suffix).constData())
+                << QStringList{"Sending sparse 'super' 1/5 (4096 KB) OKAY [ 2.000s]"} << plan;
+        }
+    }
+    void transferRateFromFastbootTiming() {
+        QFETCH(QStringList, lines); QFETCH(bool, hasPlan);
+        XiaomiFlashService service; service.m_elapsed.start();
+        service.m_package.progressPlanValid = hasPlan;
+        service.m_package.images = {{"super", 4 * 1024 * 1024}};
+        service.m_package.totalBytes = 4 * 1024 * 1024;
+        QSignalSpy info(&service, &XiaomiFlashService::progressInfo);
+        for (const auto &line : lines) service.handleLine(line);
+        QVERIFY(!info.isEmpty());
+        QCOMPARE(service.m_transferRate, QString("2MB/s"));
+        service.handleLine("Sending 'super' (0 KB) OKAY [0.001s]");
+        service.handleLine("Sending 'super' (4 MB) OKAY [0.000s]");
+        service.handleLine("Writing 'super' OKAY [10.000s]");
+        service.handleLine("Finished. Total time: 20.000s");
+        QVERIFY(info.last()[0].toString().startsWith("2MB/s"));
+        service.handleLine("Sending 'super' (4 MB)");
+        service.handleLine("Writing 'super'");
+        service.handleLine("OKAY [8.000s]");
+        QCOMPARE(service.m_transferRate, QString("2MB/s"));
+    }
+
+    void cotaFailuresAreNotIgnored() {
+        XiaomiFlashService service;
+        service.handleLine("C:\\ROM>fastboot getvar partition-type:opcust 2>&1 | findstr raw");
+        service.handleLine("FAILED (remote: erase denied)");
+        QVERIFY(service.m_failed);
+        service.handleLine("Sending 'super' (4 MB) OKAY [2.000s]");
+        QCOMPARE(service.m_transferRate, QString("0MB/s"));
+    }
+
+    void cotaRepairPreservesBytesAndScope_data() {
+        QTest::addColumn<int>("variant");
+        QTest::newRow("swapped-bom-crlf") << 0;
+        QTest::newRow("already-correct") << 1;
+        QTest::newRow("comment-only") << 2;
+        QTest::newRow("wipe-mode") << 3;
+        QTest::newRow("different-guard") << 4;
+        QTest::newRow("mismatched-filter") << 5;
+        QTest::newRow("changed-after-inspection") << 6;
+    }
+    void cotaRepairPreservesBytesAndScope() {
+        QFETCH(int, variant);
+        const QString path = makePackage("cota_bytes");
+        QByteArray bytes = QByteArray::fromHex("efbbbf") + "@echo off\r\nrem " +
+            QByteArray::fromHex("b2e2cad4") + "\r\n";
+        QByteArray block =
+            "fastboot %* getvar partition-type:opcust 2>&1 | findstr /r /c:\"^partition-type:opcust: raw\"\r\n"
+            "if %errorlevel% equ 0 (\r\n"
+            "fastboot %* erase opconfig || @echo \"Erase opcust error\" && exit /B 1\r\n"
+            ")\r\n";
+        if (variant == 1) block.replace("erase opconfig", "erase opcust");
+        if (variant == 2) block.replace("fastboot %* getvar", "rem fastboot %* getvar");
+        if (variant == 4) block.replace("if %errorlevel% equ 0 (", "if %errorlevel% equ 1 (");
+        if (variant == 5) block.replace("^partition-type:opcust", "^partition-type:opconfig");
+        bytes += block;
+        const auto mode = variant == 3 ? Xiaomi::Mode::Wipe : Xiaomi::Mode::KeepData;
+        const QString script = path + '/' + Xiaomi::scriptName(mode);
+        QVERIFY(!put(script, bytes).isEmpty());
+        XiaomiFlashService service; QString error;
+        QVERIFY(Xiaomi::inspectPackage(path, mode, &service.m_package, &error));
+        if (variant == 6) QVERIFY(!put(script, bytes + "rem changed\r\n").isEmpty());
+        QCOMPARE(service.prepareRuntimeScript(&error), variant != 6);
+        if (variant == 0) {
+            QVERIFY(!service.m_runtimeScript.isEmpty());
+            QFile runtime(service.m_runtimeScript); QVERIFY(runtime.open(QIODevice::ReadOnly));
+            QByteArray expected = bytes; expected.replace("erase opconfig", "erase opcust");
+            QCOMPARE(runtime.readAll(), expected); runtime.close();
+            service.cleanupRuntimeScript();
+        } else QVERIFY(service.m_runtimeScript.isEmpty());
+        QFile original(script); QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(original.readAll(), variant == 6 ? bytes + "rem changed\r\n" : bytes);
+    }
+
     void validPackage() {
         Xiaomi::Package p; QString error;
         QVERIFY2(Xiaomi::inspectPackage(makePackage(), Xiaomi::Mode::Wipe, &p, &error), qPrintable(error));

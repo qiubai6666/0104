@@ -149,9 +149,9 @@ void XiaomiFlashWindow::startFlash() {
     }
     QDialog dialog(this); dialog.setObjectName("XiaomiFlashConfirmDialog"); dialog.setWindowTitle("确认小米线刷");
     auto layout = new QVBoxLayout(&dialog);
-    auto description = new QLabel(QString("模式：%1\n脚本：%2\n进度估算：%3\n\n将执行刷机包内原版 BAT，请仅使用可信的官方刷机包。\n确认手机为对应机型、已解锁 BL 并处于 Fastboot 模式。\n%4\n刷写中不允许中断，型号和防回滚检查不会被移除。")
-        .arg(Xiaomi::modeName(selectedMode), package.script, package.progressPlanValid ? QString("%1 个镜像，按总字节数计算").arg(package.images.size()) : QString("无法建立完整计划；仍执行原脚本并使用回退进度"))
-        .arg(selectedMode == Xiaomi::Mode::KeepData ? "保留数据不保证数据安全，请仍先备份。" : "本模式会清除用户数据，无法撤销。"), &dialog);
+    auto description = new QLabel(QString("模式：%1\n脚本：%2\n进度估算：%3\n\n按所选 BAT 刷写，请仅使用可信的官方刷机包。\n确认手机为对应机型、已解锁 BL 并处于 Fastboot 模式。\n%4\n刷写中不允许中断，型号和防回滚检查不会被移除。")
+        .arg(Xiaomi::modeName(selectedMode), package.script, package.progressPlanValid ? QString("%1 个镜像，按总字节数计算").arg(package.images.size()) : QString("无法建立完整计划；按脚本刷写并使用回退进度"))
+        .arg(selectedMode == Xiaomi::Mode::KeepData ? "保留数据模式仅修正已知 COTA 擦除目标错位，原脚本不修改。\n保留数据不保证数据安全，请仍先备份。" : "本模式会清除用户数据，无法撤销。"), &dialog);
     description->setWordWrap(true); layout->addWidget(description);
     auto agree = new QCheckBox("我已备份数据、核对机型，并信任该刷机脚本", &dialog);
     agree->setObjectName("XiaomiConfirmAgreement"); layout->addWidget(agree);
