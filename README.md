@@ -60,7 +60,7 @@
 | `src/app/version.h` | 应用名称、版本、默认密码、资源目录名和监控间隔等常量 | 修改配置前先看使用位置；并非每个常量都已被使用 |
 | `src/ui/menuwidget.cpp/.h` | 屏幕右侧主菜单；开关各功能窗口；提取 IMG；退出清理 | `setupUI()`、`onButtonClicked()`、`extractImg()`、`cleanupAndExit()` |
 | `src/ui/passworddialog.cpp/.h` | 启动密码框、错误提示、三次错误后的延迟退出 | `onOkClicked()`；界面构建在 `setupUI()` |
-| `src/ui/deviceinfowindow.cpp/.h` | 投屏入口和设备信息卡片；启动 scrcpy；查询型号/系统；拖拽传文件 | `startScrcpy()`、`showDeviceInfo()`、`transferNextFile()`；文件前部是绘制图标的局部类 |
+| `src/services/screencastcontroller.cpp/.h` | 主菜单投屏按钮的等待、启动、停止和异常恢复；绑定设备序列号启动 scrcpy | `toggle()`、`tryStart()`、`stop()`；不再打开旧设备信息投屏窗口 |
 | `src/ui/devicecheckwindow.cpp/.h` | 显示 ADB/Fastboot 状态；重启/切换模式；打开命令行；刷写 boot/init_boot | `flashPartition()` → `waitForFastbootMode()` → `performFlash()` |
 | `src/ui/repairwindow.cpp/.h` | 执行 USB 脚本、修复临时目录、批量安装 APK 和 Root 模块 | 各 `on…StepFinished()` 通过进程完成信号串联步骤；阶段由具名枚举表示 |
 | `src/ui/payloadwindow.cpp/.h` | 接收 Payload 链接或路径，选择 boot/init_boot，调用 payload.exe 提取 | `onExtractClicked()`；顶部的局部复选框类负责绘制 |
@@ -112,7 +112,7 @@ QApplication
 app/main
   ├── IntegrityChecker / ResourceExtractor / ProcessManager
   └── PasswordDialog → MenuWidget
-                         ├── DeviceInfoWindow ─┐
+                         ├── ScreenCastController ─┐
                          ├── DeviceCheckWindow ├→ DeviceManager → 状态/信息信号 → 窗口
                          ├── RepairWindow      │
                          ├── PayloadWindow     └→ QProcess → adb/fastboot/scrcpy/payload
@@ -126,14 +126,22 @@ app/main
 ### 设备监控的关键规则
 
 - `DeviceManager` 只有一个实例，以 `DEVICE_CHECK_INTERVAL`（默认 1000 ms）轮询设备。
-- 投屏窗口申请 **仅 ADB** 监控；设备检测窗口申请 **ADB + Fastboot** 监控；后者优先。
+- 主菜单持续申请 **仅 ADB** 监控；设备检测窗口申请 **ADB + Fastboot** 监控；后者优先。投屏控制器复用主菜单监控，不额外打开设备信息窗口。
 - 窗口销毁时释放对应引用，所有引用归零后停止轮询。仅隐藏或最小化不等同于释放监控。
 - ADB 设备信息按“设备代号 → 当前槽位 → 解锁状态”的顺序异步查询；Fastboot 按字段精确解析标准错误或标准输出。
 - 信息查询绑定当前设备序列号；同一设备的慢查询不会被 1000 ms 轮询打断，每个属性最多等待 5 秒。设备断开、切换或监控暂停后，旧回调失效，完整快照才会更新界面。
-- 投屏的型号/Android 版本查询同样隔离进程和设备身份；失败或超时显示“未知”并重试，不把失败输出当属性值。槽位仅在 ADB 属性读取成功且为空时显示“无”。
-- `tests/deviceinformationtests.pro` 使用临时目录中的假 ADB/Fastboot，覆盖慢查询、失败、超时、设备替换及两个窗口的显示；不连接真实设备。
+- 槽位仅在 ADB 属性读取成功且为空时显示“无”；查询失败显示“未知”。投屏入口不再查询型号/Android 版本或展示旧信息卡片。
+- `tests/deviceinformationtests.pro` 使用临时目录中的假 ADB/Fastboot，覆盖慢查询、失败、超时、设备替换和信息显示（含旧窗口回归夹具）；不连接真实设备。
+- `tests/screencasttests.pro` 使用假 ADB/scrcpy 验证等待授权、转圈动画、取消等待、投屏启停、启动失败/超时、进程退出、设备替换及设备操作互斥；不连接真实设备。
 - 刷写分区时暂停监控，完成/失败后恢复，避免 Fastboot 操作冲突。
-- `isDeviceConnected()` 返回**缓存的设备模式**，不主动运行新的检测。主菜单本身不申请监控；使用修复或提取 IMG 前可先打开投屏/设备检测窗口确认设备。
+- `isDeviceConnected()` 返回**缓存的设备模式**，不主动运行新的检测。主菜单本身持续监控，不需要先打开其他窗口才能使用修复或提取 IMG。
+
+### 投屏按钮交互
+
+- 等待 ADB 设备和启动进程时，按钮只显示旋转圆圈，保持可以点击取消。
+- scrcpy 启动后恢复“投屏”文字，悬浮提示说明再次点击停止投屏。
+- 关闭手机画面窗口、设备断开/替换或投屏启动失败后恢复按钮，只有再次点击才启动新一轮投屏；不会自动抢占另一台设备。
+- 仅停止该按钮拥有的 scrcpy 进程，不终止其他工具或共享 ADB Server。旧信息卡片不再作为主程序入口编译；手机画面窗口保留。
 
 ### 多步骤操作为什么有多个槽函数？
 
@@ -155,7 +163,7 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 
 | 菜单 | 实际行为 | 使用前提 |
 | --- | --- | --- |
-| 投屏 | 打开设备信息卡片并使用 scrcpy 投屏；卡片支持拖入本地文件传到 `/sdcard/文件名` | USB 调试已开启，设备已授权 |
+| 投屏 | 点击后按钮显示圆圈旋转，等待已授权的 ADB 设备后启动 scrcpy；启动后恢复“投屏”，再次点击停止。等待期间再次点击可取消，不再打开旧设备信息卡片 | USB 调试已开启，设备已授权；未授权/离线/Fastboot 时继续等待 |
 | 秋白工作室 | 打开修复菜单：USB 修复、修复 TMP、安装 APK、安装模块（全部成功后自动重启）、欧加线刷、小米线刷 | 多数操作使用 `su`，依赖 Root 权限及相应管理器 |
 | PAYLOAD | 输入链接或本地路径，选择 boot/init_boot，用 payload.exe 提取到桌面 IMG | 输入是否受支持由外部 Payload 工具决定 |
 | 提取IMG | 从手机 `/sdcard/Download/*.img` 中拉取按时间排序的最新一个到桌面 IMG | 已检测到连接设备且目录可读；不是直接读取手机分区 |

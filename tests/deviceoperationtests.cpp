@@ -473,7 +473,7 @@ void DeviceOperationTests::menuStartsMonitoringWithoutOtherWindows()
     QVERIFY(putFile(fixturePath + "/mode.txt", "adb"));
     MenuWidget menu;
     QVERIFY(!menu.deviceCheckWindow);
-    QVERIFY(!menu.deviceInfoWindow);
+    QVERIFY(menu.screenCastController);
     QVERIFY(DeviceManager::instance()->m_checkTimer->isActive());
     QCOMPARE(DeviceManager::instance()->m_adbOnlyRefCount, 1);
     QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->currentMode(), DeviceManager::ADB, 5000);

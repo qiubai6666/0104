@@ -1,10 +1,10 @@
 QT += core gui widgets network testlib
 CONFIG += c++11 testcase console
 CONFIG -= app_bundle
-TARGET = DeviceOperationTests
+TARGET = ScreenCastTests
 INCLUDEPATH += $$PWD/../src/app $$PWD/../src/ui $$PWD/../src/services
 # 路径由测试替身提供；绝不链接资源提取器、访问真实 ADB 或下载网络配置。
-SOURCES += $$PWD/deviceoperationtests.cpp \
+SOURCES += $$PWD/screencasttests.cpp \
     $$PWD/../src/services/processmanager.cpp \
     $$PWD/../src/services/devicemanager.cpp \
     $$PWD/../src/ui/devicecheckwindow.cpp \

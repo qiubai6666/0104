@@ -7,7 +7,8 @@
 
 class QPushButton;
 class QVBoxLayout;
-class DeviceInfoWindow;
+class ScreenCastController;
+class QTimer;
 class RepairWindow;
 class PayloadWindow;
 class DeviceCheckWindow;
@@ -32,12 +33,15 @@ private slots:
 
 private:
     friend class DeviceOperationTests;
+    friend class ScreenCastTests;
     // 与 setupUI() 中按钮顺序对应，避免在业务代码中直接使用数字索引。
     enum MenuAction {
         ScreenCast, RepairTools, Payload, ExtractImg, DeviceCheck,
         Configuration, ContactAuthor, Exit, Minimize
     };
 
+    void updateScreenCastButton();
+    void paintScreenCastSpinner();
     void setupUI();
     void updatePosition();
     void extractImg();
@@ -47,7 +51,9 @@ private:
 
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;
-    DeviceInfoWindow *deviceInfoWindow;
+    ScreenCastController *screenCastController;
+    QTimer *screenCastSpinnerTimer;
+    int screenCastSpinnerAngle = 0;
     RepairWindow *repairWindow;
     PayloadWindow *payloadWindow;
     DeviceCheckWindow *deviceCheckWindow;

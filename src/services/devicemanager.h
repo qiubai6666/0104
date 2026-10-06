@@ -74,6 +74,7 @@ private slots:
 private:
     friend class DeviceOperationTests;
     friend class DeviceInformationTests;
+    friend class ScreenCastTests;
     void setDetectedDevice(DeviceMode mode, const QString &serial);
     void cancelInfoQuery();
     void startInfoStep(int step);

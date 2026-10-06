@@ -2,7 +2,7 @@
 #include "deviceoperationlease.h"
 #include "configwindow.h"
 #include "devicecheckwindow.h"
-#include "deviceinfowindow.h"
+#include "screencastcontroller.h"
 #include "payloadwindow.h"
 #include "repairwindow.h"
 #include "processmanager.h"
@@ -25,12 +25,14 @@
 #include <QTimer>
 #include <QUrl>
 #include <QCloseEvent>
+#include <QPainter>
+#include <QIcon>
 
 namespace {
 // 子菜单关闭仅隐藏；再次点击时复用原窗口，保留进程、任务和界面状态。
-// prepare 在显示前定位窗口，activate 仅用于投屏窗口。
+// prepare 在显示前定位窗口。
 template <typename Window, typename Prepare>
-void toggleWindow(Window *&window, Prepare prepare, bool activate = false)
+void toggleWindow(Window *&window, Prepare prepare)
 {
     if (window && window->isVisible()) {
         window->hide();
@@ -41,16 +43,13 @@ void toggleWindow(Window *&window, Prepare prepare, bool activate = false)
     }
     prepare(window);
     window->show();
-    if (activate) {
-        window->raise();
-        window->activateWindow();
-    }
 }
 }
 
 MenuWidget::MenuWidget(QWidget *parent)
     : QWidget(parent)
-    , deviceInfoWindow(nullptr)
+    , screenCastController(new ScreenCastController(this))
+    , screenCastSpinnerTimer(new QTimer(this))
     , repairWindow(nullptr)
     , payloadWindow(nullptr)
     , deviceCheckWindow(nullptr)
@@ -72,9 +71,11 @@ MenuWidget::MenuWidget(QWidget *parent)
 
 MenuWidget::~MenuWidget()
 {
+    screenCastSpinnerTimer->stop();
+    delete screenCastController;
     DeviceManager::instance()->releaseAdbOnlyMonitoring();
     const QList<QWidget *> windows = {
-        deviceInfoWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow
+        repairWindow, payloadWindow, deviceCheckWindow, configWindow
     };
     for (QWidget *window : windows) {
         if (window) {
@@ -104,12 +105,61 @@ void MenuWidget::setupUI()
         connect(button, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
     }
 
+    buttons[ScreenCast]->setObjectName("screenCastButton");
+    buttons[ScreenCast]->setIconSize(QSize(24, 24));
+    screenCastSpinnerTimer->setInterval(40);
+    connect(screenCastSpinnerTimer, &QTimer::timeout, this, [this] {
+        screenCastSpinnerAngle = (screenCastSpinnerAngle + 16) % 360;
+        paintScreenCastSpinner();
+    });
+    connect(screenCastController, &ScreenCastController::stateChanged,
+            this, &MenuWidget::updateScreenCastButton);
+    updateScreenCastButton();
+
     setStyleSheet(
         "MenuWidget {"
         "   background-color: rgba(195, 219, 228, 245);"
         "   border-radius: 10px;"
         "}"
     );
+}
+
+void MenuWidget::updateScreenCastButton()
+{
+    auto *button = buttons[ScreenCast];
+    const auto state = screenCastController->state();
+    const bool loading = state == ScreenCastController::WaitingForDevice || state == ScreenCastController::Starting;
+    button->setProperty("screenCastLoading", loading);
+    button->setToolTip(screenCastController->statusText());
+    button->setEnabled(state != ScreenCastController::Stopping);
+    button->setAccessibleName(QStringLiteral("投屏"));
+    button->setAccessibleDescription(screenCastController->statusText());
+    if (loading) {
+        button->setText(QString());
+        paintScreenCastSpinner();
+        screenCastSpinnerTimer->start();
+    } else {
+        screenCastSpinnerTimer->stop();
+        button->setIcon(QIcon());
+        button->setText(QStringLiteral("投屏"));
+    }
+}
+
+void MenuWidget::paintScreenCastSpinner()
+{
+    auto *button = buttons[ScreenCast];
+    const qreal ratio = button->devicePixelRatioF();
+    QPixmap pixmap(qRound(24 * ratio), qRound(24 * ratio));
+    pixmap.setDevicePixelRatio(ratio);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(QColor(44, 62, 80, 45), 2.5));
+    painter.drawEllipse(QRectF(3, 3, 18, 18));
+    painter.setPen(QPen(QColor("#2c3e50"), 2.5, Qt::SolidLine, Qt::RoundCap));
+    painter.drawArc(QRectF(3, 3, 18, 18), screenCastSpinnerAngle * 16, 260 * 16);
+    painter.end();
+    button->setIcon(QIcon(pixmap));
 }
 
 void MenuWidget::updatePosition()
@@ -138,7 +188,7 @@ void MenuWidget::onButtonClicked()
 
     switch (static_cast<MenuAction>(index)) {
     case ScreenCast:
-        toggleWindow(deviceInfoWindow, [](DeviceInfoWindow *) {}, true);
+        screenCastController->toggle();
         break;
     case RepairTools:
         toggleWindow(repairWindow, [this](RepairWindow *window) {
@@ -202,7 +252,7 @@ void MenuWidget::openAuthorImage()
 void MenuWidget::minimizeWindows()
 {
     const QList<QWidget *> windows = {
-        deviceInfoWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow
+        repairWindow, payloadWindow, deviceCheckWindow, configWindow
     };
     for (QWidget *window : windows) {
         if (window && window->isVisible()) {
@@ -318,6 +368,7 @@ void MenuWidget::cleanupAndExit()
     }
     qDebug() << "开始清理并退出...";
 
+    screenCastController->stop();
     // 先停止轮询，再仅结束本程序持有的进程；共享 ADB Server 保持运行。
     DeviceManager::instance()->stopMonitoring();
     ProcessManager::stopAllProcesses();

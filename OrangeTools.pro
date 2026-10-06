@@ -20,7 +20,7 @@ SOURCES += \
     src/app/main.cpp \
     src/ui/passworddialog.cpp \
     src/ui/menuwidget.cpp \
-    src/ui/deviceinfowindow.cpp \
+    src/services/screencastcontroller.cpp \
     src/ui/repairwindow.cpp \
     src/ui/payloadwindow.cpp \
     src/ui/devicecheckwindow.cpp \
@@ -33,7 +33,7 @@ SOURCES += \
 
 HEADERS += \
     src/ui/menuwidget.h \
-    src/ui/deviceinfowindow.h \
+    src/services/screencastcontroller.h \
     src/ui/passworddialog.h \
     src/ui/repairwindow.h \
     src/ui/payloadwindow.h \
