@@ -8,3 +8,5 @@ RESOURCES += $$PWD/../src/ui/ouga.qrc
 
 # Match the application RCC configuration without running embedded tools.
 include($$PWD/../resources.pri)
+
+include($$PWD/../protected-release.pri)

@@ -28,3 +28,5 @@ contains(CONFIG, bundled_dependency_resources) {
     RESOURCES += $$PWD/fixtures/ougadependencies/resources.qrc
 }
 include($$PWD/../ougacodecs.pri)
+
+include($$PWD/../protected-release.pri)

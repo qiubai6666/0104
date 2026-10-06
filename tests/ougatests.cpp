@@ -4938,7 +4938,14 @@ private slots:
     QCOMPARE(unexpectedFileDialogs, 0);
     QCOMPARE(archiveValues, (QList<int>{0, 12, 42, 64, 80, 99, 100}));
     QVERIFY(extractionReset);
-    QCOMPARE(payloadValues, corruptOutput ? QList<int>({0, 99}) : QList<int>({0, 99, 100}));
+    const auto expectedPayloadValues = corruptOutput ? QList<int>({0, 99})
+                                                    : QList<int>({0, 99, 100});
+    // Keep the terminal preparation error in the report if an asynchronous
+    // helper fails; progress-only diagnostics otherwise hide the cause.
+    if (payloadValues != expectedPayloadValues)
+      qWarning().noquote() << window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")
+                                  ->toPlainText();
+    QCOMPARE(payloadValues, expectedPayloadValues);
     QCOMPARE(progress->value(), corruptOutput ? 99 : 100);
     QCOMPARE(progress->property("rate").toString(), corruptOutput ? QString("已停止") : QString("完成"));
     const QString images = imagesDirectory ? output : output + "/images";

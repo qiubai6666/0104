@@ -17,3 +17,8 @@ HEADERS += \
     $$PWD/../src/ui/passworddialog.h \
     $$PWD/../src/ui/uihelper.h \
     $$PWD/../src/app/version.h
+
+include($$PWD/../protected-release.pri)
+
+SOURCES += $$PWD/../src/services/resourceextractor.cpp $$PWD/../src/services/integritychecker.cpp
+INCLUDEPATH += $$PWD/../src/services

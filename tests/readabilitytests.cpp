@@ -1,6 +1,9 @@
 #include "passworddialog.h"
 #include "uihelper.h"
 #include "version.h"
+#include "resourceextractor.h"
+#include "integritychecker.h"
+#include <QTemporaryDir>
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -14,13 +17,14 @@
 #include <QVBoxLayout>
 #include <QXmlStreamReader>
 
-// 只测试本地界面和内嵌资源：不会提取资源到运行目录、连接设备、访问网络或执行外部工具。
+// 只测试本地界面和资源；资源仅释放到显式的项目 TEMP，不连接设备、访问网络或执行工具。
 class ReadabilityTests : public QObject
 {
     Q_OBJECT
 
 private slots:
     void embeddedToolsMatchSourceFiles();
+    void isolatedStartupResourceExtraction();
     void applicationNameUsesOrangeTools();
     void menuButtonsKeepOrderAndPresentation();
     void menuButtonsHandleEmptyList();
@@ -257,6 +261,25 @@ void ReadabilityTests::cancelButtonStillRejectsDialog()
         }
     }
     QFAIL("Cannot find cancel button");
+}
+void ReadabilityTests::isolatedStartupResourceExtraction()
+{
+    const auto integrity = IntegrityChecker::verifyIntegrity();
+    QVERIFY2(integrity.success, qPrintable(integrity.errorMessage));
+    const QString root = QDir::cleanPath(QDir::fromNativeSeparators(qEnvironmentVariable("TEMP")));
+    QVERIFY2(!root.isEmpty() && root.contains("/TEMP/", Qt::CaseInsensitive), "Set TEMP to a private project TEMP subdirectory");
+    QTemporaryDir work(root + "/startup-XXXXXX");
+    QVERIFY(work.isValid());
+    const QString target = work.path() + "/resources";
+    QVERIFY(ResourceExtractor::extractResources(target, work.path() + "/Neil.jpg"));
+    for (const QString &name : IntegrityChecker::getCriticalFiles()) {
+        QFile extracted(target + "/" + name);
+        QFile embedded(":/qiubai/qiubai/" + name);
+        QVERIFY(extracted.open(QIODevice::ReadOnly));
+        QVERIFY(embedded.open(QIODevice::ReadOnly));
+        QCOMPARE(QCryptographicHash::hash(extracted.readAll(), QCryptographicHash::Sha256),
+                 QCryptographicHash::hash(embedded.readAll(), QCryptographicHash::Sha256));
+    }
 }
 QTEST_MAIN(ReadabilityTests)
 #include "readabilitytests.moc"

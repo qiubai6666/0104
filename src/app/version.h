@@ -9,7 +9,8 @@
 #define APP_COPYRIGHT "Copyright © 2025 QiuBai Team"
 
 // 默认配置
-#define DEFAULT_PASSWORD "123456..."
+#include "sensitivestrings.h"
+#define DEFAULT_PASSWORD OrangeSecrets::defaultPassword()
 #define RESOURCE_FOLDER "qiubai"
 #define ADB_SERVER_TIMEOUT 1000
 #define DEVICE_CHECK_INTERVAL 1000

@@ -51,3 +51,6 @@ include($$PWD/ouga.pri)
 SOURCES += $$PWD/src/services/deviceoperationlease.cpp
 HEADERS += $$PWD/src/services/deviceoperationlease.h
 include($$PWD/xiaomi.pri)
+
+include($$PWD/protected-release.pri)
+HEADERS += $$PWD/src/app/encodedstring.h $$PWD/src/app/sensitivestrings.h

@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'scripts\Protection.Common.ps1')
 
 # Find an installed 7-Zip; do not download or install tools automatically.
 if ([string]::IsNullOrWhiteSpace($SevenZipPath)) {
@@ -34,6 +35,7 @@ if ([string]::IsNullOrWhiteSpace($SevenZipPath)) {
 }
 $sevenZip = (Resolve-Path -LiteralPath $SevenZipPath).Path
 $release = (Resolve-Path -LiteralPath $ReleaseDirectory).Path.TrimEnd('\')
+Assert-ReleasePayload $release
 $archive = [IO.Path]::GetFullPath($ArchivePath)
 if ([IO.Path]::GetExtension($archive) -ne '.7z') { throw 'ArchivePath must end in .7z.' }
 if ($archive.StartsWith($release + '\', [StringComparison]::OrdinalIgnoreCase)) {

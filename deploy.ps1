@@ -10,16 +10,24 @@ param(
     [string]$UpxPath,
     # Folder with libbz2-1.dll from the MinGW kit that linked the executable
     # (mingw64\opt\bin). Defaults to the g++ found on PATH.
-    [string]$CodecBinPath
+    [string]$CodecBinPath,
+    [string]$ProtectionManifestPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'scripts\Protection.Common.ps1')
 
 if (-not (Test-Path -LiteralPath $ExecutablePath -PathType Leaf)) {
     throw "Release executable not found: $ExecutablePath. Build first or pass -ExecutablePath."
 }
 $executable = (Resolve-Path -LiteralPath $ExecutablePath).Path
+if ($ProtectionManifestPath) { Assert-ProtectionManifest $executable $ProtectionManifestPath }
+$buildMakefile = Join-Path (Split-Path -Parent (Split-Path -Parent $executable)) 'Makefile.Release'
+if ((Test-Path -LiteralPath $buildMakefile) -and
+    [IO.File]::ReadAllText($buildMakefile).Contains('ORANGE_PROTECTED_RELEASE') -and -not $ProtectionManifestPath) {
+    throw 'Protected Release requires the manifest from Finalize-ProtectedExecutable before deployment.'
+}
 # The statically linked Zstandard decoder's BSD notice must accompany binaries.
 $zstdLicense = Join-Path $PSScriptRoot 'third_party\zstd\LICENSE'
 if (-not (Test-Path -LiteralPath $zstdLicense -PathType Leaf)) {
@@ -100,6 +108,12 @@ if (Test-Path -LiteralPath $output) {
                 }
             }
         }
+    }
+}
+$before = @{}
+if (Test-Path -LiteralPath $output) {
+    foreach ($file in Get-ChildItem -LiteralPath $output -Recurse -File -Force) {
+        $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName).Hash
     }
 }
 [IO.Directory]::CreateDirectory($output) | Out-Null
@@ -201,6 +215,16 @@ foreach ($relativePath in $optionalFiles) {
 if ($UseUpx) {
     & (Join-Path $PSScriptRoot 'compress-release.ps1') -OutputDirectory $output -UpxPath $UpxPath `
         -ExecutableName ([IO.Path]::GetFileName($target))
+}
+$generated = @(Get-ChildItem -LiteralPath $output -Recurse -File -Force | Where-Object {
+    -not $before.ContainsKey($_.FullName) -or $before[$_.FullName] -ne (Get-FileHash -LiteralPath $_.FullName).Hash
+} | ForEach-Object FullName)
+Assert-ReleasePayload -Root $output -Files $generated
+foreach ($relative in @(Get-ReleaseLeaks $output)) {
+    Write-Warning "Existing source/debug/build residue retained (not newly deployed): $relative"
+}
+if (-not $UseUpx -and (Get-FileHash -LiteralPath $target).Hash -ne (Get-FileHash -LiteralPath $executable).Hash) {
+    throw 'Deployed executable hash differs from the current build; output may be incomplete.'
 }
 Write-Host "Deployment complete: $target"
 Write-Host 'Keep the entire output directory together. Do not distribute the executable by itself.'

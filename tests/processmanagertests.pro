@@ -11,3 +11,5 @@ SOURCES += \
 HEADERS += $$PWD/../src/services/processmanager.h
 SOURCES += $$PWD/../src/services/deviceoperationlease.cpp
 HEADERS += $$PWD/../src/services/deviceoperationlease.h
+
+include($$PWD/../protected-release.pri)

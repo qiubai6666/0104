@@ -17,3 +17,5 @@ HEADERS += $$PWD/../src/services/devicemanager.h \
     $$PWD/../src/ui/deviceinfowindow.h \
     $$PWD/../src/ui/devicecheckwindow.h \
     $$PWD/../src/ui/uihelper.h
+
+include($$PWD/../protected-release.pri)

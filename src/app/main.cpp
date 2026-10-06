@@ -56,11 +56,11 @@ int main(int argc, char *argv[])
     PasswordDialog passwordDialog;
     if (passwordDialog.exec() != QDialog::Accepted) {
         // 用户取消或密码错误次数过多，退出程序
-        qDebug() << "用户取消或密码验证失败，程序退出";
+        qDebug() << OrangeSecrets::passwordRejected();
         return 0;
     }
 
-    qDebug() << "密码验证成功，启动主界面";
+    qDebug() << OrangeSecrets::passwordAccepted();
 
     // 密码验证通过后，直接显示主菜单
     MenuWidget menu;

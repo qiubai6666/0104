@@ -172,7 +172,7 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 | 联系作者 | 使用系统默认程序打开 Neil.jpg；失败时尝试 file URL | 图片已成功提取 |
 | 退出 / 收起 | 清理退出 / 最小化主窗口及可见子窗口 | 收起不会退出程序 |
 
-首次运行需要密码：当前默认值是 **`123456...`（包括末尾三个英文句点）**，统一定义在 `src/app/version.h` 的 `DEFAULT_PASSWORD` 中。密码为本地硬编码检查，并不是强安全认证。
+首次运行需要密码：当前默认值是 **`123456...`（包括末尾三个英文句点）**，通过 `src/app/version.h` 的 `DEFAULT_PASSWORD` 使用，实际值统一列在 `src/app/sensitivestrings.h` 中。密码为本地硬编码检查，并不是强安全认证。
 
 ### 文件放在哪里？
 
@@ -709,3 +709,7 @@ UPX 只在 TEMP 副本中处理未签名主程序和三项允许的 MinGW DLL；
 ### 运行工具目录文档精简
 
 资源清单不再内嵌或释放 `bin/README.md`、`bin/lpmake/LICENSE-AOSP.txt`、`bin/7zip/License.txt`。源码中的原文件保留；发布入口将两份许可证复制到运行包的 `licenses/lpmake` 和 `licenses/7zip` 目录。此调整不移除工具或功能，需重新编译、打包才对新程序生效；不会直接删除现有 AppData 文件。`qiubai/bin/manifest.json` 仍记录源码工具套件的来源和原文件校验信息，不代表所有记录项都要释放到运行目录。
+
+### 离线保护构建
+
+使用根目录的 `build-protected-release.ps1` 构建并验证普通/保护 Release，成功后仅更新运行目录、不打包。现有 `release.ps1` 支持显式 `-ProtectedRelease`。配置、字符串清单、私有符号保存及保护边界见 `docs/protected-release.md`。所有发布实验仅放项目 `TEMP`。

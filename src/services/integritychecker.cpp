@@ -1,4 +1,5 @@
 #include "integritychecker.h"
+#include "sensitivestrings.h"
 #include "resourceextractor.h"
 #include <QFile>
 #include <QFileInfo>
@@ -146,13 +147,13 @@ IntegrityChecker::CheckResult IntegrityChecker::verifyIntegrity()
     CheckResult result;
     result.success = true;
 
-    qDebug() << "开始程序完整性验证...";
+    qDebug() << OrangeSecrets::integrityStarted();
 
     // 1. 反调试检测
     if (isDebuggerAttached()) {
         result.success = false;
         result.errorMessage = "检测到调试器，程序拒绝运行！";
-        qDebug() << "警告：检测到调试器";
+        qDebug() << OrangeSecrets::debuggerWarning();
         return result;
     }
 
@@ -166,7 +167,7 @@ IntegrityChecker::CheckResult IntegrityChecker::verifyIntegrity()
         return result;
     }
 
-    qDebug() << "程序完整性验证通过";
+    qDebug() << OrangeSecrets::integrityAccepted();
     return result;
 }
 

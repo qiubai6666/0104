@@ -7,3 +7,5 @@ include($$PWD/../xiaomi.pri)
 SOURCES += $$PWD/xiaomitests.cpp $$PWD/../src/services/deviceoperationlease.cpp
 HEADERS += $$PWD/../src/services/deviceoperationlease.h
 RESOURCES += $$PWD/../src/ui/ouga.qrc
+
+include($$PWD/../protected-release.pri)

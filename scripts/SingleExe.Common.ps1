@@ -22,15 +22,18 @@ function Assert-NoLinks([string]$Path) {
     }
 }
 function New-ReleaseTemp([string]$Path) {
-    if (-not $Path) { $Path = Join-Path ([IO.Path]::GetTempPath()) ('orangetools-single-' + [guid]::NewGuid().ToString('N')) }
+    $root = Join-Path (Split-Path -Parent $PSScriptRoot) 'TEMP'
+    Assert-NoLinks $root
+    if (-not $Path) { $Path = Join-Path $root ('orangetools-release-' + [guid]::NewGuid().ToString('N')) }
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $prefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Experimental work must stay inside system TEMP.' }
+    $prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+    if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Experimental work must stay inside project TEMP.' }
     Assert-NoLinks $full
     if (Test-Path -LiteralPath $full) { throw "Refusing to reuse existing TEMP directory: $full" }
     [IO.Directory]::CreateDirectory($full) | Out-Null
     return $full
 }
+
 function Invoke-ReleaseTool([string]$Tool, [string[]]$Arguments, [string]$Log) {
     & $Tool @Arguments *> $Log
     if ($LASTEXITCODE -ne 0) {
@@ -72,7 +75,7 @@ function Assert-ReleaseLayout([string]$Root) {
         if (-not (Test-Path -LiteralPath (Join-Path $Root $relative) -PathType Leaf)) { throw "Missing runtime dependency: $relative" }
     }
     foreach ($file in $manifest) {
-        if ($file.Path -notin $allowed -and $file.Path -notmatch '^licenses\\[\w .\\-]+\.(txt|md|json)$') { throw "Unapproved release member (history/test/build residue): $($file.Path)" }
+        if ($file.Path -notin $allowed -and $file.Path -notmatch '^licenses\\[\w .\\-]+\.(txt|md|json|c|cc|cpp|cxx|h|hpp)$') { throw "Unapproved release member (history/test/build residue): $($file.Path)" }
     }
     foreach ($relative in @('licenses\OrangeTools-MIT.txt','licenses\zstd-BSD.txt','licenses\7zip-sfx\License.txt',
                             'licenses\7zip-sfx\COPYING.LGPL-2.1.txt','licenses\Qt\LICENSE.txt','licenses\MinGW\bzip2\LICENSE.txt')) {

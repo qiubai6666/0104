@@ -111,7 +111,7 @@ private slots:
   void cleanup() {
     for (const char *key :
          {"ORANGE_DEPENDENCY_MOCK", "ORANGE_LPMAKE_HELP_KIND",
-          "ORANGE_LPMAKE_HELP_STATUS", "ORANGE_LPMAKE_MARKER",
+          "ORANGE_LPMAKE_HELP_STATUS", "ORANGE_LPMAKE_MARKER_BASE64",
           "ORANGE_LPMAKE_GENERATE_STATUS", "ORANGE_LPMAKE_GENERATE_OUTPUT"})
       qunsetenv(key);
     QVERIFY(!DeviceOperationLease::owner());
@@ -348,7 +348,9 @@ private slots:
     qputenv("ORANGE_DEPENDENCY_MOCK", "1");
     qputenv("ORANGE_LPMAKE_HELP_KIND", kind.toUtf8());
     qputenv("ORANGE_LPMAKE_HELP_STATUS", QByteArray::number(code));
-    qputenv("ORANGE_LPMAKE_MARKER", (directory + "/commands.txt").toUtf8());
+    // qputenv uses the Windows ANSI environment; keep a UTF-8 path as ASCII.
+    qputenv("ORANGE_LPMAKE_MARKER_BASE64",
+            (directory + "/commands.txt").toUtf8().toBase64());
     OugaPreparation preparation;
     QSignalSpy prepared(&preparation, &OugaPreparation::prepared);
     QSignalSpy done(&preparation, &OugaPreparation::finished);
@@ -382,7 +384,9 @@ private slots:
     qputenv("ORANGE_LPMAKE_HELP_STATUS", "1");
     qputenv("ORANGE_LPMAKE_GENERATE_STATUS", QByteArray::number(code));
     qputenv("ORANGE_LPMAKE_GENERATE_OUTPUT", outputKind.toUtf8());
-    qputenv("ORANGE_LPMAKE_MARKER", (directory + "/commands.txt").toUtf8());
+    // qputenv uses the Windows ANSI environment; keep a UTF-8 path as ASCII.
+    qputenv("ORANGE_LPMAKE_MARKER_BASE64",
+            (directory + "/commands.txt").toUtf8().toBase64());
     OugaPreparation preparation;
     QSignalSpy done(&preparation, &OugaPreparation::finished);
     preparation.makeSuper(QCoreApplication::applicationFilePath(), source,
@@ -624,7 +628,8 @@ int main(int argc, char **argv) {
   if (qEnvironmentVariable("ORANGE_DEPENDENCY_MOCK") == "1" &&
       args.size() > 1) {
     const bool help = args.mid(1) == QStringList{"--help"};
-    QFile marker(qEnvironmentVariable("ORANGE_LPMAKE_MARKER"));
+    QFile marker(QString::fromUtf8(QByteArray::fromBase64(
+        qgetenv("ORANGE_LPMAKE_MARKER_BASE64"))));
     if (!marker.open(QIODevice::WriteOnly | QIODevice::Append))
       return 99;
     marker.write(help ? "help\n" : "make\n");

@@ -11,7 +11,7 @@ param(
     [switch]$UseUpx,
     [string]$StageRoot
 )
-. (Join-Path $PSScriptRoot 'scripts\SingleExe.Common.ps1')
+. (Join-Path $PSScriptRoot 'scripts\Protection.Common.ps1')
 . (Join-Path $PSScriptRoot 'scripts\SfxIcon.ps1')
 if (-not $IconPath) { $IconPath = Join-Path $PSScriptRoot 'assets\sfx.ico' }
 if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'dist\OrangeTools-Single.exe' }
@@ -24,6 +24,7 @@ foreach ($file in @($output, $output + '.sha256')) {
 }
 $pin = Assert-PinnedSfx $SfxPath (Join-Path $PSScriptRoot 'third_party\7zip-sfx\module.json')
 $release = (Resolve-Path -LiteralPath $ReleaseDirectory).Path
+Assert-ReleasePayload $release
 Assert-ReleaseLayout $release
 if ([IO.Path]::GetExtension($output) -ne '.exe') { throw 'Single EXE output must end in .exe.' }
 if ($output.StartsWith($release.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Output must be outside the release input.' }
@@ -55,6 +56,7 @@ if ($UseUpx) {
         Copy-Item -LiteralPath $packed -Destination $target
     }
 }
+Assert-ReleasePayload $payload
 Assert-ReleaseLayout $payload
 $manifest = @(Get-ReleaseManifest $payload)
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stage 'manifest.json') -Encoding utf8NoBOM

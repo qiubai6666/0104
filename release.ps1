@@ -10,9 +10,10 @@ param(
     [string]$QtDocsPath,
     [string]$OutputPath,
     [ValidateSet('SingleExe','7z')][string]$Format = 'SingleExe',
-    [ValidateRange(1,32)][int]$Jobs = 4
+    [ValidateRange(1,32)][int]$Jobs = 4,
+    [switch]$ProtectedRelease
 )
-. (Join-Path $PSScriptRoot 'scripts\SingleExe.Common.ps1')
+. (Join-Path $PSScriptRoot 'scripts\Protection.Common.ps1')
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Run this entry with PowerShell 7 (pwsh.exe).' }
 if (-not $QtBinPath) { $QtBinPath = Split-Path -Parent (Get-Command qmake.exe -ErrorAction Stop).Source }
 if (-not $CompilerBinPath) { $CompilerBinPath = Split-Path -Parent (Get-Command g++.exe -ErrorAction Stop).Source }
@@ -46,7 +47,7 @@ Write-Host "Release evidence (preserved on failure/success): $stage"
 $source = Join-Path $stage 'source'
 [IO.Directory]::CreateDirectory($source) | Out-Null
 # Snapshot only formal inputs. Never package the historical OrangeToolsApp directory.
-foreach ($relative in @('src','tests','qiubai','third_party','OrangeTools.pro','resources.pri','resources.qrc','ouga.pri','xiaomi.pri','ougacodecs.pri','app.rc','app.manifest','LICENSE')) {
+foreach ($relative in @('src','tests','qiubai','third_party','OrangeTools.pro','protected-release.pri','resources.pri','resources.qrc','ouga.pri','xiaomi.pri','ougacodecs.pri','app.rc','app.manifest','LICENSE')) {
     $inputPath = Join-Path $PSScriptRoot $relative
     Assert-NoLinks $inputPath
     Copy-Item -LiteralPath $inputPath -Destination $source -Recurse
@@ -54,7 +55,7 @@ foreach ($relative in @('src','tests','qiubai','third_party','OrangeTools.pro','
 $sourceManifest = @(Get-ReleaseManifest $source)
 $sourceManifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'source-manifest.json') -Encoding utf8NoBOM
 # Keep test paths short for legacy bundled offline tools; record the task-owned root.
-$testArtifacts = New-ReleaseTemp (Join-Path ([IO.Path]::GetTempPath()) ('ot-tests-'+[guid]::NewGuid().ToString('N').Substring(0,8)))
+$testArtifacts = New-ReleaseTemp (Join-Path $stage 'test-artifacts')
 $testArtifacts | Set-Content -LiteralPath (Join-Path $stage 'test-artifacts.txt') -Encoding utf8NoBOM
 $oldPath = $env:PATH
 $oldTemp = $env:TEMP
@@ -63,13 +64,21 @@ $oldPlatform = [Environment]::GetEnvironmentVariable('QT_QPA_PLATFORM','Process'
 $buildTemp = Join-Path $stage 'build-temp'
 [IO.Directory]::CreateDirectory($buildTemp) | Out-Null
 function Invoke-QtRegression([string]$Executable, [string]$Build, [string[]]$ExtraArguments) {
-    $names = @('LOCALAPPDATA','APPDATA','USERPROFILE','QT_QPA_PLATFORM','ORANGE_TEST_ARTIFACTS','ORANGE_TEST_LPMAKE','ORANGE_BUNDLED_TOOL_ROOT','ORANGE_DEPENDENCY_MOCK')
+    $names = @('LOCALAPPDATA','APPDATA','USERPROFILE','QT_QPA_PLATFORM','ORANGE_TEST_ARTIFACTS','ORANGE_TEST_LPMAKE','ORANGE_BUNDLED_TOOL_ROOT','ORANGE_DEPENDENCY_MOCK','ORANGE_UI_SNAPSHOT_DIR')
+    $asciiHome = $null
     $saved = @{}
     foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
     try {
         $isolatedHome = Join-Path $testArtifacts ([IO.Path]::GetFileNameWithoutExtension($Executable)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8))
         [IO.Directory]::CreateDirectory($isolatedHome) | Out-Null
+        if ([IO.Path]::GetFileName($Executable) -eq 'XiaomiTests.exe') {
+            $asciiHome = New-ReleaseAsciiTestHome $isolatedHome
+            $isolatedHome = $asciiHome.Home
+        }
         foreach ($name in @('LOCALAPPDATA','APPDATA','USERPROFILE','ORANGE_TEST_ARTIFACTS')) { [Environment]::SetEnvironmentVariable($name,$isolatedHome,'Process') }
+        $snapshots = Join-Path $Build 'ui-snapshots'
+        [IO.Directory]::CreateDirectory($snapshots) | Out-Null
+        $env:ORANGE_UI_SNAPSHOT_DIR = $snapshots
         $env:QT_QPA_PLATFORM = 'offscreen'
         $env:ORANGE_TEST_LPMAKE = Join-Path $source 'qiubai\bin\lpmake\lpmake.exe'
         $env:ORANGE_BUNDLED_TOOL_ROOT = Join-Path $source 'qiubai'
@@ -79,13 +88,18 @@ function Invoke-QtRegression([string]$Executable, [string]$Build, [string[]]$Ext
         $result = Get-Content -LiteralPath $report -Raw
         if ($result -notmatch 'Totals:\s+(\d+) passed,\s+0 failed,\s+0 skipped,' -or [int]$Matches[1] -lt 3) { throw "Incomplete or failing Qt regression: $report" }
         Write-Host ($Executable.Split('\')[-1]+': '+$Matches[1]+' passed; report '+$report)
-    } finally { foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name,$saved[$name],'Process') } }
+    } finally {
+        foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name,$saved[$name],'Process') }
+        Remove-ReleaseAsciiTestHome $asciiHome
+    }
 }
 function Build-ReleaseProject([string]$Project, [string]$Build, [string]$ResourceConfig) {
     [IO.Directory]::CreateDirectory($Build) | Out-Null
     Push-Location -LiteralPath $Build
     try {
-        Invoke-ReleaseTool (Join-Path $QtBinPath 'qmake.exe') @($Project,'CONFIG-=debug','CONFIG+=release',('CONFIG+='+$ResourceConfig),('OUGA_CODEC_ROOT='+ (Join-Path (Split-Path -Parent $CompilerBinPath) 'opt'))) (Join-Path $Build 'qmake.log')
+        $qmakeArguments = @($Project,'CONFIG-=debug','CONFIG+=release',('CONFIG+='+$ResourceConfig),('OUGA_CODEC_ROOT='+ (Join-Path (Split-Path -Parent $CompilerBinPath) 'opt')))
+        if ($ProtectedRelease) { $qmakeArguments += 'CONFIG+=protected_release' }
+        Invoke-ReleaseTool (Join-Path $QtBinPath 'qmake.exe') $qmakeArguments (Join-Path $Build 'qmake.log')
         $arguments = @('-j'+$Jobs)
         if (Test-Path -LiteralPath (Join-Path $Build 'Makefile.Release')) { $arguments += @('-f','Makefile.Release') }
         Invoke-ReleaseTool (Join-Path $CompilerBinPath 'mingw32-make.exe') $arguments (Join-Path $Build 'make.log')
@@ -109,6 +123,10 @@ try {
         Build-ReleaseProject (Join-Path $source 'OrangeTools.pro') $appBuild $config
         $main = Join-Path $appBuild 'release\Orange Tools.exe'
         if (-not (Test-Path -LiteralPath $main)) { throw 'Main Release output missing.' }
+        $protection = @{}
+        if ($ProtectedRelease) {
+            $protection.ProtectionManifestPath = Finalize-ProtectedExecutable $main $appBuild $CompilerBinPath (Join-Path $work 'private-symbols') $source
+        }
         $testBuild = Join-Path $work 'readability'
         Build-ReleaseProject (Join-Path $source 'tests\readabilitytests.pro') $testBuild $config
         Invoke-QtRegression (Join-Path $testBuild 'release\ReadabilityTests.exe') $testBuild @('-platform','offscreen')
@@ -116,10 +134,10 @@ try {
         Build-ReleaseProject (Join-Path $source 'tests\deploymentsmoke.pro') $smokeBuild $config
         $smoke = Join-Path $smokeBuild 'release\DeploymentSmoke.exe'
         $deploy = Join-Path $work 'deployment'
-        & (Join-Path $PSScriptRoot 'deploy.ps1') -ExecutablePath $main -QtBinPath $QtBinPath -OutputDirectory $deploy -CodecBinPath (Join-Path (Split-Path -Parent $CompilerBinPath) 'opt\bin') -PreserveExistingFiles *> (Join-Path $work 'deploy.log')
+        & (Join-Path $PSScriptRoot 'deploy.ps1') -ExecutablePath $main -QtBinPath $QtBinPath -OutputDirectory $deploy -CodecBinPath (Join-Path (Split-Path -Parent $CompilerBinPath) 'opt\bin') -PreserveExistingFiles @protection *> (Join-Path $work 'deploy.log')
         Add-ReleaseLicenses $PSScriptRoot $deploy $QtLicensePath $QtDocsPath $CompilerBinPath
         Test-ReleaseDeployment $deploy $QtBinPath $CompilerBinPath $smoke (Join-Path $source 'qiubai\icon.png') (Join-Path $work 'check')
-        $builds[$variant] = [pscustomobject]@{ Main=$main; Deployment=$deploy; Smoke=$smoke }
+        $builds[$variant] = [pscustomobject]@{ Main=$main; Deployment=$deploy; Smoke=$smoke; Protection=$protection }
     }
     # Existing regressions use inert tools/fixtures or loopback servers, never real devices or external services.
     foreach ($spec in @(@('processmanagertests','ProcessManagerTests'),@('deviceoperationtests','DeviceOperationTests'),
@@ -149,7 +167,8 @@ try {
     Assert-ReleaseManifest $sourceManifest $source
     # Update only this worktree; preserve unknown/user files and never touch the desktop checkout.
     $localRuntime = Join-Path $PSScriptRoot 'OrangeToolsApp'
-    & (Join-Path $PSScriptRoot 'deploy.ps1') -ExecutablePath $selected.Main -QtBinPath $QtBinPath -OutputDirectory $localRuntime -CodecBinPath (Join-Path (Split-Path -Parent $CompilerBinPath) 'opt\bin') -PreserveExistingFiles *> (Join-Path $stage 'local-deploy.log')
+    $selectedProtection = $selected.Protection
+    & (Join-Path $PSScriptRoot 'deploy.ps1') -ExecutablePath $selected.Main -QtBinPath $QtBinPath -OutputDirectory $localRuntime -CodecBinPath (Join-Path (Split-Path -Parent $CompilerBinPath) 'opt\bin') -PreserveExistingFiles @selectedProtection *> (Join-Path $stage 'local-deploy.log')
     $runtimeSource = if ($Format -eq 'SingleExe') { Join-Path $winner.Stage 'payload' } else { $selected.Deployment }
     foreach ($file in Get-ReleaseManifest $runtimeSource) {
         $target = Join-Path $localRuntime $file.Path

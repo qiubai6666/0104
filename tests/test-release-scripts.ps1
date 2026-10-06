@@ -33,7 +33,7 @@ Must-Fail { Assert-ReleaseManifest $manifest $replica } 'changed member'
 [IO.File]::WriteAllText((Join-Path $inputRoot '_deployment_smoke.exe'),'inert test')
 Must-Fail { Assert-ReleaseLayout $inputRoot } 'test program in payload'
 Must-Fail { New-ReleaseTemp $stage } 'existing experiment directory'
-Must-Fail { New-ReleaseTemp (Join-Path $PSScriptRoot 'forbidden-temp') } 'TEMP outside system TEMP'
+Must-Fail { New-ReleaseTemp (Join-Path $PSScriptRoot 'forbidden-temp') } 'TEMP outside project TEMP'
 $module = Join-Path $PSScriptRoot '..\third_party\7zip-sfx\7zS.sfx'
 $pin = Join-Path $PSScriptRoot '..\third_party\7zip-sfx\module.json'
 [void](Assert-PinnedSfx $module $pin)

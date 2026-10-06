@@ -43,9 +43,13 @@ QString makePackage(const QString &name = "rom") {
         put(path + '/' + Xiaomi::scriptName(mode), batch());
     return path;
 }
+// Keep Unicode fixture paths as ASCII across the Windows ANSI environment.
+QString testPathEnvironment(const char *name) {
+    return QString::fromUtf8(QByteArray::fromBase64(qgetenv(name)));
+}
 int fakeFastboot(const QStringList &args) {
     const QString behavior = qEnvironmentVariable("XIAOMI_TEST_BEHAVIOR");
-    QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT"));
+    QFile audit(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64"));
     if (audit.open(QIODevice::Append)) {
         audit.write((args.mid(1).join('|') + '\n').toUtf8());
         audit.close();
@@ -87,7 +91,7 @@ int fakeFastboot(const QStringList &args) {
         const QString partition = args.value(flashIndex + 1);
         if (behavior.startsWith("cota")) {
             const QFileInfo actual(args.value(flashIndex + 2));
-            const QFileInfo expected(qEnvironmentVariable("XIAOMI_TEST_IMAGE"));
+            const QFileInfo expected(testPathEnvironment("XIAOMI_TEST_IMAGE_BASE64"));
             if (!actual.isFile() || actual.canonicalFilePath() != expected.canonicalFilePath()) {
                 out << "FAILED (image path mismatch)\n"; out.flush(); return 1;
             }
@@ -113,7 +117,7 @@ private slots:
     void init() {
         QVERIFY(!DeviceOperationLease::owner());
         qputenv("XIAOMI_TEST_BEHAVIOR", "success");
-        qputenv("XIAOMI_TEST_AUDIT", (artifactDir() + "/audit.txt").toUtf8());
+        qputenv("XIAOMI_TEST_AUDIT_BASE64", (artifactDir() + "/audit.txt").toUtf8().toBase64());
     }
     void modeMapping() {
         QCOMPARE(Xiaomi::scriptName(Xiaomi::Mode::Wipe), QString("flash_all.bat"));
@@ -149,7 +153,7 @@ private slots:
         QFile before(path + "/flash_all_except_storage.bat");
         QVERIFY(before.open(QIODevice::ReadOnly));
         const QByteArray originalBytes = before.readAll(); before.close();
-        qputenv("XIAOMI_TEST_IMAGE", (path + "/images/boot.img").toUtf8());
+        qputenv("XIAOMI_TEST_IMAGE_BASE64", (path + "/images/boot.img").toUtf8().toBase64());
         Xiaomi::Package p; QString error;
         QVERIFY2(Xiaomi::inspectPackage(path, Xiaomi::Mode::KeepData, &p, &error), qPrintable(error));
         XiaomiFlashService service; service.configure(toolPath);
@@ -158,7 +162,7 @@ private slots:
         QVERIFY(service.start(p, &error));
         QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 15000);
         QCOMPARE(finished[0][0].toBool(), !eraseFails);
-        QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT")); QVERIFY(audit.open(QIODevice::ReadOnly));
+        QFile audit(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64")); QVERIFY(audit.open(QIODevice::ReadOnly));
         const QByteArray trace = audit.readAll();
         QCOMPARE(trace.contains("erase|opcust\n"), partitions.split(',').contains("opcust"));
         QCOMPARE(trace.contains("erase|opconfig\n"), !eraseFails && partitions.split(',').contains("opconfig"));
@@ -321,7 +325,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 15000);
         QCOMPARE(finished[0][0].toBool(), success);
         QVERIFY(!service.isBusy()); QVERIFY(!DeviceOperationLease::owner());
-        QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT")); QVERIFY(audit.open(QIODevice::ReadOnly));
+        QFile audit(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64")); QVERIFY(audit.open(QIODevice::ReadOnly));
         const auto trace = audit.readAll();
         QVERIFY(trace.contains("devices\n"));
         QVERIFY(trace.contains("-s|MOCK1|getvar|product"));
@@ -343,9 +347,10 @@ private slots:
         Xiaomi::Package p; QString error;
         const auto selected = Xiaomi::Mode(mode);
         const QString path = makePackage();
-        const QString marker = artifactDir() + "/selected-mode.txt";
+        const QString marker = path + "/selected-mode.txt";
         QByteArray script = batch();
-        script += "echo " + Xiaomi::scriptName(selected).toUtf8() + " > \"" + QDir::toNativeSeparators(marker).toUtf8() + "\"\r\n";
+        // Use cmd's Unicode script directory, not an embedded UTF-8 path in BAT.
+        script += "echo " + Xiaomi::scriptName(selected).toUtf8() + " > \"%~dp0selected-mode.txt\"\r\n";
         put(path + '/' + Xiaomi::scriptName(selected), script);
         QVERIFY2(Xiaomi::inspectPackage(path, selected, &p, &error), qPrintable(error));
         XiaomiFlashService service; service.configure(toolPath);
@@ -366,7 +371,7 @@ private slots:
         QVERIFY(!service.start(p, &error));
         QCOMPARE(finished.size(), 0);
         QVERIFY(error.contains("变化"));
-        QVERIFY(!QFileInfo::exists(qEnvironmentVariable("XIAOMI_TEST_AUDIT")));
+        QVERIFY(!QFileInfo::exists(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64")));
         QVERIFY(!DeviceOperationLease::owner());
     }
     void preflightRejects_data() {
@@ -393,7 +398,7 @@ private slots:
         QVERIFY(!finished[0][0].toBool()); QVERIFY(!service.isBusy());
         QVERIFY(!service.hasStartedScript()); QVERIFY(progress.isEmpty());
         QVERIFY(!DeviceOperationLease::owner());
-        QFile audit(qEnvironmentVariable("XIAOMI_TEST_AUDIT"));
+        QFile audit(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64"));
         if (audit.open(QIODevice::ReadOnly)) QVERIFY(!audit.readAll().contains("flash|"));
         // The same service can retry immediately; no stale cancelled probe may finish it.
         qputenv("XIAOMI_TEST_BEHAVIOR", "success");
@@ -580,7 +585,7 @@ private slots:
         }); timer.start();
         window.findChild<QPushButton *>("StartXiaomiFlashButton")->click();
         QVERIFY(inspected); QVERIFY(!window.isBusy()); QVERIFY(!DeviceOperationLease::owner());
-        QVERIFY(!QFileInfo::exists(qEnvironmentVariable("XIAOMI_TEST_AUDIT")));
+        QVERIFY(!QFileInfo::exists(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64")));
     }
     void mutualExclusion() {
         QObject other; QVERIFY(DeviceOperationLease::acquire(&other));
