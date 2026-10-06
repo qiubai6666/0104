@@ -610,20 +610,31 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
         return fallback;
     };
     const QString unlock = m_pendingUnlock == QStringLiteral("未知") ? property({"ro.boot.verifiedbootstate"}) : m_pendingUnlock;
+    const QString manufacturer = property({"ro.product.manufacturer", "ro.product.brand", "ro.product.vendor.brand"}, QString());
+    const QString model = property({"ro.product.marketname", "ro.config.marketing_name", "ro.product.model"});
+    const QString miuiVersion = property({"ro.miui.ui.version.name", "ro.miui.ui.version.code"}, QString());
+    const bool isXiaomi = manufacturer.contains(QStringLiteral("xiaomi"), Qt::CaseInsensitive)
+        || manufacturer.contains(QStringLiteral("redmi"), Qt::CaseInsensitive)
+        || model.contains(QStringLiteral("xiaomi"), Qt::CaseInsensitive)
+        || model.contains(QStringLiteral("redmi"), Qt::CaseInsensitive)
+        || miuiVersion.startsWith(QStringLiteral("V"), Qt::CaseInsensitive);
+    // Xiaomi exposes the user-facing MIUI/HyperOS build in the OTA property;
+    // ro.build.display.id is the generic Android branch (for example TKQ1...).
+    const QString versionInfo = isXiaomi
+        ? property({"ro.build.version.ota", "ro.miui.build.version", "ro.build.display.id.show", "ro.build.display.id", "ro.build.version.miui", "ro.build.version.incremental"})
+        : property({"ro.build.display.id.show", "ro.build.display.id", "ro.build.version.oplusrom", "ro.build.version.oplusrom.display", "ro.build.version.miui", "ro.build.version.incremental", "ro.build.version.ota"});
     const QString details = QStringLiteral(
-        "设备序列号：%1\n设备名称：%2\n设备代号：%3\n安卓版本：%4\n解锁状态：%5\n版本信息：%6\n构建日期：%7\n内核版本：%8\nA/B 分区：%9\nCPU 厂商：%10\nCPU 代号：%11\nCPU 名称：%12\n操作系统：Android %4\nSELinux：%13")
+        "设备序列号：%1\n设备名称：%2\n设备代号：%3\n安卓版本：%4\n解锁状态：%5\n版本信息：%6\n构建日期：%7\n内核版本：%8\nA/B 分区：%9\nCPU 代号：%10\n操作系统：Android %4\nSELinux：%11")
         .arg(property({"ro.serialno", "ro.boot.serialno"}, m_deviceSerial))
-        .arg(property({"ro.product.marketname", "ro.config.marketing_name", "ro.product.model"}))
+        .arg(model)
         .arg(property({"ro.product.device", "ro.product.odm.device"}, m_pendingDevice))
         .arg(property({"ro.build.version.release", "ro.product.build.version.release"}))
         .arg(unlock == QStringLiteral("orange") ? QStringLiteral("已解锁") : unlock == QStringLiteral("green") ? QStringLiteral("未解锁") : unlock)
-        .arg(property({"ro.build.display.id.show", "ro.build.display.id", "ro.build.version.miui", "ro.build.version.incremental", "ro.build.version.ota"}))
+        .arg(versionInfo)
         .arg(m_pendingBuildDate)
         .arg(m_pendingKernelVersion)
         .arg(m_pendingSlot)
-        .arg(property({"ro.soc.manufacturer", "ro.hardware"}))
-        .arg(property({"ro.board.platform"}))
-        .arg(property({"ro.product.board", "ro.hardware", "ro.product.cpu.abi"}))
+        .arg(property({"ro.product.board", "ro.board.platform", "ro.hardware", "ro.product.cpu.abi"}))
         .arg(m_pendingSelinuxStatus == QStringLiteral("Enforcing") ? QStringLiteral("严格模式") :
              m_pendingSelinuxStatus == QStringLiteral("Permissive") ? QStringLiteral("宽容模式") :
              m_pendingSelinuxStatus == QStringLiteral("Disabled") ? QStringLiteral("已禁用") : m_pendingSelinuxStatus);

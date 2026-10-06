@@ -360,7 +360,7 @@ private slots:
         auto *editor = dialog->findChild<QTextEdit *>(QStringLiteral("deviceDetailsText"));
         QVERIFY(editor);
         QTRY_VERIFY_WITH_TIMEOUT(editor->toPlainText().contains(QStringLiteral("设备序列号：")), 6000);
-        QVERIFY(editor->toPlainText().contains(QStringLiteral("CPU 名称：")));
+        QVERIFY(editor->toPlainText().contains(QStringLiteral("CPU 代号：")));\n        QVERIFY(!editor->toPlainText().contains(QStringLiteral("CPU 厂商：")));\n        QVERIFY(!editor->toPlainText().contains(QStringLiteral("CPU 名称：")));
         QVERIFY(!dialog->findChild<QPushButton *>(QStringLiteral("copyAllButton")));
         QVERIFY(!dialog->findChild<QPushButton *>(QStringLiteral("closeButton")));
 
