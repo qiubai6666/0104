@@ -172,39 +172,39 @@ void DeviceCheckWindow::setupUI()
     
     mainLayout = new QVBoxLayout(container);
     mainLayout->setSpacing(0);
-    mainLayout->setContentsMargins(12, 10, 12, 10);
+    mainLayout->setContentsMargins(12, 12, 12, 12);
     
-    // 标题
+    // 标题去掉独立边框，避免小窗口内重复套卡。
     QLabel *titleLabel = new QLabel("设备检测", container);
     titleLabel->setAlignment(Qt::AlignCenter);
     titleLabel->setFixedHeight(28);
     titleLabel->setStyleSheet(
         "QLabel {"
         "   color: #2c3e50;"
-        "   font-size: 15px;"  // 稍微减小字体
+        "   font-size: 15px;"
         "   font-weight: bold;"
-        "   background-color: #F3F7FC;"
-        "   border: 1px solid #E7EEF6;"
-        "   border-radius: 8px;"
+        "   background: transparent;"
+        "   border: none;"
         "}"
     );
     mainLayout->addWidget(titleLabel);
     mainLayout->addSpacing(8);
     
-    // 状态卡片
+    // 单一浅蓝信息面板，细色带区分信息与操作，不使用图标或表情。
     QWidget *statusCard = new QWidget(container);
     statusCard->setObjectName("deviceStatusCard");
-    statusCard->setFixedHeight(122);  // 固定信息区，将剩余高度均匀分配给操作区间隔
+    statusCard->setFixedHeight(120);  // 足够容纳五行信息，连接前后保持相同尺寸
     statusCard->setStyleSheet(
         "QWidget#deviceStatusCard {"
-        "   background-color: #F7FAFD;"
-        "   border: 1px solid #E7EEF6;"
-        "   border-radius: 6px;"
+        "   background-color: #F3F7FC;"
+        "   border: none;"
+        "   border-left: 3px solid #83AECA;"
+        "   border-radius: 8px;"
         "}"
     );
     QVBoxLayout *statusLayout = new QVBoxLayout(statusCard);
     statusLayout->setSpacing(4);
-    statusLayout->setContentsMargins(10, 7, 10, 7);
+    statusLayout->setContentsMargins(12, 7, 12, 7);
     
     statusLabel = new QLabel("检测中...", statusCard);
     statusLabel->setAlignment(Qt::AlignCenter);
@@ -212,7 +212,7 @@ void DeviceCheckWindow::setupUI()
     statusLabel->setStyleSheet(
         "QLabel {"
         "   color: #2c3e50;"
-        "   font-size: 13px;"  // 稍微减小字体
+        "   font-size: 13px;"
         "   font-weight: bold;"
         "   background: transparent;"
         "   border-bottom: 1px solid #E7EEF6;"
@@ -223,12 +223,12 @@ void DeviceCheckWindow::setupUI()
     infoLabel = new QLabel("等待设备", statusCard);
     infoLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);  // 左对齐，顶部对齐
     infoLabel->setWordWrap(true);
-    infoLabel->setMinimumHeight(68);  // 容纳多行设备信息，不添加滚动区域
+    infoLabel->setMinimumHeight(76);  // 容纳多行设备信息，不添加滚动区域
     infoLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     infoLabel->setStyleSheet(
         "QLabel {"
         "   color: #555;"
-        "   font-size: 10px;"  // 减小字体以显示更多内容
+        "   font-size: 10px;"
         "   background: transparent;"
         "   padding: 3px;"
         "   line-height: 1.3;"
@@ -284,7 +284,7 @@ void DeviceCheckWindow::setupUI()
         "   background-color: #F7FAFD;"
         "   color: #2c3e50;"
         "   border: 1px solid #D0DEEB;"
-        "   border-radius: 6px;"
+        "   border-radius: 8px;"
         "   padding: 4px 10px;"
         "   font-size: 13px;"
         "}"
@@ -301,6 +301,7 @@ void DeviceCheckWindow::setupUI()
         "}"
         "QComboBox::drop-down {"
         "   border: none;"
+        "   border-left: 1px solid #E0E7EF;"
         "   width: 28px;"
         "}"
         "QComboBox::down-arrow { image: none; }"
@@ -308,7 +309,7 @@ void DeviceCheckWindow::setupUI()
         "   background-color: #FFFFFF;"
         "   color: #2c3e50;"
         "   border: 1px solid #83AECA;"
-        "   border-radius: 6px;"
+        "   border-radius: 8px;"
         "   selection-background-color: #649EB3;"
         "   selection-color: white;"
         "   padding: 5px;"
@@ -323,8 +324,8 @@ void DeviceCheckWindow::setupUI()
         "QPushButton {"
         "   background-color: #649EB3;"
         "   color: white;"
-        "   border: 1px solid #D0DEEB;"
-        "   border-radius: 6px;"
+        "   border: 1px solid #649EB3;"
+        "   border-radius: 8px;"
         "   font-size: 13px;"
         "   font-weight: bold;"
         "   padding: 4px;"
@@ -336,6 +337,15 @@ void DeviceCheckWindow::setupUI()
         "   background-color: #A8C3D0;"
         "   border-color: #A8C3D0;"
         "}"
+    );
+
+    // CMD 保留白字，使用同色系的低强调蓝；重启和刷入仍沿用 PAYLOAD 主色。
+    const QString utilityButtonStyle = actionButtonStyle + QStringLiteral(
+        "QPushButton { background-color: #83AECA; border-color: #83AECA; }"
+        "QPushButton:hover { background-color: #729DB8; border-color: #729DB8; }"
+        "QPushButton:pressed { background-color: #6490AA; border-color: #6490AA; }"
+        "QPushButton:focus { border-color: #3F7894; }"
+        "QPushButton:disabled { background-color: #A8C3D0; border-color: #A8C3D0; }"
     );
 
     // 执行按钮
@@ -353,16 +363,24 @@ void DeviceCheckWindow::setupUI()
     cmdButton = new QPushButton("打开CMD", container);
     cmdButton->setFixedHeight(34);
     cmdButton->setCursor(Qt::PointingHandCursor);
-    cmdButton->setStyleSheet(actionButtonStyle);
+    cmdButton->setStyleSheet(utilityButtonStyle);
     connect(cmdButton, &QPushButton::clicked, this, &DeviceCheckWindow::onOpenCmdClicked);
     mainLayout->addWidget(cmdButton);
     mainLayout->addStretch(1);
     
+    // 底部刷入区用一条轻分隔线收尾，按钮仍与菜单底边保持固定距离。
+    QWidget *footerDivider = new QWidget(container);
+    footerDivider->setObjectName("deviceFooterDivider");
+    footerDivider->setFixedHeight(1);
+    footerDivider->setStyleSheet("QWidget#deviceFooterDivider { background: #E7EEF6; border: none; }");
+    mainLayout->addWidget(footerDivider);
+    mainLayout->addSpacing(7);
+
     // 刷入分区按钮（2列1行）
     QWidget *flashWidget = new QWidget(container);
     flashWidget->setFixedHeight(34);
     QHBoxLayout *flashLayout = new QHBoxLayout(flashWidget);
-    flashLayout->setSpacing(6);
+    flashLayout->setSpacing(8);
     flashLayout->setContentsMargins(0, 0, 0, 0);
     
     bootButton = new QPushButton("刷入Boot", flashWidget);

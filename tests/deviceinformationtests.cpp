@@ -12,6 +12,8 @@
 #include <QJsonArray>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QScrollArea>
+#include <QFontDatabase>
 #include <QUuid>
 #include <QtTest>
 #include <cstdio>
@@ -256,6 +258,71 @@ private slots:
         QVERIFY(!window.queryActive); QVERIFY(window.queryProcess == nullptr);
         setting("ro.product.model.delay", 0); DeviceOperationLease::release(&owner);
         QTRY_COMPARE(window.versionLabel->text(), QStringLiteral("系统版本: Android 16"));
+    }
+    void detectionPanelLayout_data() {
+        QTest::addColumn<int>("menuHeight");
+        QTest::addColumn<int>("mode");
+        for (int height : {360, 400, 480}) {
+            for (int mode : {int(DeviceManager::None), int(DeviceManager::ADB), int(DeviceManager::Fastboot)}) {
+                const QByteArray name = QByteArray::number(height) + '-' + QByteArray::number(mode);
+                QTest::newRow(name.constData()) << height << mode;
+            }
+        }
+    }
+    void detectionPanelLayout() {
+        QFETCH(int, menuHeight);
+        QFETCH(int, mode);
+        // Offscreen Qt does not discover Windows fonts; use an installed CJK font for layout checks.
+        if (QGuiApplication::platformName() == "offscreen") {
+            QFontDatabase::addApplicationFont("C:/Windows/Fonts/msyh.ttc");
+            QFontDatabase::addApplicationFont("C:/Windows/Fonts/msyhbd.ttc");
+        }
+        manager->pauseMonitoring();
+        manager->m_currentMode = DeviceManager::DeviceMode(mode);
+        DeviceCheckWindow window;
+        window.setFont(QFont("Microsoft YaHei"));
+        window.setPosition(500, 100, menuHeight);
+        window.onDeviceInfoUpdated(QStringLiteral("设备型号: Xiaomi 14\n设备代号: houji\n系统版本: Android 15\n活动分区: a\n解锁状态: 已解锁"));
+        window.show();
+        QCoreApplication::processEvents();
+        QCOMPARE(window.size(), QSize(252, menuHeight));
+        QCOMPARE(window.pos(), QPoint(248, 100));
+        QCOMPARE(window.infoLabel->font().pixelSize(), 10);
+        QCOMPARE(window.infoLabel->palette().color(QPalette::WindowText), QColor("#555"));
+        QCOMPARE(window.statusLabel->font().pixelSize(), 13);
+        QCOMPARE(window.statusLabel->palette().color(QPalette::WindowText), QColor("#2c3e50"));
+        QCOMPARE(window.infoLabel->alignment(), Qt::AlignLeft | Qt::AlignTop);
+        QVERIFY(window.findChildren<QScrollArea *>().isEmpty());
+        QVERIFY2(window.infoLabel->height() >= window.infoLabel->heightForWidth(window.infoLabel->width()),
+                 qPrintable(QString("information height %1, required %2").arg(window.infoLabel->height()).arg(window.infoLabel->heightForWidth(window.infoLabel->width()))));
+        QVERIFY(window.statusLabel->mapTo(&window, QPoint()).y() < window.infoLabel->mapTo(&window, QPoint()).y());
+        QVERIFY(window.infoLabel->mapTo(&window, window.infoLabel->rect().bottomRight()).y() < window.rebootComboBox->mapTo(&window, QPoint()).y());
+        QVector<QPushButton *> buttons{window.executeButton, window.cmdButton, window.bootButton, window.initBootButton};
+        const QStringList texts{"执行重启", "打开CMD", "刷入Boot", "刷入Init_Boot"};
+        for (int i = 0; i < buttons.size(); ++i) {
+            QCOMPARE(buttons[i]->text(), texts[i]);
+            QCOMPARE(buttons[i]->height(), 34);
+            QCOMPARE(buttons[i]->font().pixelSize(), 13);
+            QCOMPARE(buttons[i]->palette().color(QPalette::Active, QPalette::ButtonText), QColor(Qt::white));
+            QVERIFY(window.rect().contains(QRect(buttons[i]->mapTo(&window, QPoint()), buttons[i]->size())));
+        }
+        const int footerY = window.bootButton->mapTo(&window, QPoint()).y();
+        QCOMPARE(footerY, window.initBootButton->mapTo(&window, QPoint()).y());
+        QCOMPARE(menuHeight - (footerY + window.bootButton->height()), 12);
+        QVERIFY(window.executeButton->mapTo(&window, QPoint()).y() > window.rebootComboBox->mapTo(&window, window.rebootComboBox->rect().bottomRight()).y());
+        QVERIFY(window.cmdButton->mapTo(&window, QPoint()).y() > window.executeButton->mapTo(&window, window.executeButton->rect().bottomRight()).y());
+        QVERIFY(footerY > window.cmdButton->mapTo(&window, window.cmdButton->rect().bottomRight()).y());
+        const bool connected = mode != DeviceManager::None;
+        QCOMPARE(window.executeButton->isEnabled(), connected);
+        QCOMPARE(window.rebootComboBox->isEnabled(), connected);
+        QCOMPARE(window.bootButton->isEnabled(), connected);
+        QCOMPARE(window.initBootButton->isEnabled(), connected);
+        QVERIFY(window.cmdButton->isEnabled());
+        if (!connected) QCOMPARE(window.infoLabel->text(), QStringLiteral("等待设备"));
+        window.operationInProgress = true;
+        window.updateUIForMode(DeviceManager::DeviceMode(mode));
+        for (auto button : buttons) QVERIFY(!button->isEnabled());
+        window.operationInProgress = false;
     }
     void detectionReplacementShowsFetchingNotOldDevice() {
         DeviceCheckWindow window; QTRY_COMPARE(window.infoLabel->text(), snapshot()); freezePolling();
