@@ -27,16 +27,13 @@
 #include <QCloseEvent>
 
 namespace {
-// 可见窗口再次点击时销毁；不可见窗口再次点击时复用。
+// 子菜单关闭仅隐藏；再次点击时复用原窗口，保留进程、任务和界面状态。
 // prepare 在显示前定位窗口，activate 仅用于投屏窗口。
 template <typename Window, typename Prepare>
 void toggleWindow(Window *&window, Prepare prepare, bool activate = false)
 {
     if (window && window->isVisible()) {
-        // 尊重窗口 closeEvent 的拒绝，不能绕过正在进行的刷写保护。
-        if (!window->close()) return;
-        window->deleteLater();
-        window = nullptr;
+        window->hide();
         return;
     }
     if (!window) {

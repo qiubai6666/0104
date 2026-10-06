@@ -59,6 +59,8 @@ private slots:
     void repeatedActionsKeepRunningFlash();
     void windowCloseCannotInterruptFlash();
     void menuToggleAndExitCannotInterruptFlash();
+    void repairMenuCanHideAndResume_data();
+    void repairMenuCanHideAndResume();
     void destructionRestoresMonitoring();
     void successfulFlashAndRebootRestoreMonitoring();
     void failedStartRestoresMonitoring();
@@ -116,7 +118,10 @@ void DeviceOperationTests::ougaSingleWindowAndLease()
     QVERIFY(!repair.hasActiveOugaTask());
     QVERIFY(DeviceOperationLease::acquire(&operation));
     QVERIFY(repair.hasActiveOugaTask());
-    QVERIFY(!repair.close());
+    repair.show();
+    QVERIFY(repair.close());
+    QVERIFY(!repair.isVisible());
+    QCOMPARE(DeviceOperationLease::owner(), &operation);
     QVERIFY(!first->close());
     first->showMinimized();
     QVERIFY(DeviceOperationLease::busyFor(&repair));
@@ -142,7 +147,10 @@ void DeviceOperationTests::xiaomiMenuAndSingleWindow()
     QObject operation(first);
     QVERIFY(DeviceOperationLease::acquire(&operation));
     QVERIFY(repair.hasActiveOugaTask());
-    QVERIFY(!repair.close());
+    repair.show();
+    QVERIFY(repair.close());
+    QVERIFY(!repair.isVisible());
+    QCOMPARE(DeviceOperationLease::owner(), &operation);
     QVERIFY(!first->close());
     DeviceOperationLease::release(&operation);
     QVERIFY(!repair.hasActiveOugaTask());
@@ -231,15 +239,21 @@ void DeviceOperationTests::windowCloseCannotInterruptFlash()
     QVERIFY(window.beginOperation());
     window.performFlash("boot", "boot.img");
     QTRY_COMPARE(window.currentProcess->state(), QProcess::Running);
-    QVERIFY(!window.close());
-    QVERIFY(window.isVisible());
+    QPointer<QProcess> running = window.currentProcess;
+    QVERIFY(window.close());
+    QVERIFY(!window.isVisible());
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QVERIFY(running);
+    QCOMPARE(DeviceOperationLease::owner(), &window);
+    window.show();
+    QCOMPARE(window.currentProcess, running.data());
     QCOMPARE(window.currentProcess->state(), QProcess::Running);
     QVERIFY(DeviceManager::instance()->m_isPaused);
     window.currentProcess->kill(); // 仅结束本测试的模拟进程，覆盖失败收尾。
     QTRY_VERIFY(!window.isOperationInProgress());
     QVERIFY(!DeviceManager::instance()->m_isPaused);
     QVERIFY(window.close());
-    // The application lease intercepts Close before the window handler.
+    // Hiding emitted no warning; only the fake-process failure did.
     QVERIFY(messages >= 1);
 }
 
@@ -254,21 +268,98 @@ void DeviceOperationTests::menuToggleAndExitCannotInterruptFlash()
     QVERIFY(window->beginOperation());
     window->performFlash("boot", "boot.img");
     QTRY_COMPARE(window->currentProcess->state(), QProcess::Running);
+    QPointer<QProcess> running = window->currentProcess;
     menu.buttons[MenuWidget::DeviceCheck]->click();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     QCOMPARE(menu.deviceCheckWindow, window.data());
+    QVERIFY(!window->isVisible());
+    QCOMPARE(window->currentProcess, running.data());
+    QCOMPARE(running->state(), QProcess::Running);
+    QCOMPARE(DeviceOperationLease::owner(), window.data());
+    QCOMPARE(messages, 0);
+    menu.buttons[MenuWidget::DeviceCheck]->click();
     QVERIFY(window->isVisible());
+    QCOMPARE(menu.deviceCheckWindow, window.data());
     menu.cleanupAndExit();
     QVERIFY(!menu.close());
     QVERIFY(menu.isVisible());
-    QCOMPARE(window->currentProcess->state(), QProcess::Running);
-    // Close is swallowed by the lease; toggle/exit still show warnings.
-    QVERIFY(messages >= 2);
+    QCOMPARE(running->state(), QProcess::Running);
+    QVERIFY(messages >= 1); // Explicit application exit still warns/blocks.
     window->currentProcess->kill();
     QTRY_VERIFY(!window->isOperationInProgress());
     menu.buttons[MenuWidget::DeviceCheck]->click();
-    QVERIFY(!menu.deviceCheckWindow);
+    QVERIFY(!window->isVisible());
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-    QVERIFY(window.isNull());
+    QVERIFY(window);
+    menu.buttons[MenuWidget::DeviceCheck]->click();
+    QCOMPARE(menu.deviceCheckWindow, window.data());
+    QVERIFY(window->isVisible());
+}
+
+void DeviceOperationTests::repairMenuCanHideAndResume_data()
+{
+    QTest::addColumn<int>("operationKind");
+    QTest::newRow("xiaomi-flash") << 0;
+    QTest::newRow("ouga-flash") << 1;
+    QTest::newRow("repair-owned-operation") << 2;
+}
+
+void DeviceOperationTests::repairMenuCanHideAndResume()
+{
+    QFETCH(int, operationKind);
+    MenuWidget menu;
+    menu.show();
+    menu.buttons[MenuWidget::RepairTools]->click();
+    QPointer<RepairWindow> repair = menu.repairWindow;
+    QVERIFY(repair);
+    QWidget *operationWindow = repair;
+    if (operationKind != 2) {
+        repair->buttons[operationKind == 0 ? RepairWindow::XiaomiFlash : RepairWindow::OugaFlash]->click();
+        operationWindow = operationKind == 0 ? static_cast<QWidget *>(repair->xiaomiWindow)
+                                            : static_cast<QWidget *>(repair->ougaWindow);
+    }
+    QVERIFY(operationWindow);
+    QPointer<QWidget> flashWindow = operationKind == 2 ? nullptr : operationWindow;
+    QObject *owner = operationKind == 2 ? static_cast<QObject *>(repair.data()) : new QObject(operationWindow);
+    QVERIFY(DeviceOperationLease::acquire(owner));
+    QPointer<QProcess> process = ProcessManager::createProcess(operationWindow);
+    process->start(ResourceExtractor::getFastbootPath(), {"flash", "boot", "test.img"});
+    QTRY_COMPARE(process->state(), QProcess::Running);
+    menu.buttons[MenuWidget::RepairTools]->click();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QVERIFY(repair); QVERIFY(process);
+    QVERIFY(!repair->isVisible());
+    QCOMPARE(menu.repairWindow, repair.data());
+    QCOMPARE(process->state(), QProcess::Running);
+    QCOMPARE(DeviceOperationLease::owner(), owner);
+    QCOMPARE(messages, 0);
+    if (flashWindow) QVERIFY(flashWindow->isVisible());
+    menu.buttons[MenuWidget::RepairTools]->click();
+    QCOMPARE(menu.repairWindow, repair.data());
+    QVERIFY(repair->isVisible());
+    QVERIFY(repair->close()); // Native Close also retains an active submenu.
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QVERIFY(repair); QVERIFY(!repair->isVisible());
+    QCOMPARE(process->state(), QProcess::Running);
+    QCOMPARE(DeviceOperationLease::owner(), owner);
+    if (flashWindow) {
+        QVERIFY(!flashWindow->close()); // The actual flashing window stays protected.
+        menu.buttons[MenuWidget::RepairTools]->click();
+        repair->buttons[operationKind == 0 ? RepairWindow::XiaomiFlash : RepairWindow::OugaFlash]->click();
+        QCOMPARE(operationKind == 0 ? static_cast<QWidget *>(repair->xiaomiWindow)
+                                   : static_cast<QWidget *>(repair->ougaWindow), flashWindow.data());
+    }
+    QVERIFY(!menu.close());
+    menu.cleanupAndExit();
+    QCOMPARE(process->state(), QProcess::Running);
+    process->kill(); // Only our isolated fake fastboot, never a real device.
+    QVERIFY(process->waitForFinished(3000));
+    DeviceOperationLease::release(owner);
+    if (operationKind != 2) delete owner;
+    if (flashWindow) {
+        delete flashWindow.data();
+        repair->xiaomiWindow = nullptr; repair->ougaWindow = nullptr;
+    }
 }
 
 void DeviceOperationTests::destructionRestoresMonitoring()
@@ -292,12 +383,17 @@ void DeviceOperationTests::successfulFlashAndRebootRestoreMonitoring()
     DeviceCheckWindow window;
     awaitFastboot(window);
     QVERIFY(window.beginOperation());
+    window.show();
     window.performFlash("boot", "boot.img");
+    QVERIFY(window.close());
+    QVERIFY(!window.isVisible());
     QTRY_VERIFY_WITH_TIMEOUT(!window.isOperationInProgress(), 5000);
     QVERIFY(!window.currentProcess);
     QVERIFY(!DeviceManager::instance()->m_isPaused);
     QVERIFY(audit().contains("[\"fastboot\",\"flash\",\"boot\",\"boot.img\"]"));
     QVERIFY(audit().contains("[\"fastboot\",\"reboot\"]"));
+    QVERIFY(!window.isVisible());
+    window.show();
     QVERIFY(window.bootButton->isEnabled());
 }
 
@@ -343,7 +439,8 @@ void DeviceOperationTests::fastbootDelayRemainsExclusive()
     QVERIFY(!window.waitTimer);
     QVERIFY(window.isOperationInProgress());
     QVERIFY(!window.beginOperation());
-    QVERIFY(!window.close());
+    QVERIFY(window.close());
+    QVERIFY(!window.isVisible());
     QVERIFY(!window.currentProcess);
     QTRY_VERIFY_WITH_TIMEOUT(window.currentProcess && window.currentProcess->state() == QProcess::Running, 4000);
     QVERIFY(DeviceManager::instance()->m_isPaused);

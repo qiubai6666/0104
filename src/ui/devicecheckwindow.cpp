@@ -30,6 +30,11 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     // 设置窗口标志：无边框、置顶
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setAttribute(Qt::WA_TranslucentBackground);
+    // The main menu owns this persistent submenu. Closing only hides it;
+    // never destroy child QProcesses or trigger application exit here.
+    setAttribute(Qt::WA_DeleteOnClose, false);
+    setAttribute(Qt::WA_QuitOnClose, false);
+    setProperty(DeviceOperationLease::RetainedWindowProperty, true);
     
     // 设置窗口标题
     setWindowTitle("设备检测");
@@ -80,12 +85,7 @@ DeviceCheckWindow::~DeviceCheckWindow()
 
 void DeviceCheckWindow::closeEvent(QCloseEvent *event)
 {
-    if (operationInProgress) {
-        event->ignore();
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中",
-            "正在重启或刷写设备，请等待操作结束后再关闭窗口。", this);
-        return;
-    }
+    // Active reboot/flash operations continue in the retained window.
     QWidget::closeEvent(event);
 }
 

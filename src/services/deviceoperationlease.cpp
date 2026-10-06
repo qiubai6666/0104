@@ -1,6 +1,7 @@
 #include "deviceoperationlease.h"
 #include <QCoreApplication>
 #include <QEvent>
+#include <QVariant>
 DeviceOperationLease *DeviceOperationLease::instance() {
   static auto *lease = new DeviceOperationLease;
   if (qApp)
@@ -48,7 +49,8 @@ void DeviceOperationLease::setIdleCheck(std::function<bool()> check) {
   instance()->m_idle = std::move(check);
 }
 bool DeviceOperationLease::eventFilter(QObject *watched, QEvent *event) {
-  if (m_owner && event->type() == QEvent::Close) {
+  if (m_owner && event->type() == QEvent::Close &&
+      !watched->property(RetainedWindowProperty).toBool()) {
     for (QObject *p = m_owner; p; p = p->parent())
       if (p == watched) {
         event->ignore();

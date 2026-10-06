@@ -7,6 +7,9 @@
 class DeviceOperationLease : public QObject {
   Q_OBJECT
 public:
+  // Opt-in only for persistent submenus whose Close hides instead of deleting.
+  // Flash windows and the main menu retain their close/exit protection.
+  static constexpr const char *RetainedWindowProperty = "orangeRetainedSubmenu";
   static DeviceOperationLease *instance();
   static bool acquire(QObject *owner, QString *error = nullptr);
   static void release(QObject *owner);

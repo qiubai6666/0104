@@ -36,6 +36,11 @@ RepairWindow::RepairWindow(QWidget *parent)
     // 设置窗口标志：无边框、置顶
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setAttribute(Qt::WA_TranslucentBackground);
+    // The main menu owns this persistent submenu. Closing only hides it;
+    // never destroy child QProcesses or trigger application exit here.
+    setAttribute(Qt::WA_DeleteOnClose, false);
+    setAttribute(Qt::WA_QuitOnClose, false);
+    setProperty(DeviceOperationLease::RetainedWindowProperty, true);
 
     // 设置窗口标题
     setWindowTitle("修复");
@@ -906,10 +911,6 @@ bool RepairWindow::hasActiveOugaTask() const {
     return false;
 }
 void RepairWindow::closeEvent(QCloseEvent *event) {
-    if (hasActiveOugaTask() || DeviceOperationLease::owner()==this) {
-        event->ignore();
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中", "请等待设备操作结束；不能销毁所属菜单。", this);
-        return;
-    }
+    // Keep services, signal connections and logs alive while hidden.
     QWidget::closeEvent(event);
 }
