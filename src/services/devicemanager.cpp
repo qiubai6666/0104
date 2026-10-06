@@ -618,10 +618,11 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
         || model.contains(QStringLiteral("xiaomi"), Qt::CaseInsensitive)
         || model.contains(QStringLiteral("redmi"), Qt::CaseInsensitive)
         || miuiVersion.startsWith(QStringLiteral("V"), Qt::CaseInsensitive);
-    // Xiaomi exposes the user-facing MIUI/HyperOS build in the OTA property;
-    // ro.build.display.id is the generic Android branch (for example TKQ1...).
+    // Xiaomi/MIUI exposes the user-facing ROM version in ro.build.version.incremental
+    // (for example V14.0.29.0.TMCCNXM); ro.build.display.id is only the Android
+    // branch/build tag (for example TKQ1.220905.001 test-keys).
     const QString versionInfo = isXiaomi
-        ? property({"ro.build.version.ota", "ro.miui.build.version", "ro.build.display.id.show", "ro.build.display.id", "ro.build.version.miui", "ro.build.version.incremental"})
+        ? property({"ro.build.version.incremental", "ro.build.version.ota", "ro.miui.build.version", "ro.build.display.id.show", "ro.build.display.id", "ro.build.version.miui"})
         : property({"ro.build.display.id.show", "ro.build.display.id", "ro.build.version.oplusrom", "ro.build.version.oplusrom.display", "ro.build.version.miui", "ro.build.version.incremental", "ro.build.version.ota"});
     const QString details = QStringLiteral(
         "设备序列号：%1\n设备名称：%2\n设备代号：%3\n安卓版本：%4\n解锁状态：%5\n版本信息：%6\n构建日期：%7\n内核版本：%8\nA/B 分区：%9\nCPU 代号：%10\n操作系统：Android %4\nSELinux：%11")
