@@ -30,6 +30,7 @@ public:
     QString getDeviceInfo() const;
     // Five-row detection snapshot; keep the legacy snapshot for existing consumers.
     QString getDeviceDetails() const { return m_deviceDetails; }
+    QString getExtendedDeviceDetails() const { return m_extendedDeviceDetails; }
     QString deviceSerial() const { return m_deviceSerial; }
 
     // 确保监控已启动（引用计数）
@@ -60,6 +61,7 @@ signals:
     // 设备信息更新信号
     void deviceInfoUpdated(const QString &info);
     void deviceDetailsUpdated(const QString &details);
+    void extendedDeviceDetailsUpdated(const QString &details);
 
 private slots:
     void checkDeviceStatus();
@@ -76,6 +78,8 @@ private:
     void cancelInfoQuery();
     void startInfoStep(int step);
     void finishInfoStep(bool success, const QString &output);
+    void startExtendedInfoQuery();
+    void finishExtendedInfoQuery(bool success, const QString &output);
     bool isCurrentInfoQuery(quint64 generation, QProcess *process, int step) const;
     explicit DeviceManager(QObject *parent = nullptr);
     ~DeviceManager();
@@ -98,6 +102,7 @@ private:
     bool m_isPaused;          // 监控是否被暂停
     QString m_deviceInfo;
     QString m_deviceDetails;
+    QString m_extendedDeviceDetails;
     QString m_deviceSerial;
     QTimer *m_infoTimer;
     quint64 m_infoGeneration = 0;

@@ -21,8 +21,8 @@
 #include <QPainter>
 #include <QDialog>
 #include <QTextEdit>
-#include <QDialogButtonBox>
-#include <QClipboard>
+#include <QGridLayout>
+#include <QPointer>
 #include <QApplication>
 #include <QEvent>
 
@@ -33,23 +33,24 @@ public:
     explicit DeviceDetailsDialog(const QString &details, QWidget *parent = nullptr)
         : QDialog(parent)
     {
-        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+        setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
         setAttribute(Qt::WA_TranslucentBackground);
-        setModal(true);
-        setFixedSize(360, 230);
+        setModal(false);
+        setObjectName(QStringLiteral("deviceDetailsDialog"));
 
         auto *surface = new QWidget(this);
         surface->setObjectName(QStringLiteral("deviceDetailsSurface"));
         auto *outer = new QVBoxLayout(this);
         outer->setContentsMargins(0, 0, 0, 0);
         outer->addWidget(surface);
+
         auto *layout = new QVBoxLayout(surface);
-        layout->setContentsMargins(18, 15, 18, 15);
-        layout->setSpacing(10);
+        layout->setContentsMargins(16, 13, 16, 13);
+        layout->setSpacing(8);
 
         auto *title = new QLabel(QStringLiteral("设备信息"), surface);
         title->setAlignment(Qt::AlignCenter);
-        title->setFixedHeight(24);
+        title->setFixedHeight(22);
         title->setObjectName(QStringLiteral("deviceDetailsTitle"));
         layout->addWidget(title);
 
@@ -58,31 +59,18 @@ public:
         editor->setReadOnly(true);
         editor->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
         editor->setPlainText(details);
-        editor->setLineWrapMode(QTextEdit::NoWrap);
+        editor->setLineWrapMode(QTextEdit::WidgetWidth);
+        editor->setFrameShape(QFrame::NoFrame);
+        editor->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        editor->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         layout->addWidget(editor, 1);
-
-        auto *buttons = new QDialogButtonBox(surface);
-        auto *copy = buttons->addButton(QStringLiteral("复制全部"), QDialogButtonBox::AcceptRole);
-        auto *close = buttons->addButton(QStringLiteral("关闭"), QDialogButtonBox::RejectRole);
-        copy->setObjectName(QStringLiteral("copyAllButton"));
-        close->setObjectName(QStringLiteral("closeButton"));
-        connect(copy, &QPushButton::clicked, this, [editor]() {
-            QApplication::clipboard()->setText(editor->toPlainText());
-            editor->selectAll();
-        });
-        connect(close, &QPushButton::clicked, this, &QDialog::reject);
-        layout->addWidget(buttons);
 
         setStyleSheet(QStringLiteral(
             "QWidget#deviceDetailsSurface { background:#FFFFFF; border:1px solid #D6E2EE; border-radius:12px; }"
             "QLabel#deviceDetailsTitle { color:#2c3e50; font-size:15px; font-weight:bold; background:transparent; }"
-            "QTextEdit#deviceDetailsText { color:#2c3e50; background:#F3F7FC; border:1px solid #D6E2EE; border-radius:8px; padding:8px; font-size:12px; }"
-            "QDialogButtonBox QPushButton { background:#649EB3; color:white; border:1px solid #649EB3; border-radius:7px; min-width:76px; min-height:28px; padding:3px 10px; font-size:12px; }"
-            "QDialogButtonBox QPushButton:hover { background:#578FA6; }"
-            "QDialogButtonBox QPushButton:pressed { background:#477F96; }"));
+            "QTextEdit#deviceDetailsText { color:#2c3e50; background:#F3F7FC; border:1px solid #D6E2EE; border-radius:8px; padding:8px; font-size:11px; selection-background-color:#B8D8E5; }"));
     }
-};
-}
+};}
 #include "processmanager.h"
 #include "resourceextractor.h"
 #include "uihelper.h"
@@ -94,6 +82,7 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     , waitCounter(0)
     , isDragging(false)
     , opacityTimer(nullptr)
+    , detailsDialog(nullptr)
 {
     // 设置窗口标志：无边框、置顶
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
@@ -121,6 +110,13 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
             this, &DeviceCheckWindow::onDeviceModeChanged);
     connect(DeviceManager::instance(), &DeviceManager::deviceDetailsUpdated,
             this, &DeviceCheckWindow::onDeviceInfoUpdated);
+    connect(DeviceManager::instance(), &DeviceManager::extendedDeviceDetailsUpdated,
+            this, [this](const QString &) {
+        if (detailsDialog && detailsDialog->isVisible()) {
+            detailsDialog->findChild<QTextEdit *>(QStringLiteral("deviceDetailsText"))->setPlainText(
+                DeviceManager::instance()->getExtendedDeviceDetails());
+        }
+    });
     
     // 确保设备监控已启动
     DeviceManager::instance()->ensureMonitoring();
@@ -483,21 +479,42 @@ void DeviceCheckWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHe
 
 bool DeviceCheckWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == infoLabel && event->type() == QEvent::MouseButtonDblClick) {
-        if (DeviceManager::instance()->currentMode() != DeviceManager::None &&
-            !DeviceManager::instance()->getDeviceDetails().isEmpty()) {
-            showDeviceDetails();
+    if (watched == infoLabel) {
+        if (event->type() == QEvent::MouseButtonPress && detailsDialog && detailsDialog->isVisible()) {
+            detailsDialog->close();
+            return true;
         }
-        return true;
+        if (event->type() == QEvent::MouseButtonDblClick) {
+            if (DeviceManager::instance()->currentMode() != DeviceManager::None &&
+                !DeviceManager::instance()->getDeviceDetails().isEmpty()) {
+                showDeviceDetails();
+            }
+            return true;
+        }
     }
     return QWidget::eventFilter(watched, event);
 }
 
 void DeviceCheckWindow::showDeviceDetails()
 {
-    DeviceDetailsDialog dialog(DeviceManager::instance()->getDeviceDetails(), this);
-    dialog.move(frameGeometry().center() - dialog.rect().center());
-    dialog.exec();
+    if (detailsDialog && detailsDialog->isVisible()) {
+        detailsDialog->close();
+        return;
+    }
+    const QString details = DeviceManager::instance()->getExtendedDeviceDetails().isEmpty()
+        ? DeviceManager::instance()->getDeviceDetails()
+        : DeviceManager::instance()->getExtendedDeviceDetails();
+    auto *dialog = new DeviceDetailsDialog(details, this);
+    detailsDialog = dialog;
+    dialog->setFixedSize(size());
+    const QRect area = (windowHandle() && windowHandle()->screen())
+        ? windowHandle()->screen()->availableGeometry()
+        : QGuiApplication::primaryScreen()->availableGeometry();
+    dialog->move(area.center() - QPoint(dialog->width() / 2, dialog->height() / 2));
+    connect(dialog, &QDialog::finished, this, [this]() { detailsDialog = nullptr; });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void DeviceCheckWindow::onDeviceModeChanged(DeviceManager::DeviceMode mode)
@@ -514,7 +531,7 @@ void DeviceCheckWindow::onDeviceInfoUpdated(const QString &info)
 void DeviceCheckWindow::updateUIForMode(DeviceManager::DeviceMode mode)
 {
     const bool connected = mode != DeviceManager::None;
-    infoLabel->setToolTip(QStringLiteral("双击查看设备信息并复制"));
+    infoLabel->setToolTip(QStringLiteral("双击查看设备信息，再次点击关闭"));
     statusLabel->setText(mode == DeviceManager::ADB ? "ADB 模式" :
                          mode == DeviceManager::Fastboot ? "Fastboot 模式" : "未连接");
     if (!connected) {

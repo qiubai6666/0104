@@ -346,24 +346,26 @@ private slots:
         QCOMPARE(queryCount("ro.product.model"), 0);
         QCOMPARE(queryCount("ro.build.version.release"), 0);
     }
-    void detectionPopupCanCopyRequestedFields() {
+    void detectionPopupShowsExtendedDetailsAndTogglesClosed() {
         DeviceCheckWindow window;
         QTRY_COMPARE(window.infoLabel->text(), details());
         window.show();
-        bool copied = false;
-        QTimer::singleShot(100, [&copied] {
-            auto *dialog = QApplication::activeModalWidget();
-            if (!dialog) return;
-            auto *editor = dialog->findChild<QTextEdit*>(QStringLiteral("deviceDetailsText"));
-            auto *copy = dialog->findChild<QPushButton*>(QStringLiteral("copyAllButton"));
-            if (editor && copy) {
-                copy->click();
-                copied = QApplication::clipboard()->text() == details();
-            }
-            dialog->close();
-        });
         QTest::mouseDClick(window.infoLabel, Qt::LeftButton);
-        QVERIFY(copied);
+        QTRY_VERIFY(!window.findChildren<QDialog *>().isEmpty());
+        auto *dialog = window.findChildren<QDialog *>().constLast();
+        QVERIFY(dialog->isVisible());
+        QCOMPARE(dialog->size(), window.size());
+        const QRect screen = QGuiApplication::primaryScreen()->availableGeometry();
+        QVERIFY((dialog->frameGeometry().center() - screen.center()).manhattanLength() <= 2);
+        auto *editor = dialog->findChild<QTextEdit *>(QStringLiteral("deviceDetailsText"));
+        QVERIFY(editor);
+        QTRY_VERIFY_WITH_TIMEOUT(editor->toPlainText().contains(QStringLiteral("设备序列号：")), 6000);
+        QVERIFY(editor->toPlainText().contains(QStringLiteral("CPU 名称：")));
+        QVERIFY(!dialog->findChild<QPushButton *>(QStringLiteral("copyAllButton")));
+        QVERIFY(!dialog->findChild<QPushButton *>(QStringLiteral("closeButton")));
+
+        QTest::mouseClick(window.infoLabel, Qt::LeftButton);
+        QTRY_VERIFY(!dialog->isVisible());
     }
     void detectionReplacementShowsFetchingNotOldDevice() {
         DeviceCheckWindow window; QTRY_COMPARE(window.infoLabel->text(), details()); freezePolling();
@@ -393,6 +395,14 @@ int helperMain(QCoreApplication &app) {
         const QString mode = object.value("mode").toString("adb");
         if (base == "adb") std::printf("List of devices attached\n%s", mode == "adb" ? "first\tdevice\n" : "");
         else if (mode == "fastboot") std::puts("first\tfastboot");
+        return 0;
+    }
+    if (base == "adb" && args.value(0) == "shell" && args.value(1) == "getprop" && args.size() == 2) {
+        const bool second = serial != "first";
+        const QString model = second ? "Model B" : "Model A";
+        const QString device = second ? "beta" : "alpha";
+        const QString version = second ? "17" : "16";
+        std::printf("[ro.serialno]: [%s]\n[ro.product.model]: [%s]\n[ro.product.device]: [%s]\n[ro.build.version.release]: [%s]\n[ro.boot.verifiedbootstate]: [orange]\n[ro.build.display.id]: [OrangeOS-%s]\n[ro.build.date]: [Mon Oct  6 10:00:00 CST 2026]\n[ro.boot.slot_suffix]: [_a]\n[ro.soc.manufacturer]: [Qualcomm]\n[ro.board.platform]: [sm8650]\n[ro.product.board]: [kalama]\n[ro.boot.selinux]: [Enforcing]\n", serial.toLocal8Bit().constData(), model.toLocal8Bit().constData(), device.toLocal8Bit().constData(), version.toLocal8Bit().constData(), version.toLocal8Bit().constData());
         return 0;
     }
     const QString key = base == "adb" ? args.value(2) : args.value(1);

@@ -13,7 +13,10 @@
 #include <QVector>
 #include <QComboBox>
 #include <QMouseEvent>
+#include <QPointer>
 #include "devicemanager.h"
+
+class QDialog;
 
 class DeviceCheckWindow : public QWidget
 {
@@ -78,6 +81,7 @@ private:
     bool isDragging;
     QPoint dragStartPosition;
     QTimer *opacityTimer;
+    QPointer<QDialog> detailsDialog;
 };
 
 #endif // DEVICECHECKWINDOW_H

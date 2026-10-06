@@ -363,9 +363,11 @@ void DeviceManager::setDetectedDevice(DeviceMode mode, const QString &serial)
     m_deviceSerial = serial;
     m_deviceInfo.clear();
     m_deviceDetails.clear();
+    m_extendedDeviceDetails.clear();
     // Invalidate cached UI data even when one ADB device replaces another.
     emit deviceInfoUpdated(QString());
     emit deviceDetailsUpdated(QString());
+    emit extendedDeviceDetailsUpdated(QString());
     if (modeChanged) emit deviceModeChanged(mode);
 }
 
@@ -487,11 +489,87 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
         }
     }
     if (m_infoStep < 2) { startInfoStep(m_infoStep + 1); return; }
-    m_infoQueryActive = false;
+
     const QString details = QString("设备代号：%1\n活动分区：%2\n解锁状态：%3")
                                 .arg(m_pendingDevice, m_pendingSlot, m_pendingUnlock);
     if (details != m_deviceDetails) {
         m_deviceDetails = details;
         emit deviceDetailsUpdated(details);
     }
+    if (m_infoMode == ADB) {
+        startExtendedInfoQuery();
+        return;
+    }
+    m_infoQueryActive = false;
+}
+
+void DeviceManager::startExtendedInfoQuery()
+{
+    m_infoStep = 3;
+    disconnect(m_infoProcess, nullptr, this, nullptr);
+    if (m_infoProcess->state() != QProcess::NotRunning) {
+        m_infoProcess->kill();
+        m_infoProcess->waitForFinished(1000);
+    }
+    const quint64 generation = m_infoGeneration;
+    connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, generation](int code, QProcess::ExitStatus status) {
+        if (!m_infoQueryActive || generation != m_infoGeneration || m_infoStep != 3 ||
+            m_currentMode != ADB || m_deviceSerial != m_infoSerial) return;
+        const QString output = QString::fromLocal8Bit(m_infoProcess->readAllStandardOutput());
+        finishExtendedInfoQuery(status == QProcess::NormalExit && code == 0, output);
+    });
+    connect(m_infoProcess, &QProcess::errorOccurred, this,
+            [this, generation](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart && m_infoQueryActive && generation == m_infoGeneration &&
+            m_infoStep == 3) finishExtendedInfoQuery(false, QString());
+    });
+    disconnect(m_infoTimer, nullptr, this, nullptr);
+    connect(m_infoTimer, &QTimer::timeout, this, [this, generation]() {
+        if (m_infoQueryActive && generation == m_infoGeneration && m_infoStep == 3)
+            finishExtendedInfoQuery(false, QString());
+    });
+    QStringList arguments;
+    if (!m_infoSerial.isEmpty()) arguments << "-s" << m_infoSerial;
+    arguments << "shell" << "getprop";
+    m_infoTimer->start();
+    m_infoProcess->start(ResourceExtractor::getAdbPath(), arguments);
+}
+
+void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
+{
+    m_infoTimer->stop();
+    disconnect(m_infoProcess, nullptr, this, nullptr);
+    const QString props = success ? output : QString();
+    auto property = [&props](const QStringList &keys, const QString &fallback = QStringLiteral("未知")) {
+        for (const QString &key : keys) {
+            const QRegularExpression re(QStringLiteral("\\[%1\\]\\s*:\\s*\\[(.*?)\\]").arg(QRegularExpression::escape(key)));
+            const auto match = re.match(props);
+            if (match.hasMatch() && !match.captured(1).trimmed().isEmpty()) return match.captured(1).trimmed();
+        }
+        return fallback;
+    };
+    const QString unlock = m_pendingUnlock == QStringLiteral("未知") ?
+        property({"ro.boot.verifiedbootstate"}) : m_pendingUnlock;
+    const QString details = QStringLiteral(
+        "设备序列号：%1\n设备名称：%2\n设备代号：%3\n安卓版本：%4\n解锁状态：%5\n版本信息：%6\n构建日期：%7\n内核版本：%8\nA/B 分区：%9\nCPU 厂商：%10\nCPU 代号：%11\nCPU 名称：%12\n操作系统：Android %4\nSELinux：%13")
+        .arg(property({"ro.serialno", "ro.boot.serialno"}))
+        .arg(property({"ro.product.marketname", "ro.config.marketing_name", "ro.product.model"}))
+        .arg(property({"ro.product.device", "ro.product.odm.device"}, m_pendingDevice))
+        .arg(property({"ro.build.version.release", "ro.product.build.version.release"}))
+        .arg(unlock == QStringLiteral("orange") ? QStringLiteral("已解锁") :
+             unlock == QStringLiteral("green") ? QStringLiteral("未解锁") : unlock)
+        .arg(property({"ro.build.display.id", "ro.build.version.oplusrom", "ro.build.version.ota"}))
+        .arg(property({"ro.build.date", "ro.product.build.date", "ro.system.build.date"}))
+        .arg(property({"ro.build.kernel.id", "ro.kernel.version", "ro.build.version.incremental"}))
+        .arg(m_pendingSlot)
+        .arg(property({"ro.soc.manufacturer", "ro.hardware"}))
+        .arg(property({"ro.board.platform"}))
+        .arg(property({"ro.product.board", "ro.hardware", "ro.product.cpu.abi"}))
+        .arg(property({"ro.build.version.selinux", "ro.boot.selinux"}));
+    if (details != m_extendedDeviceDetails) {
+        m_extendedDeviceDetails = details;
+        emit extendedDeviceDetailsUpdated(details);
+    }
+    m_infoQueryActive = false;
 }
