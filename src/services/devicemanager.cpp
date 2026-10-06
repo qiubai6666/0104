@@ -398,7 +398,7 @@ void DeviceManager::updateDeviceInfo()
     m_infoQueryActive = true;
     m_infoMode = m_currentMode;
     m_infoSerial = m_deviceSerial;
-    m_pendingModel = m_pendingVersion = m_pendingDevice = m_pendingSlot = m_pendingUnlock = QStringLiteral("未知");
+    m_pendingDevice = m_pendingSlot = m_pendingUnlock = QStringLiteral("未知");
     startInfoStep(0);
 }
 
@@ -430,8 +430,7 @@ void DeviceManager::startInfoStep(int step)
     });
     QStringList arguments;
     if (!m_infoSerial.isEmpty()) arguments << "-s" << m_infoSerial;
-    const QStringList adbProperties = {"ro.product.device", "ro.boot.slot_suffix", "ro.boot.verifiedbootstate",
-                                       "ro.product.model", "ro.build.version.release"};
+    const QStringList adbProperties = {"ro.product.device", "ro.boot.slot_suffix", "ro.boot.verifiedbootstate"};
     const QStringList fastbootVariables = {"product", "current-slot", "unlocked"};
     if (m_infoMode == ADB) arguments << "shell" << "getprop" << adbProperties.at(step);
     else arguments << "getvar" << fastbootVariables.at(step);
@@ -462,9 +461,7 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
         }
     }
     if (found) {
-        if (m_infoStep == 3 && !value.isEmpty()) m_pendingModel = value;
-        else if (m_infoStep == 4 && !value.isEmpty()) m_pendingVersion = value;
-        else if (m_infoStep == 0 && !value.isEmpty()) m_pendingDevice = value;
+        if (m_infoStep == 0 && !value.isEmpty()) m_pendingDevice = value;
         else if (m_infoStep == 1) {
             if (value == "a" || value == "_a") m_pendingSlot = "a";
             else if (value == "b" || value == "_b") m_pendingSlot = "b";
@@ -478,9 +475,10 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
         }
     }
     if (m_infoStep == 2) {
-        // Publish the legacy fields promptly: slow model/version reads must not
-        // delay projection consumers. All five detection fields publish together.
-        const QString info = QString("代号:%1\n分区:%2\n解锁:%3").arg(m_pendingDevice, m_pendingSlot, m_pendingUnlock);
+        // Keep the compact legacy snapshot for existing consumers while the
+        // detection panel uses the dedicated three-field details signal.
+        const QString info = QString("代号:%1\n分区:%2\n解锁:%3")
+                                  .arg(m_pendingDevice, m_pendingSlot, m_pendingUnlock);
         if (info != m_deviceInfo) {
             m_deviceInfo = info;
             const quint64 generation = m_infoGeneration;
@@ -488,14 +486,10 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
             if (!m_infoQueryActive || generation != m_infoGeneration) return;
         }
     }
-    const int finalStep = m_infoMode == ADB ? 4 : 2;
-    if (m_infoStep < finalStep) { startInfoStep(m_infoStep + 1); return; }
+    if (m_infoStep < 2) { startInfoStep(m_infoStep + 1); return; }
     m_infoQueryActive = false;
-    // Fastboot does not provide a standard model/Android version property.
-    // Do not mistake its product codename for a model, or retain another device's data.
-    const QString version = m_pendingVersion == QStringLiteral("未知") ? m_pendingVersion : "Android " + m_pendingVersion;
-    const QString details = QString("设备型号：%1\n设备代号：%2\n系统版本：%3\n活动分区：%4\n解锁状态：%5")
-                                .arg(m_pendingModel, m_pendingDevice, version, m_pendingSlot, m_pendingUnlock);
+    const QString details = QString("设备代号：%1\n活动分区：%2\n解锁状态：%3")
+                                .arg(m_pendingDevice, m_pendingSlot, m_pendingUnlock);
     if (details != m_deviceDetails) {
         m_deviceDetails = details;
         emit deviceDetailsUpdated(details);

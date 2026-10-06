@@ -34,6 +34,7 @@ private slots:
     void onDeviceModeChanged(DeviceManager::DeviceMode mode);
     void onDeviceInfoUpdated(const QString &info);
     void restoreOpacity();
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -51,6 +52,7 @@ private:
     void releaseOperationProcess(QProcess *process);
     void setupUI();
     void updateUIForMode(DeviceManager::DeviceMode mode);
+    void showDeviceDetails();
     void flashPartition(const QString &partition);
     void performFlash(const QString &partition, const QString &imagePath);
     void waitForFastbootMode();

@@ -107,8 +107,6 @@ private:
     int m_infoStep = 0;
 
     // 异步设备信息查询中间变量
-    QString m_pendingModel;
-    QString m_pendingVersion;
     QString m_pendingDevice;
     QString m_pendingSlot;
     QString m_pendingUnlock;

@@ -4,6 +4,7 @@
 #include "resourceextractor.h"
 #include "uihelper.h"
 #include "devicemanager.h"
+
 #include <QScreen>
 #include <QGuiApplication>
 #include <QFile>
@@ -18,7 +19,74 @@
 #include <QMoveEvent>
 #include <QCloseEvent>
 #include <QPainter>
+#include <QDialog>
+#include <QTextEdit>
+#include <QDialogButtonBox>
+#include <QClipboard>
+#include <QApplication>
+#include <QEvent>
 
+namespace {
+class DeviceDetailsDialog final : public QDialog
+{
+public:
+    explicit DeviceDetailsDialog(const QString &details, QWidget *parent = nullptr)
+        : QDialog(parent)
+    {
+        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setModal(true);
+        setFixedSize(360, 230);
+
+        auto *surface = new QWidget(this);
+        surface->setObjectName(QStringLiteral("deviceDetailsSurface"));
+        auto *outer = new QVBoxLayout(this);
+        outer->setContentsMargins(0, 0, 0, 0);
+        outer->addWidget(surface);
+        auto *layout = new QVBoxLayout(surface);
+        layout->setContentsMargins(18, 15, 18, 15);
+        layout->setSpacing(10);
+
+        auto *title = new QLabel(QStringLiteral("设备信息"), surface);
+        title->setAlignment(Qt::AlignCenter);
+        title->setFixedHeight(24);
+        title->setObjectName(QStringLiteral("deviceDetailsTitle"));
+        layout->addWidget(title);
+
+        auto *editor = new QTextEdit(surface);
+        editor->setObjectName(QStringLiteral("deviceDetailsText"));
+        editor->setReadOnly(true);
+        editor->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+        editor->setPlainText(details);
+        editor->setLineWrapMode(QTextEdit::NoWrap);
+        layout->addWidget(editor, 1);
+
+        auto *buttons = new QDialogButtonBox(surface);
+        auto *copy = buttons->addButton(QStringLiteral("复制全部"), QDialogButtonBox::AcceptRole);
+        auto *close = buttons->addButton(QStringLiteral("关闭"), QDialogButtonBox::RejectRole);
+        copy->setObjectName(QStringLiteral("copyAllButton"));
+        close->setObjectName(QStringLiteral("closeButton"));
+        connect(copy, &QPushButton::clicked, this, [editor]() {
+            QApplication::clipboard()->setText(editor->toPlainText());
+            editor->selectAll();
+        });
+        connect(close, &QPushButton::clicked, this, &QDialog::reject);
+        layout->addWidget(buttons);
+
+        setStyleSheet(QStringLiteral(
+            "QWidget#deviceDetailsSurface { background:#FFFFFF; border:1px solid #D6E2EE; border-radius:12px; }"
+            "QLabel#deviceDetailsTitle { color:#2c3e50; font-size:15px; font-weight:bold; background:transparent; }"
+            "QTextEdit#deviceDetailsText { color:#2c3e50; background:#F3F7FC; border:1px solid #D6E2EE; border-radius:8px; padding:8px; font-size:12px; }"
+            "QDialogButtonBox QPushButton { background:#649EB3; color:white; border:1px solid #649EB3; border-radius:7px; min-width:76px; min-height:28px; padding:3px 10px; font-size:12px; }"
+            "QDialogButtonBox QPushButton:hover { background:#578FA6; }"
+            "QDialogButtonBox QPushButton:pressed { background:#477F96; }"));
+    }
+};
+}
+#include "processmanager.h"
+#include "resourceextractor.h"
+#include "uihelper.h"
+#include "devicemanager.h"
 DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     : QWidget(parent)
     , currentProcess(nullptr)
@@ -223,6 +291,8 @@ void DeviceCheckWindow::setupUI()
     infoLabel = new QLabel("等待设备", statusCard);
     infoLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);  // 左对齐，顶部对齐
     infoLabel->setWordWrap(true);
+    infoLabel->setCursor(Qt::PointingHandCursor);
+    infoLabel->installEventFilter(this);
     infoLabel->setMinimumHeight(76);  // 容纳多行设备信息，不添加滚动区域
     infoLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     infoLabel->setStyleSheet(
@@ -411,6 +481,25 @@ void DeviceCheckWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHe
     move(x, y);
 }
 
+bool DeviceCheckWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == infoLabel && event->type() == QEvent::MouseButtonDblClick) {
+        if (DeviceManager::instance()->currentMode() != DeviceManager::None &&
+            !DeviceManager::instance()->getDeviceDetails().isEmpty()) {
+            showDeviceDetails();
+        }
+        return true;
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void DeviceCheckWindow::showDeviceDetails()
+{
+    DeviceDetailsDialog dialog(DeviceManager::instance()->getDeviceDetails(), this);
+    dialog.move(frameGeometry().center() - dialog.rect().center());
+    dialog.exec();
+}
+
 void DeviceCheckWindow::onDeviceModeChanged(DeviceManager::DeviceMode mode)
 {
     updateUIForMode(mode);
@@ -425,6 +514,7 @@ void DeviceCheckWindow::onDeviceInfoUpdated(const QString &info)
 void DeviceCheckWindow::updateUIForMode(DeviceManager::DeviceMode mode)
 {
     const bool connected = mode != DeviceManager::None;
+    infoLabel->setToolTip(QStringLiteral("双击查看设备信息并复制"));
     statusLabel->setText(mode == DeviceManager::ADB ? "ADB 模式" :
                          mode == DeviceManager::Fastboot ? "Fastboot 模式" : "未连接");
     if (!connected) {

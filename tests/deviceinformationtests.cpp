@@ -14,6 +14,9 @@
 #include <QTemporaryDir>
 #include <QScrollArea>
 #include <QFontDatabase>
+#include <QTextEdit>
+#include <QPushButton>
+#include <QClipboard>
 #include <QUuid>
 #include <QtTest>
 #include <cstdio>
@@ -38,8 +41,8 @@ QString snapshot(const QString &device = "alpha", const QString &slot = "a", con
 }
 QString details(const QString &model = "Model A", const QString &device = "alpha", const QString &version = "Android 16",
                 const QString &slot = "a", const QString &unlock = QStringLiteral("已解锁")) {
-    return QStringLiteral("设备型号：%1\n设备代号：%2\n系统版本：%3\n活动分区：%4\n解锁状态：%5")
-        .arg(model, device, version, slot, unlock);
+    Q_UNUSED(model); Q_UNUSED(version);
+    return QStringLiteral("设备代号：%1\n活动分区：%2\n解锁状态：%3").arg(device, slot, unlock);
 }
 QStringList audit() {
     QStringList records;
@@ -221,9 +224,8 @@ private slots:
         QCOMPARE(window.codenameLabel->text(), QStringLiteral("手机代号: alpha"));
         QCOMPARE(window.slotLabel->text(), QStringLiteral("活动分区: a"));
         QCOMPARE(window.unlockLabel->text(), QStringLiteral("解锁状态: 已解锁"));
-        // The shared detection snapshot also reads model/version once.
         QTRY_VERIFY(!manager->m_infoQueryActive);
-        QCOMPARE(queryCount(slowProperty), 2);
+        QCOMPARE(queryCount(slowProperty), 1);
     }
     void projectionReplacementAndDisconnectRejectStaleResults() {
         setting("ro.build.version.release.delay", 1300);
@@ -335,68 +337,33 @@ private slots:
         for (auto button : buttons) QVERIFY(!button->isEnabled());
         window.operationInProgress = false;
     }
-    void detectionFiveFieldsFromRealQueries() {
+    void detectionDetailsContainOnlyRequestedFields() {
         DeviceCheckWindow window;
         QTRY_COMPARE(window.infoLabel->text(), details());
-        QCOMPARE(manager->getDeviceDetails(), details());
-        QCOMPARE(window.infoLabel->text().split('\n').size(), 5);
-        window.setPosition(500, 100, 360);
-        window.show(); QCoreApplication::processEvents();
-        QVERIFY(window.infoLabel->height() >= window.infoLabel->heightForWidth(window.infoLabel->width()));
-        QVERIFY(window.findChildren<QScrollArea *>().isEmpty());
-        QCOMPARE(queryCount("ro.product.model"), 1);
-        QCOMPARE(queryCount("ro.build.version.release"), 1);
-        freezePolling();
-        QSignalSpy changed(manager, &DeviceManager::deviceDetailsUpdated);
-        setting("ro.product.model.value", "Updated Model");
-        setting("ro.build.version.release.value", "18");
-        manager->updateDeviceInfo();
-        QTRY_COMPARE(window.infoLabel->text(), details("Updated Model", "alpha", "Android 18"));
-        QCOMPARE(changed.size(), 1);
-        QCOMPARE(manager->getDeviceInfo(), snapshot()); // Legacy consumer remains compatible.
+        QCOMPARE(window.infoLabel->text().split('\n').size(), 3);
+        QVERIFY(!window.infoLabel->text().contains(QStringLiteral("设备型号")));
+        QVERIFY(!window.infoLabel->text().contains(QStringLiteral("系统版本")));
+        QCOMPARE(queryCount("ro.product.model"), 0);
+        QCOMPARE(queryCount("ro.build.version.release"), 0);
     }
-    void detectionUnknownModelAndVersion_data() {
-        QTest::addColumn<QString>("property");
-        QTest::addColumn<QString>("value");
-        QTest::addColumn<int>("code");
-        QTest::addColumn<int>("delay");
-        for (const QString &property : {QString("ro.product.model"), QString("ro.build.version.release")}) {
-            QTest::newRow(qPrintable(property + "-failed")) << property << "fabricated" << 1 << 0;
-            QTest::newRow(qPrintable(property + "-empty")) << property << "" << 0 << 0;
-            QTest::newRow(qPrintable(property + "-multiline")) << property << "value\nerror" << 0 << 0;
-            QTest::newRow(qPrintable(property + "-timeout")) << property << "fabricated" << 0 << 1500;
-        }
-    }
-    void detectionUnknownModelAndVersion() {
-        QFETCH(QString, property); QFETCH(QString, value); QFETCH(int, code); QFETCH(int, delay);
-        manager->m_infoTimer->setInterval(300);
-        setting(property + ".value", value); setting(property + ".code", code); setting(property + ".delay", delay);
+    void detectionPopupCanCopyRequestedFields() {
         DeviceCheckWindow window;
-        const bool modelFailed = property == "ro.product.model";
-        QTRY_COMPARE(window.infoLabel->text(), details(modelFailed ? QStringLiteral("未知") : "Model A", "alpha",
-                                                      modelFailed ? "Android 16" : QStringLiteral("未知")));
-    }
-    void detectionSlowDetailsRejectReplacementAndDisconnect() {
-        setting("ro.product.model.delay", 1200);
-        DeviceCheckWindow window;
-        QTRY_COMPARE(manager->m_infoStep, 3);
-        freezePolling(); setting("ro.product.model.delay", 0); select(DeviceManager::ADB, "second");
-        QCOMPARE(window.infoLabel->text(), QStringLiteral("获取中..."));
-        QTRY_COMPARE(window.infoLabel->text(), details("Model B", "beta", "Android 17"));
-        QTest::qWait(1300);
-        QCOMPARE(window.infoLabel->text(), details("Model B", "beta", "Android 17"));
-        setting("ro.build.version.release.delay", 1200); manager->updateDeviceInfo();
-        QTRY_COMPARE(manager->m_infoStep, 4);
-        manager->setDetectedDevice(DeviceManager::None, QString());
-        QTest::qWait(1300);
-        QVERIFY(manager->getDeviceDetails().isEmpty());
-        QCOMPARE(window.infoLabel->text(), QStringLiteral("等待设备"));
-    }
-    void detectionFastbootDoesNotReuseAdbModel() {
-        DeviceCheckWindow window; QTRY_COMPARE(window.infoLabel->text(), details()); freezePolling();
-        select(DeviceManager::Fastboot, "first");
-        QCOMPARE(window.infoLabel->text(), QStringLiteral("获取中..."));
-        QTRY_COMPARE(window.infoLabel->text(), details(QStringLiteral("未知"), "alpha", QStringLiteral("未知")));
+        QTRY_COMPARE(window.infoLabel->text(), details());
+        window.show();
+        bool copied = false;
+        QTimer::singleShot(100, [&copied] {
+            auto *dialog = QApplication::activeModalWidget();
+            if (!dialog) return;
+            auto *editor = dialog->findChild<QTextEdit*>(QStringLiteral("deviceDetailsText"));
+            auto *copy = dialog->findChild<QPushButton*>(QStringLiteral("copyAllButton"));
+            if (editor && copy) {
+                copy->click();
+                copied = QApplication::clipboard()->text() == details();
+            }
+            dialog->close();
+        });
+        QTest::mouseDClick(window.infoLabel, Qt::LeftButton);
+        QVERIFY(copied);
     }
     void detectionReplacementShowsFetchingNotOldDevice() {
         DeviceCheckWindow window; QTRY_COMPARE(window.infoLabel->text(), details()); freezePolling();
