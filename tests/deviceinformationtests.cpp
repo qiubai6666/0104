@@ -346,6 +346,138 @@ private slots:
         QCOMPARE(queryCount("ro.product.model"), 0);
         QCOMPARE(queryCount("ro.build.version.release"), 0);
     }
+    void extendedTimeoutDoesNotReuseRunningProcess_data() {
+        QTest::addColumn<QString>("command");
+        for (const QString &command : QStringList{"getprop", "uname", "getenforce", "proc.version"})
+            QTest::newRow(qPrintable(command)) << command;
+    }
+    void extendedTimeoutDoesNotReuseRunningProcess() {
+        QFETCH(QString, command);
+        setting(command + ".delay", 10000);
+        select();
+        const int step = QStringList{"getprop", "uname", "getenforce", "proc.version"}.indexOf(command) + 3;
+        QTRY_COMPARE(manager->m_infoStep, step);
+        QTRY_COMPARE(manager->m_infoProcess->state(), QProcess::Running);
+        QTRY_COMPARE(queryCount(command == "proc.version" ? "/proc/version" : command), command == "getprop" ? 4 : 1);
+        // Exercise the actual timeout callback without timing out unrelated
+        // commands on a busy build machine.
+        QVERIFY(QMetaObject::invokeMethod(manager->m_infoTimer, "timeout", Qt::DirectConnection));
+        QTRY_VERIFY_WITH_TIMEOUT(!manager->m_infoQueryActive, 12000);
+        const QString info = manager->getExtendedDeviceDetails();
+        QVERIFY(info.contains(QStringLiteral("设备代号：alpha\n")));
+        QVERIFY(info.contains(QStringLiteral("内核版本：") +
+                              (command == "uname" ? QStringLiteral("未知") : QStringLiteral("6.1.0-orange")) + '\n'));
+        QVERIFY(info.contains(QStringLiteral("SELinux：") +
+                              (command == "getenforce" ? QStringLiteral("严格模式") : QStringLiteral("宽容模式"))));
+        QVERIFY(info.contains(QStringLiteral("构建日期：") +
+                              (command == "proc.version" ? QStringLiteral("Mon Oct  6 10:00:00 CST 2026")
+                                                         : QStringLiteral("#1 SMP Tue Oct 6 10:00:00 CST 2026")) + '\n'));
+        QVERIFY(info.contains(QStringLiteral("安卓版本：") +
+                              (command == "getprop" ? QStringLiteral("未知") : QStringLiteral("16")) + '\n'));
+        QTest::qWait(200);
+        QCOMPARE(manager->getExtendedDeviceDetails(), info);
+        QCOMPARE(manager->m_infoProcess->state(), QProcess::NotRunning);
+        QCOMPARE(queryCount("uname"), 1);
+        QCOMPARE(queryCount("getenforce"), 1);
+        QCOMPARE(queryCount("/proc/version"), 1);
+    }
+    void failedExtendedPropertiesDoNotReusePreviousSnapshot_data() {
+        QTest::addColumn<bool>("replacement");
+        QTest::addColumn<bool>("timeout");
+        QTest::newRow("failed-refresh") << false << false;
+        QTest::newRow("failed-replacement") << true << false;
+        QTest::newRow("timeout-refresh") << false << true;
+        QTest::newRow("timeout-replacement") << true << true;
+    }
+    void failedExtendedPropertiesDoNotReusePreviousSnapshot() {
+        QFETCH(bool, replacement);
+        QFETCH(bool, timeout);
+        select();
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        QVERIFY(manager->getExtendedDeviceDetails().contains(QStringLiteral("版本信息：OrangeOS-16")));
+        if (timeout) {
+            setting("getprop.delay", 10000);
+        } else {
+            setting("getprop.code", 1);
+        }
+        select(DeviceManager::ADB, replacement ? "second" : "first");
+        if (timeout) {
+            QTRY_COMPARE(manager->m_infoStep, 3);
+            QTRY_COMPARE(manager->m_infoProcess->state(), QProcess::Running);
+            QTRY_COMPARE(queryCount("getprop"), 8);
+            QVERIFY(QMetaObject::invokeMethod(manager->m_infoTimer, "timeout", Qt::DirectConnection));
+        }
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        const QString info = manager->getExtendedDeviceDetails();
+        QVERIFY(info.contains(QStringLiteral("设备代号：") + (replacement ? "beta" : "alpha") + '\n'));
+        QVERIFY(info.contains(QStringLiteral("设备序列号：") + (replacement ? "second" : "first") + '\n'));
+        QVERIFY(info.contains(QStringLiteral("设备名称：未知\n")));
+        QVERIFY(info.contains(QStringLiteral("安卓版本：未知\n")));
+        QVERIFY(info.contains(QStringLiteral("版本信息：未知\n")));
+        QVERIFY(!info.contains("OrangeOS-16"));
+        QCOMPARE(manager->m_infoProcess->state(), QProcess::NotRunning);
+    }
+    void canceledExtendedQueryCannotPublishForReplacement() {
+        setting("uname.delay", 1000);
+        select();
+        QTRY_COMPARE(manager->m_infoStep, 4);
+        QTRY_COMPARE(manager->m_infoProcess->state(), QProcess::Running);
+        QSignalSpy spy(manager, &DeviceManager::extendedDeviceDetailsUpdated);
+        setting("uname.delay", 0);
+        select(DeviceManager::ADB, "second");
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        const QString info = manager->getExtendedDeviceDetails();
+        QVERIFY(info.contains(QStringLiteral("设备代号：beta\n")));
+        QTest::qWait(1100);
+        QCOMPARE(manager->getExtendedDeviceDetails(), info);
+        for (const auto &args : spy)
+            QVERIFY(!args.at(0).toString().contains(QStringLiteral("设备代号：alpha\n")));
+    }
+    void basicSnapshotObserverCanCancelBeforeExtendedQuery() {
+        QObject observer;
+        connect(manager, &DeviceManager::deviceDetailsUpdated, &observer, [this](const QString &value) {
+            if (!value.isEmpty()) manager->pauseMonitoring();
+        });
+        select();
+        QTRY_VERIFY(manager->m_isPaused);
+        QTest::qWait(500);
+        QVERIFY(!manager->m_infoQueryActive);
+        QVERIFY(manager->getExtendedDeviceDetails().isEmpty());
+        QCOMPARE(queryCount("getprop"), 3);
+        QCOMPARE(queryCount("uname"), 0);
+        QCOMPARE(manager->m_infoProcess->state(), QProcess::NotRunning);
+    }
+    void extendedSnapshotObserverCanStartReplacementQuery() {
+        QObject observer;
+        bool replaced = false;
+        connect(manager, &DeviceManager::extendedDeviceDetailsUpdated, &observer, [this, &replaced](const QString &value) {
+            if (replaced || value.isEmpty()) return;
+            replaced = true;
+            select(DeviceManager::ADB, "second");
+        });
+        select();
+        QTRY_VERIFY(replaced);
+        QTRY_VERIFY(manager->getExtendedDeviceDetails().contains(QStringLiteral("设备代号：beta\n")));
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        QCOMPARE(manager->deviceSerial(), QStringLiteral("second"));
+    }
+    void pausedExtendedQueryCannotAdvanceAndResumesCleanly() {
+        setting("getenforce.delay", 1000);
+        select();
+        QTRY_COMPARE(manager->m_infoStep, 5);
+        QTRY_COMPARE(manager->m_infoProcess->state(), QProcess::Running);
+        QSignalSpy spy(manager, &DeviceManager::extendedDeviceDetailsUpdated);
+        manager->pauseMonitoring();
+        QTest::qWait(1100);
+        QCOMPARE(spy.count(), 0);
+        QCOMPARE(queryCount("/proc/version"), 0);
+        QVERIFY(!manager->m_infoQueryActive);
+        setting("getenforce.delay", 0);
+        manager->resumeMonitoring();
+        manager->updateDeviceInfo();
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        QVERIFY(manager->getExtendedDeviceDetails().contains(QStringLiteral("SELinux：宽容模式")));
+    }
     void detectionPopupShowsExtendedDetailsAndTogglesClosed() {
         DeviceCheckWindow window;
         QTRY_COMPARE(window.infoLabel->text(), details());
@@ -399,18 +531,25 @@ int helperMain(QCoreApplication &app) {
         else if (mode == "fastboot") std::puts("first\tfastboot");
         return 0;
     }
-    if (base == "adb" && args.value(0) == "shell" && args.value(1) == "getprop" && args.size() == 2) {
-        const bool second = serial != "first";
-        const QString model = second ? "Model B" : "Model A";
-        const QString device = second ? "beta" : "alpha";
-        const QString version = second ? "17" : "16";
-        std::printf("[ro.serialno]: [%s]\n[ro.product.model]: [%s]\n[ro.product.device]: [%s]\n[ro.build.version.release]: [%s]\n[ro.boot.verifiedbootstate]: [orange]\n[ro.build.display.id]: [OrangeOS-%s]\n[ro.build.date]: [Mon Oct  6 10:00:00 CST 2026]\n[ro.boot.slot_suffix]: [_a]\n[ro.soc.manufacturer]: [Qualcomm]\n[ro.board.platform]: [sm8650]\n[ro.product.board]: [kalama]\n[ro.boot.selinux]: [Enforcing]\n", serial.toLocal8Bit().constData(), model.toLocal8Bit().constData(), device.toLocal8Bit().constData(), version.toLocal8Bit().constData(), version.toLocal8Bit().constData());
-        return 0;
-    }
-    const QString key = base == "adb" ? args.value(2) : args.value(1);
     const bool second = serial != "first";
+    QString key = base == "adb" ? args.value(2) : args.value(1);
     QString value;
-    if (key == "ro.product.device" || key == "product") value = second ? "beta" : "alpha";
+    if (base == "adb" && args.value(0) == "shell" && args.value(1) == "getprop" && args.size() == 2) {
+        key = "getprop";
+        value = QStringLiteral(
+            "[ro.serialno]: [%1]\n[ro.product.model]: [%2]\n[ro.product.device]: [%3]\n"
+            "[ro.build.version.release]: [%4]\n[ro.boot.verifiedbootstate]: [orange]\n"
+            "[ro.build.display.id]: [OrangeOS-%4]\n[ro.build.date]: [Mon Oct  6 10:00:00 CST 2026]\n"
+            "[ro.boot.slot_suffix]: [_a]\n[ro.soc.manufacturer]: [Qualcomm]\n"
+            "[ro.board.platform]: [sm8650]\n[ro.product.board]: [kalama]\n[ro.boot.selinux]: [Enforcing]\n")
+            .arg(serial, second ? "Model B" : "Model A", second ? "beta" : "alpha", second ? "17" : "16");
+    } else if (base == "adb" && args.value(0) == "shell" && args.value(1) == "uname") {
+        key = "uname"; value = "6.1.0-orange";
+    } else if (base == "adb" && args.value(0) == "shell" && args.value(1) == "getenforce") {
+        key = "getenforce"; value = "Permissive";
+    } else if (base == "adb" && args.value(0) == "shell" && args.value(1) == "cat") {
+        key = "proc.version"; value = "Linux version 6.1.0-orange #1 SMP Tue Oct 6 10:00:00 CST 2026";
+    } else if (key == "ro.product.device" || key == "product") value = second ? "beta" : "alpha";
     else if (key == "ro.product.model") value = second ? "Model B" : "Model A";
     else if (key == "ro.build.version.release") value = second ? "17" : "16";
     else if (key == "ro.boot.slot_suffix") value = "_a";

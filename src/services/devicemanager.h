@@ -79,7 +79,6 @@ private:
     void cancelInfoQuery();
     void startInfoStep(int step);
     void finishInfoStep(bool success, const QString &output);
-    void startExtendedInfoQuery();
     void finishExtendedInfoQuery(bool success, const QString &output);
     bool isCurrentInfoQuery(quint64 generation, QProcess *process, int step) const;
     explicit DeviceManager(QObject *parent = nullptr);

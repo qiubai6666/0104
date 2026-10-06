@@ -375,6 +375,7 @@ void DeviceManager::cancelInfoQuery()
 {
     ++m_infoGeneration;
     m_infoQueryActive = false;
+    m_pendingExtendedProps.clear();
     m_infoTimer->stop();
     disconnect(m_infoTimer, nullptr, this, nullptr);
     disconnect(m_infoProcess, nullptr, this, nullptr);
@@ -407,6 +408,7 @@ void DeviceManager::updateDeviceInfo()
 
 void DeviceManager::startInfoStep(int step)
 {
+    if (!m_infoQueryActive || m_isPaused || m_currentMode != m_infoMode || m_deviceSerial != m_infoSerial) return;
     m_infoStep = step;
     disconnect(m_infoProcess, nullptr, this, nullptr);
     m_infoProcess->deleteLater();
@@ -420,23 +422,36 @@ void DeviceManager::startInfoStep(int step)
         const bool success = status == QProcess::NormalExit && code == 0;
         const QString output = QString::fromLocal8Bit(m_infoMode == ADB ?
             process->readAllStandardOutput() : process->readAllStandardError() + process->readAllStandardOutput());
-        finishInfoStep(success, output);
+        if (step < 3) finishInfoStep(success, output);
+        else finishExtendedInfoQuery(success, output);
     });
     connect(process, &QProcess::errorOccurred, this,
             [this, process, generation, step](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart && isCurrentInfoQuery(generation, process, step))
-            finishInfoStep(false, QString());
+        if (error == QProcess::FailedToStart && isCurrentInfoQuery(generation, process, step)) {
+            if (step < 3) finishInfoStep(false, QString());
+            else finishExtendedInfoQuery(false, QString());
+        }
     });
     disconnect(m_infoTimer, nullptr, this, nullptr);
     connect(m_infoTimer, &QTimer::timeout, this, [this, process, generation, step]() {
-        if (isCurrentInfoQuery(generation, process, step)) finishInfoStep(false, QString());
+        if (!isCurrentInfoQuery(generation, process, step)) return;
+        if (step < 3) finishInfoStep(false, QString());
+        else finishExtendedInfoQuery(false, QString());
     });
     QStringList arguments;
     if (!m_infoSerial.isEmpty()) arguments << "-s" << m_infoSerial;
     const QStringList adbProperties = {"ro.product.device", "ro.boot.slot_suffix", "ro.boot.verifiedbootstate"};
     const QStringList fastbootVariables = {"product", "current-slot", "unlocked"};
-    if (m_infoMode == ADB) arguments << "shell" << "getprop" << adbProperties.at(step);
-    else arguments << "getvar" << fastbootVariables.at(step);
+    if (m_infoMode == ADB) {
+        arguments << "shell";
+        if (step < 3) arguments << "getprop" << adbProperties.at(step);
+        else if (step == 3) arguments << "getprop";
+        else if (step == 4) arguments << "uname" << "-r";
+        else if (step == 5) arguments << "getenforce";
+        else arguments << "cat" << "/proc/version";
+    } else {
+        arguments << "getvar" << fastbootVariables.at(step);
+    }
     m_infoTimer->start();
     process->start(m_infoMode == ADB ? ResourceExtractor::getAdbPath() : ResourceExtractor::getFastbootPath(), arguments);
 }
@@ -444,6 +459,7 @@ void DeviceManager::startInfoStep(int step)
 void DeviceManager::finishInfoStep(bool success, const QString &output)
 {
     m_infoTimer->stop();
+    disconnect(m_infoTimer, nullptr, this, nullptr);
     disconnect(m_infoProcess, nullptr, this, nullptr);
     if (m_infoProcess->state() != QProcess::NotRunning) {
         m_infoProcess->kill();
@@ -495,56 +511,28 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
                                 .arg(m_pendingDevice, m_pendingSlot, m_pendingUnlock);
     if (details != m_deviceDetails) {
         m_deviceDetails = details;
+        const quint64 generation = m_infoGeneration;
         emit deviceDetailsUpdated(details);
+        if (!m_infoQueryActive || generation != m_infoGeneration) return;
     }
     if (m_infoMode == ADB) {
-        startExtendedInfoQuery();
+        startInfoStep(3);
         return;
     }
     m_infoQueryActive = false;
 }
 
-void DeviceManager::startExtendedInfoQuery()
+void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
 {
-    // 3=getprop, 4=uname -r, 5=getenforce, 6=cat /proc/version.
-    m_infoStep = 3;
+    m_infoTimer->stop();
+    disconnect(m_infoTimer, nullptr, this, nullptr);
+    // Retire the old command before advancing, including on timeout. Each next
+    // step owns a fresh process, so late output cannot become another field.
     disconnect(m_infoProcess, nullptr, this, nullptr);
     if (m_infoProcess->state() != QProcess::NotRunning) {
         m_infoProcess->kill();
         m_infoProcess->waitForFinished(1000);
     }
-    const quint64 generation = m_infoGeneration;
-    connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, generation](int code, QProcess::ExitStatus status) {
-        if (!m_infoQueryActive || generation != m_infoGeneration || m_infoStep != 3 ||
-            m_currentMode != ADB || m_deviceSerial != m_infoSerial) return;
-        const QString output = QString::fromLocal8Bit(m_infoProcess->readAllStandardOutput());
-        finishExtendedInfoQuery(status == QProcess::NormalExit && code == 0, output);
-    });
-    connect(m_infoProcess, &QProcess::errorOccurred, this,
-            [this, generation](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart && m_infoQueryActive && generation == m_infoGeneration && m_infoStep == 3)
-            finishExtendedInfoQuery(false, QString());
-    });
-    disconnect(m_infoTimer, nullptr, this, nullptr);
-    connect(m_infoTimer, &QTimer::timeout, this, [this, generation]() {
-        if (m_infoQueryActive && generation == m_infoGeneration && m_infoStep == 3)
-            finishExtendedInfoQuery(false, QString());
-    });
-    QStringList arguments;
-    if (!m_infoSerial.isEmpty()) arguments << "-s" << m_infoSerial;
-    arguments << "shell" << "getprop";
-    m_infoTimer->start();
-    m_infoProcess->start(ResourceExtractor::getAdbPath(), arguments);
-
-    // Store a local helper through a queued property is unnecessary; subsequent
-    // steps are started inline in finishExtendedInfoQuery to preserve lifetime.
-}
-
-void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
-{
-    m_infoTimer->stop();
-    disconnect(m_infoProcess, nullptr, this, nullptr);
     const int step = m_infoStep;
     if (step == 3 && success) {
         m_pendingExtendedProps = output;
@@ -566,38 +554,14 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
     } else if (step == 5) {
         const QString value = success ? output.trimmed() : QString();
         if (!value.isEmpty()) m_pendingSelinuxStatus = value;
-    } else if (step == 6) {
+    } else if (step == 6 && success && !output.trimmed().isEmpty()) {
         const QString value = success ? output.trimmed() : QString();
         const QRegularExpression full(QStringLiteral("#\\d+[^\\n]*\\d{2}:\\d{2}:\\d{2}[^\\n]*\\d{4}"));
         const auto match = full.match(value);
         m_pendingBuildDate = match.hasMatch() ? match.captured(0).trimmed() : value;
     }
     if (step < 6) {
-        // Reuse the same process and timer for the next command.
-        const int next = step + 1;
-        m_infoStep = next;
-        const quint64 generation = m_infoGeneration;
-        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                [this, generation, next](int code, QProcess::ExitStatus status) {
-            if (!m_infoQueryActive || generation != m_infoGeneration || m_infoStep != next || m_currentMode != ADB || m_deviceSerial != m_infoSerial) return;
-            finishExtendedInfoQuery(status == QProcess::NormalExit && code == 0,
-                                    QString::fromLocal8Bit(m_infoProcess->readAllStandardOutput()));
-        });
-        connect(m_infoProcess, &QProcess::errorOccurred, this, [this, generation, next](QProcess::ProcessError error) {
-            if (error == QProcess::FailedToStart && m_infoQueryActive && generation == m_infoGeneration && m_infoStep == next)
-                finishExtendedInfoQuery(false, QString());
-        });
-        connect(m_infoTimer, &QTimer::timeout, this, [this, generation, next]() {
-            if (m_infoQueryActive && generation == m_infoGeneration && m_infoStep == next) finishExtendedInfoQuery(false, QString());
-        });
-        QStringList args;
-        if (!m_infoSerial.isEmpty()) args << "-s" << m_infoSerial;
-        args << "shell";
-        if (next == 4) args << "uname" << "-r";
-        else if (next == 5) args << "getenforce";
-        else args << "cat" << "/proc/version";
-        m_infoTimer->start();
-        m_infoProcess->start(ResourceExtractor::getAdbPath(), args);
+        startInfoStep(step + 1);
         return;
     }
     const QString props = m_pendingExtendedProps;
@@ -639,9 +603,10 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
         .arg(m_pendingSelinuxStatus == QStringLiteral("Enforcing") ? QStringLiteral("严格模式") :
              m_pendingSelinuxStatus == QStringLiteral("Permissive") ? QStringLiteral("宽容模式") :
              m_pendingSelinuxStatus == QStringLiteral("Disabled") ? QStringLiteral("已禁用") : m_pendingSelinuxStatus);
+    // Finish the batch before notifying observers; a slot may start a new one.
+    m_infoQueryActive = false;
     if (details != m_extendedDeviceDetails) {
         m_extendedDeviceDetails = details;
         emit extendedDeviceDetailsUpdated(details);
     }
-    m_infoQueryActive = false;
 }
