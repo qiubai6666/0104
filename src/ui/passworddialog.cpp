@@ -85,6 +85,7 @@ void PasswordDialog::setupUI()
     buttonLayout->setSpacing(8);
 
     QPushButton *cancelButton = new QPushButton("取消", container);
+    cancelButton->setAutoDefault(false);
     cancelButton->setFixedHeight(32);
     cancelButton->setCursor(Qt::PointingHandCursor);
     cancelButton->setStyleSheet(R"(
@@ -106,6 +107,8 @@ void PasswordDialog::setupUI()
     )");
 
     QPushButton *okButton = new QPushButton("确定", container);
+    // 统一由默认确定按钮处理回车，避免校验后继续触发取消或重复校验。
+    okButton->setDefault(true);
     okButton->setFixedHeight(32);
     okButton->setCursor(Qt::PointingHandCursor);
     okButton->setStyleSheet(R"(
@@ -150,7 +153,6 @@ void PasswordDialog::setupUI()
     // 连接信号
     connect(okButton, &QPushButton::clicked, this, &PasswordDialog::onOkClicked);
     connect(cancelButton, &QPushButton::clicked, this, &QDialog::reject);
-    connect(passwordEdit, &QLineEdit::returnPressed, this, &PasswordDialog::onOkClicked);
 
     // 设置焦点
     passwordEdit->setFocus();

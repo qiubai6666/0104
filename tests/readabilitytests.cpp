@@ -29,6 +29,9 @@ private slots:
     void emptyPasswordDoesNotConsumeAttempt();
     void incorrectPasswordCanBeRetried();
     void threeIncorrectPasswordsRejectDialog();
+    void keyboardPasswordSubmission_data();
+    void keyboardPasswordSubmission();
+    void cancelButtonStillRejectsDialog();
 };
 
 void ReadabilityTests::embeddedToolsMatchSourceFiles()
@@ -172,5 +175,82 @@ void ReadabilityTests::threeIncorrectPasswordsRejectDialog()
     QCOMPARE(dialog.result(), int(QDialog::Rejected));
 }
 
+void ReadabilityTests::keyboardPasswordSubmission_data()
+{
+    QTest::addColumn<int>("key");
+    QTest::addColumn<bool>("emptyFirst");
+    QTest::addColumn<bool>("exhaustAttempts");
+    for (int key : {int(Qt::Key_Return), int(Qt::Key_Enter)}) {
+        const QByteArray name = key == Qt::Key_Return ? "return" : "keypad-enter";
+        QTest::newRow((name + "-retry").constData()) << key << false << false;
+        QTest::newRow((name + "-empty-retry").constData()) << key << true << false;
+        QTest::newRow((name + "-three-errors").constData()) << key << false << true;
+    }
+}
+
+void ReadabilityTests::keyboardPasswordSubmission()
+{
+    QFETCH(int, key);
+    QFETCH(bool, emptyFirst);
+    QFETCH(bool, exhaustAttempts);
+    PasswordDialog dialog;
+    QSignalSpy accepted(&dialog, &QDialog::accepted);
+    QSignalSpy rejected(&dialog, &QDialog::rejected);
+    QLineEdit *input = dialog.findChild<QLineEdit *>();
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    dialog.activateWindow();
+    input->setFocus();
+    QTRY_VERIFY(input->hasFocus());
+
+    if (emptyFirst) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            QTest::keyClick(input, Qt::Key(key));
+            QCOMPARE(rejected.count(), 0);
+            QVERIFY(dialog.isVisible());
+        }
+    }
+    for (int attempt = 0; attempt < (exhaustAttempts ? 3 : 2); ++attempt) {
+        input->setText("wrong");
+        QTest::keyClick(input, Qt::Key(key));
+        QCOMPARE(accepted.count(), 0);
+        QCOMPARE(rejected.count(), 0);
+        QVERIFY(dialog.isVisible());
+        if (attempt < 2) {
+            QVERIFY(input->text().isEmpty());
+            QVERIFY(input->hasFocus());
+            bool foundRetryMessage = false;
+            for (QLabel *label : dialog.findChildren<QLabel *>()) {
+                foundRetryMessage |= label->text().contains(
+                    QString("还有 %1 次机会").arg(2 - attempt));
+            }
+            QVERIFY(foundRetryMessage);
+        }
+    }
+    if (exhaustAttempts) {
+        QTRY_COMPARE_WITH_TIMEOUT(rejected.count(), 1, 2500);
+        QVERIFY(!dialog.isVisible());
+    } else {
+        input->setText(DEFAULT_PASSWORD);
+        QTest::keyClick(input, Qt::Key(key));
+        QCOMPARE(accepted.count(), 1);
+        QCOMPARE(rejected.count(), 0);
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+    }
+}
+
+void ReadabilityTests::cancelButtonStillRejectsDialog()
+{
+    PasswordDialog dialog;
+    QSignalSpy rejected(&dialog, &QDialog::rejected);
+    for (QPushButton *button : dialog.findChildren<QPushButton *>()) {
+        if (button->text() == QStringLiteral("取消")) {
+            button->click();
+            QCOMPARE(rejected.count(), 1);
+            return;
+        }
+    }
+    QFAIL("Cannot find cancel button");
+}
 QTEST_MAIN(ReadabilityTests)
 #include "readabilitytests.moc"
