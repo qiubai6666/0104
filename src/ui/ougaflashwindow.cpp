@@ -144,7 +144,7 @@ protected:
         style()->subElementRect(QStyle::SE_CheckBoxIndicator, &opt, this);
     QRect textArea(indicator.right() + 5, 0, 52, height());
     painter.setClipRect(textArea);
-    painter.setPen(isEnabled() ? QColor("#475569") : QColor("#ADB4C0"));
+    painter.setPen(isEnabled() ? QColor("#526579") : QColor("#A9B5C1"));
     const int time = int(clock.elapsed() % 5000);
     const qreal offset =
         time < 800 ? 0 : (time > 4200 ? 87 : (time - 800) * 87.0 / 3400);
@@ -202,8 +202,8 @@ protected:
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     QRectF track = rect().adjusted(0, 0, -1, -1);
-    painter.setBrush(QColor("#F1F3F7"));
-    painter.setPen(QColor("#DCE1E8"));
+    painter.setBrush(QColor("#EEF3F7"));
+    painter.setPen(QColor("#D4DEE7"));
     painter.drawRoundedRect(track, 4, 4);
     qreal ratio =
         maximum() > minimum()
@@ -216,8 +216,8 @@ protected:
       painter.save();
       painter.setClipPath(clip);
       QLinearGradient gradient(track.topLeft(), track.topRight());
-      gradient.setColorAt(0, QColor("#87CEEB"));
-      gradient.setColorAt(1, QColor("#4A90E2"));
+      gradient.setColorAt(0, QColor("#8EA6BA"));
+      gradient.setColorAt(1, QColor("#718CA4"));
       painter.fillRect(QRectF(1, 1, (width() - 2) * ratio, height() - 2),
                        gradient);
       painter.restore();
@@ -265,18 +265,18 @@ protected:
     painter.fillRect(rect(), QColor(255, 255, 255, 170));
     QRectF ring((width() - 150) / 2.0 + 6, (height() - 180) / 2.0 + 6, 138,
                 138);
-    painter.setPen(QPen(QColor("#E2E8F0"), 12));
+    painter.setPen(QPen(QColor("#E0E7EE"), 12));
     painter.drawEllipse(ring);
     QLinearGradient gradient(ring.topLeft(), ring.bottomRight());
-    gradient.setColorAt(0, QColor("#DDB8F7"));
-    gradient.setColorAt(1, QColor("#CA91F3"));
+    gradient.setColorAt(0, QColor("#A8BAC8"));
+    gradient.setColorAt(1, QColor("#718CA4"));
     painter.setPen(QPen(QBrush(gradient), 12, Qt::SolidLine, Qt::RoundCap));
     painter.drawArc(ring, 90 * 16, -percent * 360 * 16 / 100);
     QFont font("Microsoft YaHei UI");
     font.setPixelSize(24);
     font.setWeight(QFont::Bold);
     painter.setFont(font);
-    painter.setPen(QColor("#1E90FF"));
+    painter.setPen(QColor("#627E97"));
     painter.drawText(QRectF(ring.left(), ring.top() + 42, 138, 35),
                      Qt::AlignCenter, QString::number(percent) + "%");
     font.setPixelSize(12);
@@ -288,7 +288,7 @@ protected:
                      fontMetrics().elidedText(detail, Qt::ElideRight, 280));
     font.setPixelSize(18);
     painter.setFont(font);
-    painter.setPen(QColor("#B876DD"));
+    painter.setPen(QColor("#718CA4"));
     painter.drawText(QRectF(ring.left() - 40, ring.bottom() + 14, 218, 28),
                      Qt::AlignCenter,
                      QString("耗时 %1:%2")
@@ -320,42 +320,46 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   setFont(font);
   setStyleSheet(R"(
     QWidget { font-family:"Microsoft YaHei UI"; }
-    OugaFlashWindow { background:#F7F8FC; }
-    QGroupBox { background:white; border:1px solid #E2E6ED; border-radius:8px;
-      margin-top:8px; color:#263142; font-weight:600; font-size:12px; }
+    OugaFlashWindow { background:#F3F6FA; }
+    QGroupBox { background:#FFFFFF; border:1px solid #D9E2EC; border-radius:8px;
+      margin-top:8px; color:#334155; font-weight:600; font-size:12px; }
     QGroupBox::title { subcontrol-origin:margin; subcontrol-position:top left;
-      left:10px; padding:0 5px; background:white; }
-    QPushButton { background:white; color:#475569; border:1px solid #D8DEE8;
+      left:10px; padding:0 5px; background:#FFFFFF; }
+    QPushButton { background:#FFFFFF; color:#526579; border:1px solid #CBD7E2;
       border-radius:6px; font-size:12px; font-weight:400; padding:0 5px; }
-    QPushButton:hover { border-color:#B876DD; background:#F8F3FC; }
-    QPushButton:pressed { background:#F0E7F8; }
-    QPushButton[tone="sky"] { background:#87CEEB; color:white; border-color:#E6E6E6; }
-    QPushButton[tone="purple"] { background:#B876DD; color:white; border-color:#E6E6E6; }
-    QPushButton[tone="repair"] { background:#F8ECFF; border-color:#E6E6E6; }
-    QPushButton[tone="stop"] { background:#F18D96; color:white; border-color:#E6E6E6; }
-    QPushButton:disabled { color:#ADB4C0; border-color:#E2E6ED; }
-    QLineEdit, QComboBox { background:white; color:#64748B; border:1px solid #DDE2EA;
+    QPushButton:hover { border-color:#7892A8; background:#EEF3F7; }
+    QPushButton:pressed { background:#E3EBF1; }
+    QPushButton[tone="sky"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
+    QPushButton[tone="sky"]:hover { background:#627E97; border-color:#627E97; }
+    QPushButton[tone="purple"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
+    QPushButton[tone="purple"]:hover { background:#627E97; border-color:#627E97; }
+    QPushButton[tone="repair"] { background:#E7EEF3; color:#526579; border-color:#C9D7E2; }
+    QPushButton[tone="repair"]:hover { background:#DCE7EF; border-color:#B9CBD9; }
+    QPushButton[tone="stop"] { background:#E5EBF0; color:#596B7D; border-color:#C8D5DF; }
+    QPushButton[tone="stop"]:hover { background:#D9E3EB; border-color:#B8C9D6; }
+    QPushButton:disabled { color:#A9B5C1; border-color:#D9E2EC; }
+    QLineEdit, QComboBox { background:#FFFFFF; color:#526579; border:1px solid #D2DDE7;
       border-radius:3px; padding:0 9px; font-size:12px; font-weight:400; }
-    QLineEdit:focus, QComboBox:focus { border-color:#B876DD; }
-    QComboBox { color:#475569; padding-right:23px; }
+    QLineEdit:focus, QComboBox:focus { border-color:#7892A8; }
+    QComboBox { color:#526579; padding-right:23px; }
     QComboBox::drop-down { border:0; width:22px; }
-    QComboBox QAbstractItemView { background:white; color:#475569;
-      selection-background-color:#F8ECFF; selection-color:#475569; }
-    QCheckBox { color:#475569; font-size:11.5px; font-weight:400; spacing:4px; }
-    QCheckBox:disabled, QLabel:disabled { color:#ADB4C0; }
-    QLabel { color:#475569; font-weight:400; }
-    QTableWidget { background:white; alternate-background-color:#FCFBFD;
-      color:#334155; border:1px solid #E7E9EF; font-size:12px;
-      selection-background-color:#87CEEB; selection-color:#263142; }
-    QTableWidget::item { border-bottom:1px solid #F0F1F5; padding:0 4px; }
-    QTableWidget::item:hover { background:#F6F1FF; }
-    QHeaderView::section { background:#F5F3F8; color:#475569; border:0;
-      border-bottom:1px solid #E7E9EF; font-weight:600; }
-    QPlainTextEdit { background:#FAFBFD; color:#334155; border:0; padding:7px;
+    QComboBox QAbstractItemView { background:#FFFFFF; color:#526579;
+      selection-background-color:#E3EBF1; selection-color:#334155; }
+    QCheckBox { color:#526579; font-size:11.5px; font-weight:400; spacing:4px; }
+    QCheckBox:disabled, QLabel:disabled { color:#A9B5C1; }
+    QLabel { color:#526579; font-weight:400; }
+    QTableWidget { background:#FFFFFF; alternate-background-color:#F8FAFC;
+      color:#334155; border:1px solid #DCE5ED; font-size:12px;
+      selection-background-color:#DCE7EF; selection-color:#334155; }
+    QTableWidget::item { border-bottom:1px solid #EEF2F6; padding:0 4px; }
+    QTableWidget::item:hover { background:#F1F5F8; }
+    QHeaderView::section { background:#EEF3F7; color:#526579; border:0;
+      border-bottom:1px solid #DCE5ED; font-weight:600; }
+    QPlainTextEdit { background:#F8FAFC; color:#334155; border:0; padding:7px;
       font-family:"Cascadia Mono","Microsoft YaHei UI","Consolas";
       font-size:11.75px; font-weight:400; }
-    QScrollBar:vertical { width:8px; background:#FAFBFD; margin:0; }
-    QScrollBar::handle:vertical { background:#D8DEE8; border-radius:4px; min-height:24px; }
+    QScrollBar:vertical { width:8px; background:#F8FAFC; margin:0; }
+    QScrollBar::handle:vertical { background:#C9D5DF; border-radius:4px; min-height:24px; }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
   )");
   auto rootLayout = new QVBoxLayout(this);
@@ -756,26 +760,25 @@ void OugaFlashWindow::log(const QString &message) {
   block.setLineHeight(19, QTextBlockFormat::FixedHeight);
   cursor.setBlockFormat(block);
   QTextCharFormat timestamp;
-  timestamp.setForeground(QColor("#94A3B8"));
+  timestamp.setForeground(QColor("#8A9AAA"));
   cursor.insertText(QDateTime::currentDateTime().toString("[HH:mm:ss ] "),
                     timestamp);
-  QColor color("#334155");
+  QColor color("#526579");
   if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
-      text.contains("FAILED") || text.startsWith("计划已阻止") ||
-      text.startsWith("刷机包对应的机型为"))
-    color = QColor("#DC2626");
+      text.contains("FAILED") || text.startsWith("计划已阻止"))
+    color = QColor("#9A5558");
   else if (text.startsWith("警告") || text.contains("请求停止") ||
-           text.contains("未验证") || text.contains("取消") ||
+           text.startsWith("刷机包对应的机型为") || text.contains("未验证") || text.contains("取消") ||
            text.startsWith("正在判断刷机包对应的机型") ||
            text.startsWith("解析刷机包对应机型失败"))
-    color = QColor("#D97706");
+    color = QColor("#8A6A32");
   else if (text.startsWith("完成：") || text.contains("成功") ||
            text.startsWith("发现 ") || text.startsWith("解包完成") ||
            text.startsWith("已加载 ") || text.endsWith("提取完成！"))
-    color = QColor("#16A34A");
+    color = QColor("#4F7F5B");
   else if (text.startsWith("开始") || text.startsWith("加载") ||
            text.startsWith("已选择"))
-    color = QColor("#2563EB");
+    color = QColor("#657F96");
   QTextCharFormat content;
   content.setForeground(color);
   cursor.insertText(text, content);
@@ -793,7 +796,7 @@ void OugaFlashWindow::payloadLogStart(const QString &name) {
     cursor.setPosition(block.position() + prefix);
     cursor.setPosition(block.position() + prefix + 4, QTextCursor::KeepAnchor);
     QTextCharFormat format;
-    format.setForeground(QColor("#9333EA"));
+    format.setForeground(QColor("#718CA4"));
     format.setFontWeight(QFont::Bold);
     cursor.mergeCharFormat(format);
   }
@@ -804,7 +807,7 @@ void OugaFlashWindow::payloadLogFinish(const QString &name, bool success) {
   QTextCursor cursor(block);
   cursor.movePosition(QTextCursor::EndOfBlock);
   QTextCharFormat format;
-  format.setForeground(QColor(success ? "#16A34A" : "#DC2626"));
+  format.setForeground(QColor(success ? "#4F7F5B" : "#9A5558"));
   format.setFontWeight(QFont::Bold);
   cursor.insertText(success ? " OK" : " 失败", format);
   m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());

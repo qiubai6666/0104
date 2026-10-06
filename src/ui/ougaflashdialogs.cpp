@@ -37,16 +37,16 @@ QString selectItem(QWidget *parent, const QString &title, const QString &prompt,
   auto layout = new QVBoxLayout(&dialog);
   layout->setContentsMargins(18, 18, 18, 18);
   auto heading = new QLabel(title);
-  heading->setStyleSheet("font-size:17px; font-weight:600; color:#263142;");
+  heading->setStyleSheet("font-size:17px; font-weight:600; color:#334155;");
   layout->addWidget(heading);
   layout->addWidget(new QLabel(prompt));
   auto list = new QListWidget;
   list->addItems(items);
   list->setStyleSheet(
-      "QListWidget { background:#FAFBFD; color:#334155; border:1px solid "
-      "#E2E8F0; border-radius:8px; padding:4px; font-size:12.5px; } "
+      "QListWidget { background:#F8FAFC; color:#526579; border:1px solid "
+      "#D9E2EC; border-radius:8px; padding:4px; font-size:12.5px; } "
       "QListWidget::item { padding:7px; } QListWidget::item:selected { "
-      "background:#F8ECFF; color:#334155; }");
+      "background:#E3EBF1; color:#334155; }");
   layout->addWidget(list);
   auto buttons =
       new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
@@ -150,7 +150,7 @@ void OugaFlashWindow::arbDialog() {
                             "也不能保证整包没有其他反回滚风险。",
                             &dialog);
   caution->setWordWrap(true);
-  caution->setStyleSheet("color:#64748B;");
+  caution->setStyleSheet("color:#718192;");
   layout->addWidget(caution);
   auto buttons = new QDialogButtonBox(
       QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
