@@ -15,6 +15,8 @@
 #include <QScrollArea>
 #include <QFontDatabase>
 #include <QTextEdit>
+#include <QTextBlock>
+#include <QAbstractTextDocumentLayout>
 #include <QPushButton>
 #include <QClipboard>
 #include <QUuid>
@@ -478,7 +480,14 @@ private slots:
         QTRY_VERIFY(!manager->m_infoQueryActive);
         QVERIFY(manager->getExtendedDeviceDetails().contains(QStringLiteral("SELinux：宽容模式")));
     }
+    void detectionPopupShowsExtendedDetailsAndTogglesClosed_data() {
+        QTest::addColumn<bool>("longKernel");
+        QTest::newRow("normal") << false;
+        QTest::newRow("wrapped-kernel") << true;
+    }
     void detectionPopupShowsExtendedDetailsAndTogglesClosed() {
+        QFETCH(bool, longKernel);
+        if (longKernel) setting("uname.value", "6.1.0-android14-" + QString("orange-g1234567890-").repeated(4));
         DeviceCheckWindow window;
         QTRY_COMPARE(window.infoLabel->text(), details());
         window.show();
@@ -495,6 +504,26 @@ private slots:
         QVERIFY(editor->toPlainText().contains(QStringLiteral("CPU 代号：")));
         QVERIFY(!editor->toPlainText().contains(QStringLiteral("CPU 厂商：")));
         QVERIFY(!editor->toPlainText().contains(QStringLiteral("CPU 名称：")));
+        QCOMPARE(editor->toPlainText(), manager->getExtendedDeviceDetails());
+        const auto *doc = editor->document();
+        const qreal gap = doc->firstBlock().blockFormat().bottomMargin();
+        QVERIFY2(gap > 0, "Device information must fill spare vertical space");
+        for (QTextBlock block = doc->begin(); block.next().isValid(); block = block.next())
+            QCOMPARE(block.blockFormat().bottomMargin(), gap);
+        QVERIFY(qAbs(doc->documentLayout()->documentSize().height() - editor->viewport()->height()) < 3);
+        QCOMPARE(editor->verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+        QCOMPARE(editor->font().pixelSize(), 11);
+        QTextCursor selection(editor->document());
+        selection.select(QTextCursor::Document);
+        editor->setTextCursor(selection);
+        editor->copy();
+        QCOMPARE(QApplication::clipboard()->text(), editor->toPlainText());
+        const QString snapshotDir = qEnvironmentVariable("ORANGE_UI_SNAPSHOT_DIR");
+        if (!snapshotDir.isEmpty()) {
+            QVERIFY(QDir().mkpath(snapshotDir));
+            editor->moveCursor(QTextCursor::Start);
+            QVERIFY(dialog->grab().save(snapshotDir + (longKernel ? "/device-details-long.png" : "/device-details.png")));
+        }
         QVERIFY(!dialog->findChild<QPushButton *>(QStringLiteral("copyAllButton")));
         QVERIFY(!dialog->findChild<QPushButton *>(QStringLiteral("closeButton")));
 

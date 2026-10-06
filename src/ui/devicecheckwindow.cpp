@@ -21,12 +21,62 @@
 #include <QPainter>
 #include <QDialog>
 #include <QTextEdit>
+#include <QTextBlock>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
+#include <QResizeEvent>
 #include <QGridLayout>
 #include <QPointer>
 #include <QApplication>
 #include <QEvent>
 
 namespace {
+// Keep a single selectable document, spreading fields rather than enlarging text.
+class DeviceDetailsText final : public QTextEdit
+{
+public:
+    explicit DeviceDetailsText(QWidget *parent) : QTextEdit(parent) {}
+
+    void setDetails(const QString &details)
+    {
+        if (toPlainText() == details) return;
+        setPlainText(details);
+        distributeFields();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QTextEdit::resizeEvent(event);
+        distributeFields();
+    }
+
+private:
+    void distributeFields()
+    {
+        auto *doc = document();
+        if (doc->blockCount() < 2 || viewport()->height() <= 0) return;
+        const QTextCursor selection = textCursor();
+        auto setGap = [doc](qreal gap) {
+            for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                QTextCursor cursor(block);
+                auto format = block.blockFormat();
+                format.setTopMargin(0);
+                format.setBottomMargin(block.next().isValid() ? gap : 0);
+                cursor.setBlockFormat(format);
+            }
+        };
+        // Measure wrapped lines first: a full kernel version can span several lines.
+        setGap(0);
+        const qreal naturalHeight = doc->documentLayout()->documentSize().height();
+        const qreal gap = qMax<qreal>(0, (viewport()->height() - naturalHeight - 1)
+                                       / (doc->blockCount() - 1));
+        setGap(gap);
+        setTextCursor(selection);
+    }
+};
+
 class DeviceDetailsDialog final : public QDialog
 {
 public:
@@ -48,11 +98,11 @@ public:
         layout->setContentsMargins(12, 12, 12, 12);
         layout->setSpacing(0);
 
-        auto *editor = new QTextEdit(surface);
+        auto *editor = new DeviceDetailsText(surface);
         editor->setObjectName(QStringLiteral("deviceDetailsText"));
         editor->setReadOnly(true);
         editor->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-        editor->setPlainText(details);
+        editor->setDetails(details);
         editor->setLineWrapMode(QTextEdit::WidgetWidth);
         editor->setFrameShape(QFrame::NoFrame);
         editor->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -106,7 +156,7 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     connect(DeviceManager::instance(), &DeviceManager::extendedDeviceDetailsUpdated,
             this, [this](const QString &) {
         if (detailsDialog && detailsDialog->isVisible()) {
-            detailsDialog->findChild<QTextEdit *>(QStringLiteral("deviceDetailsText"))->setPlainText(
+            static_cast<DeviceDetailsText *>(detailsDialog->findChild<QTextEdit *>(QStringLiteral("deviceDetailsText")))->setDetails(
                 DeviceManager::instance()->getExtendedDeviceDetails());
         }
     });
