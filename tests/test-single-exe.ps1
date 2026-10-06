@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$CompilerBinPath, [Parameter(Mandatory)][string]$SevenZipPath,
-      [Parameter(Mandatory)][string]$SfxPath, [string]$StageRoot, [string]$PayloadDirectory)
+      [Parameter(Mandatory)][string]$SfxPath, [string]$StageRoot, [string]$PayloadDirectory, [string]$IconPath)
 . (Join-Path $PSScriptRoot '..\scripts\SingleExe.Common.ps1')
+. (Join-Path $PSScriptRoot '..\scripts\SfxIcon.ps1')
+if (-not $IconPath) { $IconPath = Join-Path $PSScriptRoot '..\assets\sfx.ico' }
+[void](Assert-PinnedSfx $SfxPath (Join-Path $PSScriptRoot '..\third_party\7zip-sfx\module.json'))
 $stage = New-ReleaseTemp $StageRoot
 Write-Host "SFX probe evidence: $stage"
 $payload = Join-Path $stage 'payload'
@@ -27,7 +30,10 @@ $tempDirectory = Join-Path $stage '中文 空格 temp'
 [IO.Directory]::CreateDirectory($runDirectory) | Out-Null
 [IO.Directory]::CreateDirectory($tempDirectory) | Out-Null
 $sfx = Join-Path $runDirectory 'OrangeTools Probe.exe'
-Join-Sfx $SfxPath $archive $sfx (Join-Path $stage 'config.txt')
+$iconModule = New-IconSfxModule $SfxPath $IconPath (Join-Path $stage 'icon-7zS.sfx')
+Join-Sfx $iconModule $archive $sfx (Join-Path $stage 'config.txt')
+[OrangeSfxIcon]::Verify($sfx, $IconPath)
+Invoke-ReleaseTool $SevenZipPath @('t',$sfx,'-bsp0') (Join-Path $stage 'sfx-integrity.log')
 function Start-Probe([string]$Exe, [string]$Marker) {
     $info = [Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $Exe

@@ -5,12 +5,15 @@ param(
     [string]$OutputPath,
     [string]$SevenZipPath,
     [string]$SfxPath,
+    [string]$IconPath,
     [string]$UpxPath,
     [ValidateSet('raw','zlib')][string]$ResourceCompression = 'raw',
     [switch]$UseUpx,
     [string]$StageRoot
 )
 . (Join-Path $PSScriptRoot 'scripts\SingleExe.Common.ps1')
+. (Join-Path $PSScriptRoot 'scripts\SfxIcon.ps1')
+if (-not $IconPath) { $IconPath = Join-Path $PSScriptRoot 'assets\sfx.ico' }
 if (-not $OutputPath) { $OutputPath = Join-Path $PSScriptRoot 'dist\OrangeTools-Single.exe' }
 if (-not $SevenZipPath) { $SevenZipPath = (Get-Command 7z.exe -ErrorAction Stop).Source }
 if (-not $SfxPath) { $SfxPath = Join-Path $PSScriptRoot 'third_party\7zip-sfx\7zS.sfx' }
@@ -63,10 +66,12 @@ try {
 } finally { Pop-Location }
 Invoke-ReleaseTool $SevenZipPath @('t',$archive,'-bsp0') (Join-Path $stage 'archive-test.log')
 $combined = Join-Path $stage 'OrangeTools-Single.exe'
-Join-Sfx $SfxPath $archive $combined (Join-Path $stage 'config.txt')
+$iconModule = New-IconSfxModule $SfxPath $IconPath (Join-Path $stage 'icon-7zS.sfx')
+Join-Sfx $iconModule $archive $combined (Join-Path $stage 'config.txt')
 Invoke-ReleaseTool $SevenZipPath @('t',$combined,'-bsp0') (Join-Path $stage 'sfx-test.log')
 $extracted = Join-Path $stage 'extracted'
 Invoke-ReleaseTool $SevenZipPath @('x',$combined,('-o'+$extracted),'-y','-bsp0') (Join-Path $stage 'extract.log')
+[OrangeSfxIcon]::Verify($combined, $IconPath)
 Assert-ReleaseManifest $manifest $extracted
 Assert-ReleaseManifest $before $release
 Write-NewReleaseFile $combined $output
