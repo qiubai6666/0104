@@ -401,6 +401,7 @@ void DeviceManager::updateDeviceInfo()
     m_infoMode = m_currentMode;
     m_infoSerial = m_deviceSerial;
     m_pendingDevice = m_pendingSlot = m_pendingUnlock = QStringLiteral("未知");
+    m_pendingKernelVersion = m_pendingSelinuxStatus = m_pendingBuildDate = QStringLiteral("未知");
     startInfoStep(0);
 }
 
@@ -505,6 +506,7 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
 
 void DeviceManager::startExtendedInfoQuery()
 {
+    // 3=getprop, 4=uname -r, 5=getenforce, 6=cat /proc/version.
     m_infoStep = 3;
     disconnect(m_infoProcess, nullptr, this, nullptr);
     if (m_infoProcess->state() != QProcess::NotRunning) {
@@ -521,8 +523,8 @@ void DeviceManager::startExtendedInfoQuery()
     });
     connect(m_infoProcess, &QProcess::errorOccurred, this,
             [this, generation](QProcess::ProcessError error) {
-        if (error == QProcess::FailedToStart && m_infoQueryActive && generation == m_infoGeneration &&
-            m_infoStep == 3) finishExtendedInfoQuery(false, QString());
+        if (error == QProcess::FailedToStart && m_infoQueryActive && generation == m_infoGeneration && m_infoStep == 3)
+            finishExtendedInfoQuery(false, QString());
     });
     disconnect(m_infoTimer, nullptr, this, nullptr);
     connect(m_infoTimer, &QTimer::timeout, this, [this, generation]() {
@@ -534,13 +536,71 @@ void DeviceManager::startExtendedInfoQuery()
     arguments << "shell" << "getprop";
     m_infoTimer->start();
     m_infoProcess->start(ResourceExtractor::getAdbPath(), arguments);
+
+    // Store a local helper through a queued property is unnecessary; subsequent
+    // steps are started inline in finishExtendedInfoQuery to preserve lifetime.
 }
 
 void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
 {
     m_infoTimer->stop();
     disconnect(m_infoProcess, nullptr, this, nullptr);
-    const QString props = success ? output : QString();
+    const int step = m_infoStep;
+    if (step == 3 && success) {
+        m_pendingExtendedProps = output;
+        const QString props = output;
+        auto property = [&props](const QStringList &keys, const QString &fallback = QStringLiteral("未知")) {
+            for (const QString &key : keys) {
+                const QRegularExpression re(QStringLiteral("\\[%1\\]\\s*:\\s*\\[(.*?)\\]").arg(QRegularExpression::escape(key)));
+                const auto match = re.match(props);
+                if (match.hasMatch() && !match.captured(1).trimmed().isEmpty()) return match.captured(1).trimmed();
+            }
+            return fallback;
+        };
+        m_pendingKernelVersion = QStringLiteral("未知");
+        m_pendingSelinuxStatus = property({"ro.boot.selinux", "ro.build.version.selinux"});
+        m_pendingBuildDate = property({"ro.build.date", "ro.product.build.date", "ro.system.build.date"});
+    } else if (step == 4) {
+        const QString value = success ? output.trimmed() : QString();
+        if (!value.isEmpty()) m_pendingKernelVersion = value;
+    } else if (step == 5) {
+        const QString value = success ? output.trimmed() : QString();
+        if (!value.isEmpty()) m_pendingSelinuxStatus = value;
+    } else if (step == 6) {
+        const QString value = success ? output.trimmed() : QString();
+        const QRegularExpression full(QStringLiteral("#\\d+[^\\n]*\\d{2}:\\d{2}:\\d{2}[^\\n]*\\d{4}"));
+        const auto match = full.match(value);
+        m_pendingBuildDate = match.hasMatch() ? match.captured(0).trimmed() : value;
+    }
+    if (step < 6) {
+        // Reuse the same process and timer for the next command.
+        const int next = step + 1;
+        m_infoStep = next;
+        const quint64 generation = m_infoGeneration;
+        connect(m_infoProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+                [this, generation, next](int code, QProcess::ExitStatus status) {
+            if (!m_infoQueryActive || generation != m_infoGeneration || m_infoStep != next || m_currentMode != ADB || m_deviceSerial != m_infoSerial) return;
+            finishExtendedInfoQuery(status == QProcess::NormalExit && code == 0,
+                                    QString::fromLocal8Bit(m_infoProcess->readAllStandardOutput()));
+        });
+        connect(m_infoProcess, &QProcess::errorOccurred, this, [this, generation, next](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart && m_infoQueryActive && generation == m_infoGeneration && m_infoStep == next)
+                finishExtendedInfoQuery(false, QString());
+        });
+        connect(m_infoTimer, &QTimer::timeout, this, [this, generation, next]() {
+            if (m_infoQueryActive && generation == m_infoGeneration && m_infoStep == next) finishExtendedInfoQuery(false, QString());
+        });
+        QStringList args;
+        if (!m_infoSerial.isEmpty()) args << "-s" << m_infoSerial;
+        args << "shell";
+        if (next == 4) args << "uname" << "-r";
+        else if (next == 5) args << "getenforce";
+        else args << "cat" << "/proc/version";
+        m_infoTimer->start();
+        m_infoProcess->start(ResourceExtractor::getAdbPath(), args);
+        return;
+    }
+    const QString props = m_pendingExtendedProps;
     auto property = [&props](const QStringList &keys, const QString &fallback = QStringLiteral("未知")) {
         for (const QString &key : keys) {
             const QRegularExpression re(QStringLiteral("\\[%1\\]\\s*:\\s*\\[(.*?)\\]").arg(QRegularExpression::escape(key)));
@@ -549,24 +609,24 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
         }
         return fallback;
     };
-    const QString unlock = m_pendingUnlock == QStringLiteral("未知") ?
-        property({"ro.boot.verifiedbootstate"}) : m_pendingUnlock;
+    const QString unlock = m_pendingUnlock == QStringLiteral("未知") ? property({"ro.boot.verifiedbootstate"}) : m_pendingUnlock;
     const QString details = QStringLiteral(
         "设备序列号：%1\n设备名称：%2\n设备代号：%3\n安卓版本：%4\n解锁状态：%5\n版本信息：%6\n构建日期：%7\n内核版本：%8\nA/B 分区：%9\nCPU 厂商：%10\nCPU 代号：%11\nCPU 名称：%12\n操作系统：Android %4\nSELinux：%13")
-        .arg(property({"ro.serialno", "ro.boot.serialno"}))
+        .arg(property({"ro.serialno", "ro.boot.serialno"}, m_deviceSerial))
         .arg(property({"ro.product.marketname", "ro.config.marketing_name", "ro.product.model"}))
         .arg(property({"ro.product.device", "ro.product.odm.device"}, m_pendingDevice))
         .arg(property({"ro.build.version.release", "ro.product.build.version.release"}))
-        .arg(unlock == QStringLiteral("orange") ? QStringLiteral("已解锁") :
-             unlock == QStringLiteral("green") ? QStringLiteral("未解锁") : unlock)
-        .arg(property({"ro.build.display.id", "ro.build.version.oplusrom", "ro.build.version.ota"}))
-        .arg(property({"ro.build.date", "ro.product.build.date", "ro.system.build.date"}))
-        .arg(property({"ro.build.kernel.id", "ro.kernel.version", "ro.build.version.incremental"}))
+        .arg(unlock == QStringLiteral("orange") ? QStringLiteral("已解锁") : unlock == QStringLiteral("green") ? QStringLiteral("未解锁") : unlock)
+        .arg(property({"ro.build.display.id.show", "ro.build.display.id", "ro.build.version.miui", "ro.build.version.incremental", "ro.build.version.ota"}))
+        .arg(m_pendingBuildDate)
+        .arg(m_pendingKernelVersion)
         .arg(m_pendingSlot)
         .arg(property({"ro.soc.manufacturer", "ro.hardware"}))
         .arg(property({"ro.board.platform"}))
         .arg(property({"ro.product.board", "ro.hardware", "ro.product.cpu.abi"}))
-        .arg(property({"ro.build.version.selinux", "ro.boot.selinux"}));
+        .arg(m_pendingSelinuxStatus == QStringLiteral("Enforcing") ? QStringLiteral("严格模式") :
+             m_pendingSelinuxStatus == QStringLiteral("Permissive") ? QStringLiteral("宽容模式") :
+             m_pendingSelinuxStatus == QStringLiteral("Disabled") ? QStringLiteral("已禁用") : m_pendingSelinuxStatus);
     if (details != m_extendedDeviceDetails) {
         m_extendedDeviceDetails = details;
         emit extendedDeviceDetailsUpdated(details);

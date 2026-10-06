@@ -45,14 +45,8 @@ public:
         outer->addWidget(surface);
 
         auto *layout = new QVBoxLayout(surface);
-        layout->setContentsMargins(16, 13, 16, 13);
-        layout->setSpacing(8);
-
-        auto *title = new QLabel(QStringLiteral("设备信息"), surface);
-        title->setAlignment(Qt::AlignCenter);
-        title->setFixedHeight(22);
-        title->setObjectName(QStringLiteral("deviceDetailsTitle"));
-        layout->addWidget(title);
+        layout->setContentsMargins(12, 12, 12, 12);
+        layout->setSpacing(0);
 
         auto *editor = new QTextEdit(surface);
         editor->setObjectName(QStringLiteral("deviceDetailsText"));
@@ -67,7 +61,6 @@ public:
 
         setStyleSheet(QStringLiteral(
             "QWidget#deviceDetailsSurface { background:#FFFFFF; border:1px solid #D6E2EE; border-radius:12px; }"
-            "QLabel#deviceDetailsTitle { color:#2c3e50; font-size:15px; font-weight:bold; background:transparent; }"
             "QTextEdit#deviceDetailsText { color:#2c3e50; background:#F3F7FC; border:1px solid #D6E2EE; border-radius:8px; padding:8px; font-size:11px; selection-background-color:#B8D8E5; }"));
     }
 };}

@@ -115,6 +115,10 @@ private:
     QString m_pendingDevice;
     QString m_pendingSlot;
     QString m_pendingUnlock;
+    QString m_pendingKernelVersion;
+    QString m_pendingSelinuxStatus;
+    QString m_pendingBuildDate;
+    QString m_pendingExtendedProps;
 };
 
 #endif // DEVICEMANAGER_H
