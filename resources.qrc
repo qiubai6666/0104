@@ -27,9 +27,6 @@
     <!-- adb/fastboot 及匹配辅助工具在根目录共用，bin 仅提供解压与 Super 工具 -->
     <file>qiubai/bin/7zip/7z.dll</file>
     <file>qiubai/bin/7zip/7z.exe</file>
-    <file>qiubai/bin/7zip/License.txt</file>
-    <file>qiubai/bin/README.md</file>
-    <file>qiubai/bin/lpmake/LICENSE-AOSP.txt</file>
     <file>qiubai/bin/lpmake/lpmake.exe</file>
     <file>qiubai/bin/manifest.json</file>
     <file>qiubai/NOTICE.txt</file>

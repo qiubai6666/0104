@@ -697,3 +697,7 @@ UPX 只在 TEMP 副本中处理未签名主程序和三项允许的 MinGW DLL；
 仍按原命令运行 `release.ps1` 即可，无需额外参数。直接使用 `package-single-exe.ps1` 时，可通过 `-IconPath 'C:\path\custom.ico'` 指定另一个 ICO。已有 EXE 不会自动修改或覆盖，重新打包时请使用新的输出文件名。
 
 实现位于 `scripts/SfxIcon.ps1` 和 `scripts/SfxIcon.cs`：验证固定官方 SFX 模块后，仅在本次 TEMP 副本中通过 Windows 资源 API 替换图标，再拼接启动配置和 7z 数据；不修改官方原件，不对拼接后的 EXE 进行资源更新（避免丢失压缩数据）。打包时逐字节验证所有图标组及其图像资源，并继续执行压缩完整性、解压文件哈希检查。`tests/test-single-exe.ps1` 使用相同的图标副本和无害探针验证解压、等待退出、并发隔离、退出清理及损坏包拒绝启动。替换外壳图标会增加少量体积，最终大小以重新打包的结果为准。
+
+### 运行工具目录文档精简
+
+资源清单不再内嵌或释放 `bin/README.md`、`bin/lpmake/LICENSE-AOSP.txt`、`bin/7zip/License.txt`。源码中的原文件保留；发布入口将两份许可证复制到运行包的 `licenses/lpmake` 和 `licenses/7zip` 目录。此调整不移除工具或功能，需重新编译、打包才对新程序生效；不会直接删除现有 AppData 文件。`qiubai/bin/manifest.json` 仍记录源码工具套件的来源和原文件校验信息，不代表所有记录项都要释放到运行目录。

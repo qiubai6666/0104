@@ -125,6 +125,16 @@ function Add-ReleaseLicenses([string]$Project, [string]$Deployment, [string]$QtL
     $directory = Join-Path $Deployment 'licenses'
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     Copy-Item -LiteralPath (Join-Path $Project 'LICENSE') -Destination (Join-Path $directory 'OrangeTools-MIT.txt')
+    # Runtime resource extraction excludes documentation; ship tool licenses separately.
+    $toolLicenses = @{
+        'qiubai\bin\7zip\License.txt' = '7zip\License.txt'
+        'qiubai\bin\lpmake\LICENSE-AOSP.txt' = 'lpmake\LICENSE-AOSP.txt'
+    }
+    foreach ($source in $toolLicenses.Keys) {
+        $destination = Join-Path $directory $toolLicenses[$source]
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $Project $source) -Destination $destination -ErrorAction Stop
+    }
     $sfxDirectory = Join-Path $directory '7zip-sfx'
     [IO.Directory]::CreateDirectory($sfxDirectory) | Out-Null
     foreach ($name in @('License.txt','COPYING.LGPL-2.1.txt','upstream-readme.txt','module.json')) {

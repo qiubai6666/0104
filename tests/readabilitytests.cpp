@@ -72,6 +72,12 @@ void ReadabilityTests::embeddedToolsMatchSourceFiles()
     }
     QVERIFY2(!xml.hasError(), qPrintable(xml.errorString()));
     QVERIFY(verifiedFiles > 0);
+    // Documentation stays in source / release licenses, not the extracted tool tree.
+    for (const QString &relative : {QStringLiteral("bin/README.md"),
+                                   QStringLiteral("bin/lpmake/LICENSE-AOSP.txt"),
+                                   QStringLiteral("bin/7zip/License.txt")}) {
+        QVERIFY2(!QFile::exists(":/qiubai/qiubai/" + relative), qPrintable(relative));
+    }
     qInfo() << "Verified embedded resource files:" << verifiedFiles;
 }
 
