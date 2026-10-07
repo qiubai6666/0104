@@ -520,7 +520,7 @@ void OugaFlashWindow::buildPage(int index) {
   page.preset->lineEdit()->installEventFilter(new PopupOnClick(page.preset));
   page.preset->setFixedHeight(32);
   page.preset->addItems(
-      {"请选择快捷提取方案 ↓", "boot", "init_boot", "高通修复FastbootD关键分区",
+      {"请选择快捷提取方案 ↓", "高通修复FastbootD关键分区",
        "联发科修复FastbootD关键分区", "云解包方案-从云端提取线刷文件"});
   page.extract = button("提取分区",
                         sales ? "AfterSalesExtractPartitionButton"
@@ -532,8 +532,9 @@ void OugaFlashWindow::buildPage(int index) {
   cloud->setColumnStretch(0, 1);
   connect(page.extract, &QPushButton::clicked, this,
           [this] { extractPayload(false); });
-  connect(page.preset, &QComboBox::currentIndexChanged, this, [this](int i) {
-    if (i == 5)
+  connect(page.preset, &QComboBox::currentIndexChanged, this,
+          [this, preset = page.preset](int) {
+    if (preset->currentText() == "云解包方案-从云端提取线刷文件")
       log("已选择云解包方案，点击提取分区按钮开始云端解包");
   });
   page.files = card("刷写文件", page.widget);

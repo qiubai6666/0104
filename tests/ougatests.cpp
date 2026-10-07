@@ -321,8 +321,8 @@ public:
           const auto match = QRegularExpression("Range: bytes=([0-9]+)-([0-9]+)",
               QRegularExpression::CaseInsensitiveOption).match(QString::fromLatin1(*input));
           if (!match.hasMatch()) { ++missingRange; socket->disconnectFromHost(); return; }
-          const quint64 begin = match.captured(1).toULongLong(),
-                        end = match.captured(2).toULongLong();
+          quint64 begin = match.captured(1).toULongLong(),
+                  end = match.captured(2).toULongLong();
           ranges.append({begin, end});
           if (begin > end || end >= quint64(source.size())) {
             socket->write("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n");
@@ -341,12 +341,30 @@ public:
             socket->write("HTTP/1.1 302 Found\r\nLocation: /other\r\nContent-Length: 0\r\n\r\n");
             socket->disconnectFromHost(); return;
           }
+          if (fault == "short")
+            end = qMin(end, begin + 8191);
+          if (fault == "segmentLimit")
+            end = begin;
+          if (fault == "aligned") {
+            begin -= begin % 65536;
+            end = qMin(quint64(source.size()) - 1, (end / 65536 + 1) * 65536 - 1);
+          }
+          if (fault == "overexpanded") {
+            begin = 0;
+            end = quint64(source.size()) - 1;
+          }
           QByteArray body = source.mid(qsizetype(begin), qsizetype(end - begin + 1));
           const quint64 total = quint64(source.size()) + (fault == "total" && late ? 1 : 0);
           QByteArray header = "HTTP/1.1 206 Partial Content\r\nConnection: close\r\n";
-          if (fault != "missing")
-            header += "Content-Range: bytes " + QByteArray::number(begin + (fault == "range" ? 1 : 0)) +
-                "-" + QByteArray::number(end) + "/" + QByteArray::number(total) + "\r\n";
+          if (fault != "missing") {
+            const QByteArray unit = fault == "syntax" ? "BYTES\t" : "bytes ";
+            const QByteArray slash = fault == "syntax" ? " / " : "/";
+            const QByteArray reportedTotal = fault == "unknownProbe" ||
+                (fault == "unknown" && late) ? "*" : QByteArray::number(total);
+            header += "Content-Range: " + unit +
+                QByteArray::number(begin + (fault == "range" ? 1 : 0)) + "-" +
+                QByteArray::number(end) + slash + reportedTotal + "\r\n";
+          }
           if (fault == "encoding") header += "Content-Encoding: gzip\r\n";
           header += "ETag: " + QByteArray(fault == "etag" && late ? "\"v2\"" : "\"v1\"") + "\r\n";
           if (fault != "overlong")
@@ -354,6 +372,7 @@ public:
           else
             body += 'X';
           if (fault == "truncated") body.chop(1);
+          if (fault == "overexpanded") body.clear();
           bytesSent += quint64(body.size());
           socket->write(header + "\r\n" + body);
           socket->disconnectFromHost();
@@ -4071,7 +4090,8 @@ private slots:
   void remotePayloadRange_data() {
     QTest::addColumn<QString>("kind");
     for (const QString kind : {"raw", "large", "stored", "zip64", "compressed", "duplicate",
-         "200", "late200", "range", "missing", "total", "length", "etag",
+         "syntax", "short", "aligned", "unknown", "unknownProbe", "overexpanded",
+         "segmentLimit", "200", "late200", "range", "missing", "total", "length", "etag",
          "encoding", "truncated", "overlong", "redirect", "cancel", "delta",
          "unsupported", "missingPartition", "existingOutput"})
       QTest::newRow(qPrintable(kind)) << kind;
@@ -4126,9 +4146,10 @@ private slots:
       QVERIFY(prep.busy());
       prep.cancel();
     }
-    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, kind == "segmentLimit" ? 30000 : 10000);
     const bool success = kind == "raw" || kind == "large" ||
-                         kind == "stored" || kind == "zip64";
+                         kind == "stored" || kind == "zip64" || kind == "syntax" ||
+                         kind == "short" || kind == "aligned" || kind == "unknown";
     QCOMPARE(finished.first()[0].toBool(), success);
     QCOMPARE(prepared.size(), success ? 1 : 0);
     QCOMPARE(server.missingRange, 0);
@@ -4149,13 +4170,22 @@ private slots:
         QCOMPARE(read(output + "/keep.txt"), QByteArray("KEEP"));
         QCOMPARE(server.requests, 0);
       }
-      if (kind == "200" || kind == "redirect" || kind == "range" || kind == "missing")
+      if (kind == "200" || kind == "redirect" || kind == "range" ||
+          kind == "missing" || kind == "unknownProbe" || kind == "overexpanded")
         QCOMPARE(server.requests, 1);
     }
+    if (kind == "segmentLimit")
+      QCOMPARE(server.requests, 257); // one probe plus the bounded continuation budget
     QVERIFY(!prep.busy());
   }
 
+  void widgetRemoteShortcutPartition_data() {
+    QTest::addColumn<bool>("cloudUnpack");
+    QTest::newRow("typed-partition") << false;
+    QTest::newRow("cloud-scheme-ignores-local-field") << true;
+  }
   void widgetRemoteShortcutPartition() {
+    QFETCH(bool, cloudUnpack);
     QByteArray boot, vendor;
     PayloadRangeServer server(nativePayloadBytes(&boot, &vendor) +
                                QByteArray(4 * 1024 * 1024, 'x'));
@@ -4163,7 +4193,11 @@ private slots:
     OugaFlashWindow window(nullptr, &runner, dir + "/logs");
     window.show();
     window.findChild<QLineEdit *>("BinUrlTextBox")->setText(server.url().toString());
-    window.findChild<QComboBox *>("PayloadPartitionComboBox")->setCurrentText("boot");
+    window.findChild<QComboBox *>("PayloadPartitionComboBox")->setCurrentText(
+        cloudUnpack ? "云解包方案-从云端提取线刷文件" : "boot");
+    if (cloudUnpack)
+      window.findChild<QLineEdit *>("PayloadFilePathTextBox")->setText(
+          dir + "/not-a-local-payload.bin");
     const QString output = dir + "/shortcut-images";
     QVERIFY(QDir().mkpath(output));
     int folderDialogs = 0, unexpectedDialogs = 0;
@@ -4187,9 +4221,13 @@ private slots:
     QCOMPARE(folderDialogs, 1);
     QCOMPARE(unexpectedDialogs, 0);
     QCOMPARE(read(output + "/boot.img"), boot);
-    QVERIFY(!QFileInfo::exists(output + "/vendor.img"));
+    if (cloudUnpack)
+      QCOMPARE(read(output + "/vendor.img"), vendor);
+    else
+      QVERIFY(!QFileInfo::exists(output + "/vendor.img"));
     const QString logs = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
-    QVERIFY2(logs.contains("分区 boot 提取完成！"), qPrintable(logs));
+    QVERIFY2(logs.contains(cloudUnpack ? "镜像提取完成！" :
+                                       "分区 boot 提取完成！"), qPrintable(logs));
     QVERIFY(!logs.contains("SECRET"));
     QCOMPARE(server.missingRange, 0);
     QVERIFY(server.bytesSent < quint64(server.source.size()) / 2);
@@ -4565,9 +4603,16 @@ private slots:
     QVERIFY(check("PartitionTableValidationEnabledCheckBox")->isChecked());
     auto preset = window.findChild<QComboBox *>("PayloadPartitionComboBox");
     QVERIFY(preset->isEditable());
-    QCOMPARE(preset->count(), 6);
-    QCOMPARE(preset->itemText(3), QString("高通修复FastbootD关键分区"));
-    QCOMPARE(preset->itemText(4), QString("联发科修复FastbootD关键分区"));
+    QCOMPARE(preset->count(), 4);
+    QCOMPARE(preset->findText("boot"), -1);
+    QCOMPARE(preset->findText("init_boot"), -1);
+    QCOMPARE(preset->itemText(1), QString("高通修复FastbootD关键分区"));
+    QCOMPARE(preset->itemText(2), QString("联发科修复FastbootD关键分区"));
+    auto salesPreset = window.findChild<QComboBox *>("AfterSalesPayloadPartitionComboBox");
+    QVERIFY(salesPreset);
+    QCOMPARE(salesPreset->count(), 4);
+    QCOMPARE(salesPreset->findText("boot"), -1);
+    QCOMPARE(salesPreset->findText("init_boot"), -1);
     // Clicking the editable text opens the scheme list, as in the reference.
     QVERIFY(window.isVisible() || (window.show(), QTest::qWaitForWindowExposed(&window)));
     QTest::mouseClick(preset->lineEdit(), Qt::LeftButton);

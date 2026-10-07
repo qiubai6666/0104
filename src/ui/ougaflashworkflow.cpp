@@ -255,7 +255,6 @@ void OugaFlashWindow::extractPayload(bool all) {
   if (isBusy() || (all && m_page))
     return;
   Page &page = m_pages[m_page];
-  const int preset = page.preset->currentIndex();
   m_unpackPayload = all;
   m_extractNames.clear();
   if (!all) {
@@ -276,7 +275,9 @@ void OugaFlashWindow::extractPayload(bool all) {
       m_extractNames = {selection.toLower()};
     }
   }
-  m_payloadSource = !m_page && (all || preset != 5)
+  const bool cloudUnpack = page.preset->currentText().trimmed() ==
+                           "云解包方案-从云端提取线刷文件";
+  m_payloadSource = !m_page && (all || !cloudUnpack)
                         ? m_pages[0].payloadFile->text().trimmed()
                         : QString();
   if (m_payloadSource.isEmpty() && !all)

@@ -58,6 +58,8 @@ private:
   bool probe(QString *error);
   QByteArray requestRange(quint64 offset, quint64 length,
                           quint64 *reportedTotal, QString *error) const;
+  QByteArray requestSingleRange(quint64 offset, quint64 length,
+                               quint64 *reportedTotal, QString *error) const;
   void cacheBlock(quint64 offset, const QByteArray &data) const;
 
   QUrl m_url;

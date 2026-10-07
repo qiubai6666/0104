@@ -96,6 +96,41 @@ OugaHttpRangeReader::create(const QUrl &url, const std::atomic_bool *cancel,
 QByteArray OugaHttpRangeReader::requestRange(quint64 offset, quint64 length,
                                              quint64 *reportedTotal,
                                              QString *error) const {
+  if (!length || length > quint64(std::numeric_limits<qsizetype>::max()) ||
+      offset > quint64(std::numeric_limits<qint64>::max()) ||
+      length - 1 > quint64(std::numeric_limits<qint64>::max()) - offset) {
+    fail(error, "远程 Range 范围无效");
+    return {};
+  }
+  QByteArray result;
+  quint64 total = 0;
+  // CDNs may cap a response below the requested end. Continue only from the
+  // validated next byte, with a finite request budget (never a full GET).
+  for (int part = 0; part < 256; ++part) {
+    quint64 responseTotal = 0;
+    const QByteArray data = requestSingleRange(offset + quint64(result.size()),
+        length - quint64(result.size()), &responseTotal, error);
+    if (data.isEmpty())
+      return {};
+    if (total && responseTotal != total) {
+      fail(error, "远程 Payload 总大小发生变化，拒绝拼接响应");
+      return {};
+    }
+    total = responseTotal;
+    result += data;
+    if (quint64(result.size()) == length) {
+      if (reportedTotal)
+        *reportedTotal = total;
+      return result;
+    }
+  }
+  fail(error, "远程服务器分段响应过多，已停止按需读取");
+  return {};
+}
+
+QByteArray OugaHttpRangeReader::requestSingleRange(quint64 offset, quint64 length,
+                                                   quint64 *reportedTotal,
+                                                   QString *error) const {
   if (m_cancel && m_cancel->load()) {
     fail(error, "远程 Payload 读取已取消");
     return {};
@@ -123,7 +158,7 @@ QByteArray OugaHttpRangeReader::requestRange(quint64 offset, quint64 length,
   request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                       QNetworkRequest::ManualRedirectPolicy);
   QNetworkReply *reply = network->get(request);
-  reply->setReadBufferSize(qint64(qMin<quint64>(length + 1, 64 * 1024)));
+  reply->setReadBufferSize(64 * 1024);
   QEventLoop loop;
   QTimer timeout, cancellation;
   timeout.setSingleShot(true);
@@ -131,10 +166,10 @@ QByteArray OugaHttpRangeReader::requestRange(quint64 offset, quint64 length,
   cancellation.setInterval(50);
   QString failure;
   QByteArray body;
-  quint64 total = 0;
+  quint64 total = 0, responseLength = 0, prefixLength = 0;
   bool headersValid = false;
-  // Reject an ignored Range at headers, not after buffering a multi-GB 200
-  // response. Never accept more bytes than requested, even without Length.
+  // Reject an ignored Range before buffering a multi-GB 200 response.
+  // The body must match its validated (bounded) Content-Range.
   const auto validateHeaders = [&] {
     if (headersValid || !failure.isEmpty())
       return;
@@ -146,21 +181,47 @@ QByteArray OugaHttpRangeReader::requestRange(quint64 offset, quint64 length,
       failure = QString("远程服务器不支持按需 Range（HTTP %1），不会下载完整包或跟随重定向").arg(status);
     } else {
       const QByteArray encoding = reply->rawHeader("Content-Encoding").trimmed().toLower();
-      const auto match = QRegularExpression("^bytes ([0-9]+)-([0-9]+)/([0-9]+)$")
-          .match(QString::fromLatin1(reply->rawHeader("Content-Range")).trimmed());
+      // Keep byte-boundary validation while supporting CDN-aligned 206
+      // responses that cover the requested range
+      // or a shorter consecutive segment instead of identical start/end values.
+      static const QRegularExpression rangePattern(
+          "^bytes\\s+([0-9]+)\\s*-\\s*([0-9]+)\\s*/\\s*([0-9]+|\\*)$",
+          QRegularExpression::CaseInsensitiveOption);
+      const auto match = rangePattern.match(
+          QString::fromLatin1(reply->rawHeader("Content-Range")).trimmed());
       bool okStart = false, okEnd = false, okTotal = false, okLength = false;
       const quint64 actualStart = match.captured(1).toULongLong(&okStart);
       const quint64 actualEnd = match.captured(2).toULongLong(&okEnd);
       total = match.captured(3).toULongLong(&okTotal);
-      const QByteArray contentLength = reply->rawHeader("Content-Length");
+      if (match.captured(3) == "*" && m_size) {
+        total = m_size;
+        okTotal = true;
+      }
+      const QByteArray contentLength = reply->rawHeader("Content-Length").trimmed();
       const quint64 declaredLength = contentLength.toULongLong(&okLength);
-      if ((!encoding.isEmpty() && encoding != "identity") ||
-          !match.hasMatch() || !okStart || !okEnd || !okTotal ||
-          actualStart != offset || actualEnd != end || total <= end ||
-          total > quint64(std::numeric_limits<qint64>::max()) ||
-          (m_size && total != m_size) ||
-          (!contentLength.isEmpty() && (!okLength || declaredLength != length)))
-        failure = "远程服务器返回了无效或变化的 Content-Range，拒绝拼接响应";
+      if (!encoding.isEmpty() && encoding != "identity")
+        failure = "远程 Range 响应启用了内容编码，无法按原始字节提取";
+      else if (!match.hasMatch() || !okStart || !okEnd || !okTotal)
+        failure = "远程 Content-Range 格式无效或缺少可验证的总大小";
+      else if (actualStart > actualEnd || actualEnd >= total ||
+               total > quint64(std::numeric_limits<qint64>::max()))
+        failure = "远程 Content-Range 声明的字节边界无效";
+      else if (m_size && total != m_size)
+        failure = "远程 Payload 总大小发生变化，拒绝拼接响应";
+      else if (actualStart > offset || actualEnd < offset)
+        failure = QString("远程 Range 未覆盖请求范围：请求 %1-%2，返回 %3-%4")
+            .arg(offset).arg(end).arg(actualStart).arg(actualEnd);
+      else {
+        responseLength = actualEnd - actualStart + 1;
+        prefixLength = offset - actualStart;
+        const quint64 extra = prefixLength + (actualEnd > end ? actualEnd - end : 0);
+        if (extra > 1024 * 1024 ||
+            responseLength > quint64(std::numeric_limits<qsizetype>::max()))
+          failure = "远程服务器扩展的 Range 超出安全读取上限";
+        else if (!contentLength.isEmpty() &&
+                 (!okLength || declaredLength != responseLength))
+          failure = "远程 Range 的 Content-Length 与字节范围不符";
+      }
       const QByteArray etag = reply->rawHeader("ETag");
       const QByteArray modified = reply->rawHeader("Last-Modified");
       if (failure.isEmpty() &&
@@ -177,10 +238,10 @@ QByteArray OugaHttpRangeReader::requestRange(quint64 offset, quint64 length,
     validateHeaders();
     if (!headersValid || !failure.isEmpty())
       return;
-    const quint64 remaining = length - quint64(body.size());
+    const quint64 remaining = responseLength - quint64(body.size());
     body += reply->read(qint64(remaining));
     if (reply->bytesAvailable() > 0) {
-      failure = "远程 Range 响应超过请求长度，已中止";
+      failure = "远程 Range 响应超过声明范围，已中止";
       reply->abort();
     }
   };
@@ -209,7 +270,7 @@ QByteArray OugaHttpRangeReader::requestRange(quint64 offset, quint64 length,
   if (failure.isEmpty() && reply->error() != QNetworkReply::NoError)
     // Do not expose URLs/query credentials from QNetworkReply::errorString().
     failure = QString("远程 Range 请求失败（网络错误 %1）").arg(int(reply->error()));
-  if (failure.isEmpty() && (!headersValid || quint64(body.size()) != length))
+  if (failure.isEmpty() && (!headersValid || quint64(body.size()) != responseLength))
     failure = "远程 Range 响应长度不符，拒绝截断数据";
   if (failure.isEmpty() && !m_size) {
     // Probe runs before publication; these values are immutable during reads.
@@ -225,7 +286,8 @@ QByteArray OugaHttpRangeReader::requestRange(quint64 offset, quint64 length,
   }
   if (reportedTotal)
     *reportedTotal = total;
-  return body;
+  return body.mid(qsizetype(prefixLength),
+                  qsizetype(qMin(length, responseLength - prefixLength)));
 }
 
 bool OugaHttpRangeReader::probe(QString *error) {
