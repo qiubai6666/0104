@@ -359,6 +359,7 @@ private slots:
         QCOMPARE(runner.calls.last().args.mid(0, 4), QStringList({"-s", "phone", "install", "-r"}));
         runner.respond("Success");
         QTRY_VERIFY(!window.isBusy());
+        QVERIFY(table->selectedItems().isEmpty());
         QVERIFY(QFileInfo::exists(dir.filePath(QStringLiteral("软件/folder/child.apk"))) == false);
     }
     void folderNavigationAndWindow() {

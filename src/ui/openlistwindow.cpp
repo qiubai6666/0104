@@ -269,6 +269,7 @@ void OpenListWindow::setBusy(bool busy) {
     m_cancel->setEnabled(busy && m_downloading);
 }
 void OpenListWindow::finish(const QString &message,bool ok) {
+    for (auto *table : m_tables) table->clearSelection();
     m_downloading = false; m_queue.clear(); m_downloaded.clear(); setBusy(false); m_progress->setRange(0,100); m_progress->setValue(ok ? 100 : 0);
     m_status->setText(OpenList::redact(message)); log(message); updateDevice();
 }
