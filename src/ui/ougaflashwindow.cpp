@@ -331,8 +331,10 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
     QPushButton:pressed { background:#E3EBF1; }
     QPushButton[tone="sky"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
     QPushButton[tone="sky"]:hover { background:#627E97; border-color:#627E97; }
-    QPushButton[tone="purple"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
-    QPushButton[tone="purple"]:hover { background:#627E97; border-color:#627E97; }
+    QPushButton[tone="unpack"] { background:#829D96; color:#FFFFFF; border-color:#829D96; }
+    QPushButton[tone="unpack"]:hover { background:#718D86; border-color:#718D86; }
+    QPushButton[tone="start"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
+    QPushButton[tone="start"]:hover { background:#627E97; border-color:#627E97; }
     QPushButton[tone="repair"] { background:#E7EEF3; color:#526579; border-color:#C9D7E2; }
     QPushButton[tone="repair"]:hover { background:#DCE7EF; border-color:#B9CBD9; }
     QPushButton[tone="stop"] { background:#E5EBF0; color:#596B7D; border-color:#C8D5DF; }
@@ -651,10 +653,10 @@ void OugaFlashWindow::buildPage(int index) {
   page.unpack =
       button("解包Payload",
              named("UnpackPayloadButton", "AfterSalesUnpackPayloadButton"),
-             page.actions, "purple");
+             page.actions, "unpack");
   page.start = button("开始线刷",
                       named("StartFlashButton", "AfterSalesStartFlashButton"),
-                      page.actions, "purple");
+                      page.actions, "start");
   for (auto item : {page.arb, page.unpack, page.start})
     buttons->addWidget(item, 1);
   actions->addLayout(buttons, 1, 0);
