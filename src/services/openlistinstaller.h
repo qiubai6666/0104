@@ -42,18 +42,22 @@ signals:
     void log(const QString &text);
 private:
     enum Stage { Idle, Discover, Verify, ZipList, ZipTest, ZipProperties, RootAccess,
-                 Managers, RootChoice, Push, ModuleInstall, RemoteCleanup, ApkInstall };
+                 Managers, RootChoice, Push, ModuleInstall, RemoteCleanup, ApkInstall,
+                 FailureVerify, FailureDestination, FailurePush, FailureCleanup };
     Stage m_stage = Idle;
     OugaCommandRunner *m_runner;
     QString m_adb, m_sevenZip, m_file, m_serial, m_remote, m_selectedManager;
     QMap<QString,QString> m_managers;
     bool m_module = false, m_installSuccess = false, m_remoteTouched = false;
-    QString m_result;
+    QString m_result, m_fallbackRemote;
+    bool m_canTransferFailure = false;
     void command(Stage, const QString &program, const QStringList &, int timeout = 0);
     void adb(Stage, const QStringList &, int timeout = 0);
     void onCompleted(int, bool, const QString &);
     void end(bool, const QString &);
     void cleanRemote(bool, const QString &);
+    void finish(bool, const QString &);
+    bool handleFailureTransfer(int, bool, const QString &);
 };
 #endif
 
