@@ -131,7 +131,9 @@ void MenuWidget::updateScreenCastButton()
     const bool loading = state == ScreenCastController::WaitingForDevice || state == ScreenCastController::Starting;
     button->setProperty("screenCastLoading", loading);
     button->setToolTip(screenCastController->statusText());
-    button->setEnabled(state != ScreenCastController::Stopping);
+    // Remain clickable while a disconnected session is stopping so the user
+    // can immediately cancel auto-reconnect as well.
+    button->setEnabled(true);
     button->setAccessibleName(QStringLiteral("投屏"));
     button->setAccessibleDescription(screenCastController->statusText());
     if (loading) {

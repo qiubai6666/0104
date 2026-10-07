@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "menuwidget.h"
+#include "devicecheckwindow.h"
 #include "screencastcontroller.h"
 #include "devicemanager.h"
 #include "deviceoperationlease.h"
@@ -42,6 +43,10 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, QDir::tempPath() + "/settings");
         DeviceOperationLease::setIdleCheck([] { return !ProcessManager::hasActiveDeviceProcesses(); });
+        connect(DeviceOperationLease::instance(), &DeviceOperationLease::changed, this, [](bool held) {
+            if (held) DeviceManager::instance()->pauseMonitoring();
+            else DeviceManager::instance()->resumeMonitoring();
+        });
     }
     void init() {
         fixture.reset(new QTemporaryDir(QDir::tempPath() + "/ScreenCastTests-XXXXXX"));
@@ -131,27 +136,30 @@ private slots:
         QCOMPARE(controller.state(), ScreenCastController::Idle);
         QVERIFY(scrcpyCommands().isEmpty());
     }
-    void failedStartRestoresButtonAndAllowsRetry() {
+    void failedStartKeepsAutoCastAndRetries() {
         QVERIFY(QFile::rename(fixturePath + "/scrcpy.exe", fixturePath + "/missing-scrcpy.exe"));
         MenuWidget menu;
         freeze(menu);
         DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
         auto *button = menu.buttons[MenuWidget::ScreenCast];
         button->click();
-        QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Idle);
-        QCOMPARE(button->text(), QStringLiteral("投屏"));
+        QTRY_VERIFY(menu.screenCastController->m_retryTimer.isActive());
+        QCOMPARE(menu.screenCastController->state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(menu.screenCastController->m_autoCastEnabled);
+        QVERIFY(button->text().isEmpty());
+        QVERIFY(button->isEnabled());
+        QVERIFY(menu.screenCastSpinnerTimer->isActive());
         QVERIFY(button->toolTip().contains(QStringLiteral("无法启动")));
         QVERIFY(QFile::rename(fixturePath + "/missing-scrcpy.exe", fixturePath + "/scrcpy.exe"));
-        button->click();
         QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Streaming);
     }
-    void processExitRestoresButton_data() {
+    void processExitAutomaticallyRestarts_data() {
         QTest::addColumn<QByteArray>("behavior");
         QTest::newRow("window-closed") << QByteArray("close");
         QTest::newRow("start-failed") << QByteArray("fail");
         QTest::newRow("crashed") << QByteArray("crash");
     }
-    void processExitRestoresButton() {
+    void processExitAutomaticallyRestarts() {
         QFETCH(QByteArray, behavior);
         QVERIFY(writeFile(fixturePath + "/behavior.txt", behavior));
         MenuWidget menu;
@@ -159,18 +167,31 @@ private slots:
         DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
         menu.buttons[MenuWidget::ScreenCast]->click();
         QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Streaming);
-        QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Idle);
-        QCOMPARE(menu.buttons[MenuWidget::ScreenCast]->text(), QStringLiteral("投屏"));
-        QVERIFY(!menu.screenCastSpinnerTimer->isActive());
+        QTRY_VERIFY(menu.screenCastController->m_retryTimer.isActive());
+        QCOMPARE(menu.screenCastController->state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(menu.screenCastController->m_autoCastEnabled);
+        QVERIFY(menu.buttons[MenuWidget::ScreenCast]->text().isEmpty());
+        QVERIFY(menu.screenCastSpinnerTimer->isActive());
         QCOMPARE(scrcpyCommands().size(), 1);
+        QVERIFY(writeFile(fixturePath + "/behavior.txt", ""));
+        // Information refresh must not bypass the backoff or launch duplicates.
+        for (int i = 0; i < 5; ++i) menu.screenCastController->checkDevice();
+        QTest::qWait(100);
+        QCOMPARE(scrcpyCommands().size(), 1);
+        QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 2);
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Idle);
+        QVERIFY(!menu.screenCastController->m_autoCastEnabled);
+        QVERIFY(!menu.screenCastController->m_retryTimer.isActive());
     }
-    void disconnectAndReplacementStopOnlyCurrentSession_data() {
+    void disconnectAndReplacementReconnectCurrentSession_data() {
         QTest::addColumn<int>("mode"); QTest::addColumn<QString>("serial");
         QTest::newRow("disconnect") << int(DeviceManager::None) << QString();
         QTest::newRow("replacement") << int(DeviceManager::ADB) << QString("PHONE_B");
         QTest::newRow("mode-change") << int(DeviceManager::Fastboot) << QString("PHONE_A");
     }
-    void disconnectAndReplacementStopOnlyCurrentSession() {
+    void disconnectAndReplacementReconnectCurrentSession() {
         QFETCH(int, mode); QFETCH(QString, serial);
         ScreenCastController controller;
         DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
@@ -178,9 +199,17 @@ private slots:
         QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
         QTRY_COMPARE(scrcpyCommands().size(), 1);
         DeviceManager::instance()->setDetectedDevice(static_cast<DeviceManager::DeviceMode>(mode), serial);
-        QTRY_COMPARE(controller.state(), ScreenCastController::Idle);
+        QTRY_COMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(controller.m_autoCastEnabled);
+        QVERIFY(!controller.m_process);
         QTest::qWait(80);
         QCOMPARE(scrcpyCommands().size(), 1);
+        const QString returningSerial = mode == int(DeviceManager::ADB) ? serial : QString("PHONE_A");
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, returningSerial);
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 2);
+        QVERIFY(scrcpyCommands().contains(QJsonArray{"scrcpy", "--max-size", "1024",
+            "--video-bit-rate", "4M", "--serial", returningSerial}));
     }
     void leaseDefersStartAndDoesNotBlockStop() {
         ScreenCastController controller;
@@ -216,20 +245,189 @@ private slots:
         QVERIFY(!controller.m_process);
         QVERIFY(scrcpyCommands().isEmpty());
     }
-    void startupTimeoutRestoresButton() {
+    void startupTimeoutAutomaticallyRetries() {
         ScreenCastController controller;
         DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
         // Suppress only the fake process's start notification to emulate an
         // uncompleted OS launch; the real timeout path must kill this process.
+        bool suppressFirstStart = true;
         connect(&controller, &ScreenCastController::stateChanged, this, [&] {
-            if (controller.state() == ScreenCastController::Starting)
+            if (suppressFirstStart && controller.state() == ScreenCastController::Starting) {
+                suppressFirstStart = false;
                 QObject::disconnect(controller.m_process, &QProcess::started, &controller, nullptr);
+            }
         });
         controller.m_startTimer.setInterval(40);
         controller.toggle(); controller.tryStart();
         QCOMPARE(controller.state(), ScreenCastController::Starting);
-        QTRY_COMPARE(controller.state(), ScreenCastController::Idle);
+        QTRY_COMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(controller.m_autoCastEnabled);
         QVERIFY(controller.statusText().contains(QStringLiteral("超时")));
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+    }
+    void cancelRetryCannotRestartLater() {
+        QVERIFY(QFile::rename(fixturePath + "/scrcpy.exe", fixturePath + "/missing-scrcpy.exe"));
+        MenuWidget menu;
+        freeze(menu);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        auto *controller = menu.screenCastController;
+        controller->m_retryTimer.setInterval(120);
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_VERIFY(controller->m_retryTimer.isActive());
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QCOMPARE(controller->state(), ScreenCastController::Idle);
+        QVERIFY(!controller->m_autoCastEnabled);
+        QVERIFY(!controller->m_retryTimer.isActive());
+        QVERIFY(QFile::rename(fixturePath + "/missing-scrcpy.exe", fixturePath + "/scrcpy.exe"));
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::None, {});
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        QTest::qWait(300);
+        QVERIFY(scrcpyCommands().isEmpty());
+        QCOMPARE(controller->state(), ScreenCastController::Idle);
+    }
+    void manualCancelWhileDisconnectIsStopping() {
+        MenuWidget menu;
+        freeze(menu);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        auto *controller = menu.screenCastController;
+        controller->m_retryTimer.setInterval(80);
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(controller->state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        bool canceled = false;
+        connect(controller, &ScreenCastController::stateChanged, this, [&] {
+            if (!canceled && controller->state() == ScreenCastController::Stopping) {
+                canceled = true;
+                QVERIFY(menu.buttons[MenuWidget::ScreenCast]->isEnabled());
+                menu.buttons[MenuWidget::ScreenCast]->click();
+            }
+        });
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::None, {});
+        QTRY_COMPARE(controller->state(), ScreenCastController::Idle);
+        QVERIFY(canceled);
+        QVERIFY(!controller->m_autoCastEnabled);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        QTest::qWait(200);
+        QCOMPARE(scrcpyCommands().size(), 1);
+        QCOMPARE(controller->state(), ScreenCastController::Idle);
+    }
+    void repeatedRebootsReconnectUntilExplicitCancel() {
+        ScreenCastController controller;
+        controller.m_retryTimer.setInterval(80);
+        auto *manager = DeviceManager::instance();
+        manager->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        for (int reboot = 0; reboot < 3; ++reboot) {
+            manager->setDetectedDevice(DeviceManager::None, {});
+            QTRY_COMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+            QVERIFY(controller.m_autoCastEnabled);
+            manager->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+            QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+            QTRY_COMPARE(scrcpyCommands().size(), reboot + 2);
+        }
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Idle);
+        manager->setDetectedDevice(DeviceManager::None, {});
+        manager->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        QTest::qWait(250);
+        QCOMPARE(scrcpyCommands().size(), 4);
+        QCOMPARE(controller.state(), ScreenCastController::Idle);
+    }
+    void retryRespectsLeaseAndCancellation() {
+        QVERIFY(writeFile(fixturePath + "/behavior.txt", "close"));
+        ScreenCastController controller;
+        controller.m_retryTimer.setInterval(80);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_VERIFY(controller.m_retryTimer.isActive());
+        QObject operation;
+        QVERIFY(DeviceOperationLease::acquire(&operation));
+        QVERIFY(writeFile(fixturePath + "/behavior.txt", ""));
+        QTest::qWait(180);
+        QCOMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        QCOMPARE(scrcpyCommands().size(), 1);
+        DeviceOperationLease::release(&operation);
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 2);
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Idle);
+        QVERIFY(DeviceOperationLease::acquire(&operation));
+        controller.toggle();
+        QCOMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        controller.toggle();
+        QCOMPARE(controller.state(), ScreenCastController::Idle);
+        DeviceOperationLease::release(&operation);
+        QTest::qWait(180);
+        QCOMPARE(scrcpyCommands().size(), 2);
+    }
+    void rebootFromDeviceCheckReconnectsWithRealPolling() {
+        QVERIFY(writeFile(fixturePath + "/devices.txt", "PHONE_A\tdevice\n"));
+        MenuWidget menu;
+        auto *manager = DeviceManager::instance();
+        manager->m_checkTimer->setInterval(80);
+        auto *controller = menu.screenCastController;
+        controller->m_retryTimer.setInterval(120);
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(controller->state(), ScreenCastController::Streaming);
+        DeviceCheckWindow deviceWindow;
+        // Drain the current query without accelerated polling immediately restarting it.
+        // Resume real polling after reboot releases its device-operation lease.
+        manager->m_checkTimer->stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!manager->m_isChecking && !manager->m_infoQueryActive, 10000);
+        QVERIFY(QMetaObject::invokeMethod(&deviceWindow, "onRebootButtonClicked", Qt::DirectConnection));
+        QTRY_VERIFY(QFile::exists(fixturePath + "/reboot.txt"));
+        QTRY_VERIFY(!deviceWindow.isOperationInProgress());
+        manager->m_checkTimer->start(80);
+        QTRY_COMPARE(manager->currentMode(), DeviceManager::None);
+        QTRY_COMPARE(controller->state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(controller->m_autoCastEnabled);
+        QVERIFY(menu.screenCastSpinnerTimer->isActive());
+        QVERIFY(writeFile(fixturePath + "/devices.txt", "PHONE_A\tunauthorized\n"));
+        QTest::qWait(200);
+        QCOMPARE(controller->state(), ScreenCastController::WaitingForDevice);
+        QCOMPARE(scrcpyCommands().size(), 1);
+        QVERIFY(writeFile(fixturePath + "/devices.txt", "PHONE_A\tdevice\n"));
+        QTRY_COMPARE(controller->state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 2);
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(controller->state(), ScreenCastController::Idle);
+        QVERIFY(writeFile(fixturePath + "/devices.txt", ""));
+        QTRY_COMPARE(manager->currentMode(), DeviceManager::None);
+        QVERIFY(writeFile(fixturePath + "/devices.txt", "PHONE_A\tdevice\n"));
+        QTRY_COMPARE(manager->currentMode(), DeviceManager::ADB);
+        QTest::qWait(250);
+        QCOMPARE(scrcpyCommands().size(), 2);
+    }
+    void rapidReconnectDuringStopStartsOnlyOneReplacement() {
+        ScreenCastController controller;
+        controller.m_retryTimer.setInterval(100);
+        auto *manager = DeviceManager::instance();
+        manager->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        // Both events can arrive before the old process reports finished.
+        manager->setDetectedDevice(DeviceManager::None, {});
+        manager->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 2);
+        QTest::qWait(250);
+        QCOMPARE(scrcpyCommands().size(), 2);
+    }
+    void destroyingPendingRetryCannotStartLater() {
+        QVERIFY(QFile::rename(fixturePath + "/scrcpy.exe", fixturePath + "/missing-scrcpy.exe"));
+        auto controller = std::unique_ptr<ScreenCastController>(new ScreenCastController);
+        controller->m_retryTimer.setInterval(150);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller->toggle();
+        QTRY_VERIFY(controller->m_retryTimer.isActive());
+        controller.reset();
+        QVERIFY(QFile::rename(fixturePath + "/missing-scrcpy.exe", fixturePath + "/scrcpy.exe"));
+        QTest::qWait(350);
+        QVERIFY(scrcpyCommands().isEmpty());
     }
     void destroyingMenuStopsItsSessionOnly() {
         auto menu = std::unique_ptr<MenuWidget>(new MenuWidget);
@@ -290,11 +488,17 @@ int helperMain(QCoreApplication &application) {
         return application.exec();
     }
     if (args.value(0) == "devices") {
+        if (base == "fastboot") return 0;
         std::fputs("List of devices attached\n", stdout);
         const auto devices = readFile(directory + "/devices.txt");
         std::fwrite(devices.constData(), 1, devices.size(), stdout); return 0;
     }
     if (args.value(0) == "-s") { args.removeFirst(); args.removeFirst(); }
+    if (args.value(0) == "reboot") {
+        writeFile(directory + "/devices.txt", "");
+        writeFile(directory + "/reboot.txt", "yes");
+        return 0;
+    }
     if (args.value(0) == "shell") {
         const QString property = args.last();
         std::puts(property.contains("slot") ? "_a" : property.contains("bootstate") ? "orange" : "mock");

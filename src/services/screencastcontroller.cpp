@@ -7,12 +7,17 @@
 
 ScreenCastController::ScreenCastController(QObject *parent) : QObject(parent)
 {
+    // A short backoff also handles early scrcpy failures while ADB still reports
+    // the rebooting device online. Do not spawn a tight restart loop.
+    m_retryTimer.setSingleShot(true);
+    m_retryTimer.setInterval(2000);
+    connect(&m_retryTimer, &QTimer::timeout, this, &ScreenCastController::tryStart);
     m_startTimer.setSingleShot(true);
     m_startTimer.setInterval(10000);
     connect(&m_startTimer, &QTimer::timeout, this, [this] {
         if (m_state == Starting) {
-            m_stopStatus = QStringLiteral("投屏启动超时，请重试");
-            stop();
+            m_stopStatus = QStringLiteral("投屏启动超时，将自动重试；再次点击取消自动投屏");
+            stopCurrentProcess();
         }
     });
     auto *manager = DeviceManager::instance();
@@ -25,6 +30,9 @@ ScreenCastController::ScreenCastController(QObject *parent) : QObject(parent)
 
 ScreenCastController::~ScreenCastController()
 {
+    m_autoCastEnabled = false;
+    m_retryTimer.stop();
+    m_startTimer.stop();
     if (!m_process) return;
     disconnect(m_process, nullptr, this, nullptr);
     if (m_process->state() != QProcess::NotRunning) {
@@ -42,9 +50,10 @@ void ScreenCastController::setState(State state, const QString &status)
 
 void ScreenCastController::toggle()
 {
-    if (m_state != Idle) { stop(); return; }
+    if (m_autoCastEnabled || m_state != Idle) { stop(); return; }
+    m_autoCastEnabled = true;
     m_stopStatus.clear();
-    setState(WaitingForDevice, QStringLiteral("等待 ADB 设备，请连接手机并允许 USB 调试；再次点击取消"));
+    setState(WaitingForDevice, QStringLiteral("自动投屏已开启，等待 ADB 设备；请允许 USB 调试，再次点击取消自动投屏"));
     // Queue startup so the button paints its spinner before launching scrcpy.
     QTimer::singleShot(0, this, &ScreenCastController::tryStart);
 }
@@ -52,7 +61,8 @@ void ScreenCastController::toggle()
 void ScreenCastController::tryStart()
 {
     auto *manager = DeviceManager::instance();
-    if (m_state != WaitingForDevice || DeviceOperationLease::busyFor() ||
+    if (!m_autoCastEnabled || m_state != WaitingForDevice || m_retryTimer.isActive() ||
+        DeviceOperationLease::busyFor() ||
         manager->currentMode() != DeviceManager::ADB || manager->deviceSerial().isEmpty()) return;
 
     m_serial = manager->deviceSerial();
@@ -67,19 +77,20 @@ void ScreenCastController::tryStart()
         if (process != m_process) return;
         if (m_state == Stopping) { process->kill(); return; }
         m_startTimer.stop();
-        setState(Streaming, QStringLiteral("正在投屏；再次点击停止投屏"));
+        setState(Streaming, QStringLiteral("正在投屏；断开后自动重连，再次点击取消自动投屏"));
     });
     connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart)
             finish(process, m_state == Stopping ? QStringLiteral("点击开始投屏") :
-                   QStringLiteral("无法启动投屏，请检查 scrcpy 文件后重试"));
+                   QStringLiteral("无法启动投屏，将自动重试；请检查 scrcpy 文件，再次点击取消自动投屏"));
     });
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, process](int code, QProcess::ExitStatus exit) {
-        finish(process, m_state == Stopping || (code == 0 && exit == QProcess::NormalExit) ?
-               QStringLiteral("点击开始投屏") : QStringLiteral("投屏已结束或启动失败，请检查连接后重试"));
+        finish(process, code == 0 && exit == QProcess::NormalExit ?
+               QStringLiteral("投屏窗口已关闭，将自动恢复；再次点击取消自动投屏") :
+               QStringLiteral("投屏已结束或启动失败，将自动重试；再次点击取消自动投屏"));
     });
-    setState(Starting, QStringLiteral("正在启动投屏；再次点击取消"));
+    setState(Starting, QStringLiteral("正在启动投屏；再次点击取消自动投屏"));
     if (m_process != process || m_state != Starting) return;
     m_startTimer.start();
     process->start(QDir(ResourceExtractor::getResourcePath()).filePath("scrcpy.exe"),
@@ -96,10 +107,26 @@ void ScreenCastController::finish(QProcess *process, const QString &status)
     process->deleteLater();
     const QString finalStatus = m_stopStatus.isEmpty() ? status : m_stopStatus;
     m_stopStatus.clear();
-    setState(Idle, finalStatus);
+    if (m_autoCastEnabled) {
+        // Set the timer before emitting stateChanged: a manual cancel from that
+        // signal must be able to cancel both the pending retry and the intent.
+        m_retryTimer.start();
+        setState(WaitingForDevice, finalStatus);
+    } else {
+        setState(Idle, QStringLiteral("点击开始投屏"));
+    }
 }
 
 void ScreenCastController::stop()
+{
+    // Only an explicit stop (button / application exit) clears auto-cast intent.
+    m_autoCastEnabled = false;
+    m_retryTimer.stop();
+    m_stopStatus.clear();
+    stopCurrentProcess();
+}
+
+void ScreenCastController::stopCurrentProcess()
 {
     m_startTimer.stop();
     if (!m_process) {
@@ -108,7 +135,8 @@ void ScreenCastController::stop()
         return;
     }
     if (m_state == Stopping) return;
-    setState(Stopping, QStringLiteral("正在停止投屏"));
+    setState(Stopping, m_autoCastEnabled ? QStringLiteral("连接中断，正在等待自动重连") :
+                                          QStringLiteral("正在停止投屏"));
     if (m_process->state() == QProcess::NotRunning)
         finish(m_process, QStringLiteral("点击开始投屏"));
     else m_process->kill();
@@ -119,5 +147,8 @@ void ScreenCastController::checkDevice()
     if (m_state == WaitingForDevice) { tryStart(); return; }
     if (m_state != Starting && m_state != Streaming) return;
     auto *manager = DeviceManager::instance();
-    if (manager->currentMode() != DeviceManager::ADB || manager->deviceSerial() != m_serial) stop();
+    if (manager->currentMode() != DeviceManager::ADB || manager->deviceSerial() != m_serial) {
+        m_stopStatus = QStringLiteral("设备已断开或切换，等待 ADB 恢复后自动投屏；再次点击取消自动投屏");
+        stopCurrentProcess();
+    }
 }
