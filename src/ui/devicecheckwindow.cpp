@@ -30,6 +30,9 @@
 #include <QPointer>
 #include <QApplication>
 #include <QEvent>
+#include <QMimeData>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 
 namespace {
 // Keep a single selectable document, spreading fields rather than enlarging text.
@@ -113,11 +116,8 @@ public:
             "QWidget#deviceDetailsSurface { background:#FFFFFF; border:1px solid #D6E2EE; border-radius:12px; }"
             "QTextEdit#deviceDetailsText { color:#2c3e50; background:#F3F7FC; border:1px solid #D6E2EE; border-radius:8px; padding:8px; font-size:11px; selection-background-color:#B8D8E5; }"));
     }
-};}
-#include "processmanager.h"
-#include "resourceextractor.h"
-#include "uihelper.h"
-#include "devicemanager.h"
+};
+}
 DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     : QWidget(parent)
     , currentProcess(nullptr)
@@ -127,6 +127,8 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
     , opacityTimer(nullptr)
     , detailsDialog(nullptr)
 {
+    setAcceptDrops(true);
+
     // 设置窗口标志：无边框、置顶
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setAttribute(Qt::WA_TranslucentBackground);
@@ -192,7 +194,7 @@ DeviceCheckWindow::~DeviceCheckWindow()
 
 void DeviceCheckWindow::closeEvent(QCloseEvent *event)
 {
-    // Active reboot/flash operations continue in the retained window.
+    // Active reboot/flash/transfer operations continue in the retained window.
     QWidget::closeEvent(event);
 }
 
@@ -219,6 +221,7 @@ void DeviceCheckWindow::finishOperation()
         waitTimer->deleteLater();
         waitTimer = nullptr;
     }
+    fileTransfer = FileTransfer();
     pendingFlashPartition.clear();
     pendingFlashImage.clear();
     DeviceOperationLease::release(this);
@@ -241,6 +244,10 @@ QProcess *DeviceCheckWindow::createOperationProcess()
         if (error != QProcess::FailedToStart || currentProcess != process) {
             return;
         }
+        if (!fileTransfer.files.isEmpty()) {
+            finishFileTransferProcess(process, false, true);
+            return;
+        }
         const QString message = process->errorString();
         releaseOperationProcess(process);
         finishOperation();
@@ -256,6 +263,127 @@ void DeviceCheckWindow::releaseOperationProcess(QProcess *process)
         currentProcess = nullptr;
     }
     process->deleteLater();
+}
+
+bool DeviceCheckWindow::canAcceptFileTransfer() const
+{
+    const auto *manager = DeviceManager::instance();
+    const QObject *owner = DeviceOperationLease::owner();
+    return manager->currentMode() == DeviceManager::ADB && !manager->deviceSerial().isEmpty()
+           && !operationInProgress && (!owner || owner == this);
+}
+
+QStringList DeviceCheckWindow::droppedFiles(const QMimeData *mime) const
+{
+    QStringList files;
+    if (!mime || !mime->hasUrls()) return files;
+    for (const QUrl &url : mime->urls()) {
+        const QFileInfo file(url.toLocalFile());
+        // Reject the whole drop rather than silently skipping directories or remote URLs.
+        if (!url.isLocalFile() || !file.isFile() || !file.isReadable()) return {};
+        const QString path = file.absoluteFilePath();
+        if (!files.contains(path)) files.append(path);
+    }
+    return files;
+}
+
+void DeviceCheckWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->possibleActions().testFlag(Qt::CopyAction) && canAcceptFileTransfer()
+        && !droppedFiles(event->mimeData()).isEmpty()) {
+        // ADB push copies files; never tell Explorer to remove the local originals.
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+    } else {
+        event->ignore();
+    }
+}
+
+void DeviceCheckWindow::dropEvent(QDropEvent *event)
+{
+    const QStringList files = droppedFiles(event->mimeData());
+    if (!event->possibleActions().testFlag(Qt::CopyAction) || !canAcceptFileTransfer()
+        || files.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    if (transferFiles(files)) {
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+    } else {
+        event->ignore();
+    }
+}
+
+bool DeviceCheckWindow::transferFiles(const QStringList &files)
+{
+    if (files.isEmpty() || !canAcceptFileTransfer() || !beginOperation()) return false;
+    fileTransfer.files = files;
+    fileTransfer.serial = DeviceManager::instance()->deviceSerial();
+    transferNextFile();
+    return true;
+}
+
+void DeviceCheckWindow::transferNextFile()
+{
+    if (fileTransfer.next >= fileTransfer.files.size()) {
+        finishFileTransfer();
+        return;
+    }
+    const auto *manager = DeviceManager::instance();
+    if (manager->currentMode() != DeviceManager::ADB
+        || manager->deviceSerial() != fileTransfer.serial) {
+        finishFileTransfer(QStringLiteral("原设备已断开或改变，未继续传输剩余文件。"));
+        return;
+    }
+    updateUIForMode(manager->currentMode());
+    const QString path = fileTransfer.files.at(fileTransfer.next);
+    QProcess *process = createOperationProcess();
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, process](int exitCode, QProcess::ExitStatus status) {
+        if (currentProcess != process) return;
+        finishFileTransferProcess(process, exitCode == 0 && status == QProcess::NormalExit);
+    });
+    // Keep Unicode paths intact and pin every push to the device selected for this batch.
+    process->start(ResourceExtractor::getAdbPath(),
+                   {"-s", fileTransfer.serial, "push", path,
+                    "/sdcard/" + QFileInfo(path).fileName()});
+}
+
+void DeviceCheckWindow::finishFileTransferProcess(QProcess *process, bool success, bool failedToStart)
+{
+    if (currentProcess != process || fileTransfer.files.isEmpty()) return;
+    if (success) {
+        ++fileTransfer.succeeded;
+    } else {
+        QString error = QString::fromUtf8(process->readAllStandardError()).trimmed();
+        if (error.isEmpty()) error = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+        if (error.isEmpty()) error = process->errorString();
+        fileTransfer.failures.append(QFileInfo(fileTransfer.files.at(fileTransfer.next)).fileName()
+                                     + ": " + error.right(512));
+    }
+    ++fileTransfer.next;
+    releaseOperationProcess(process);
+    if (failedToStart) {
+        finishFileTransfer(QStringLiteral("ADB 启动失败，未继续传输剩余文件。"));
+    } else {
+        transferNextFile();
+    }
+}
+
+void DeviceCheckWindow::finishFileTransfer(const QString &interruption)
+{
+    const int skipped = fileTransfer.files.size() - fileTransfer.next;
+    const bool success = fileTransfer.failures.isEmpty() && interruption.isEmpty();
+    QString message = QStringLiteral("目标：手机共享存储根目录 /sdcard/\n成功：%1，失败：%2，未传输：%3")
+                       .arg(fileTransfer.succeeded).arg(fileTransfer.failures.size()).arg(skipped);
+    if (!interruption.isEmpty()) message += "\n" + interruption;
+    // Bound the dialog size even when a large batch fails.
+    for (const QString &error : fileTransfer.failures.mid(0, 5)) message += "\n" + error;
+    if (fileTransfer.failures.size() > 5) message += QStringLiteral("\n其余失败文件未展开。");
+    finishOperation();
+    UIHelper::showCenteredMessageBox(success ? QMessageBox::Information : QMessageBox::Warning,
+                                    success ? "文件传输完成" : "文件传输未全部完成", message, this);
 }
 
 void DeviceCheckWindow::setupUI()
@@ -574,9 +702,16 @@ void DeviceCheckWindow::onDeviceInfoUpdated(const QString &info)
 void DeviceCheckWindow::updateUIForMode(DeviceManager::DeviceMode mode)
 {
     const bool connected = mode != DeviceManager::None;
-    infoLabel->setToolTip(QStringLiteral("双击查看设备信息，再次点击关闭"));
+    const QString transferHint = QStringLiteral("拖入文件传到手机共享存储根目录 /sdcard/（同名文件会覆盖）");
+    infoLabel->setToolTip(QStringLiteral("双击查看设备信息，再次点击关闭")
+                          + (mode == DeviceManager::ADB ? '\n' + transferHint : QString()));
+    setToolTip(mode == DeviceManager::ADB ? transferHint : QString());
     statusLabel->setText(mode == DeviceManager::ADB ? "ADB 模式" :
                          mode == DeviceManager::Fastboot ? "Fastboot 模式" : "未连接");
+    if (!fileTransfer.files.isEmpty()) {
+        statusLabel->setText(QStringLiteral("传输文件 %1/%2")
+                             .arg(fileTransfer.next + 1).arg(fileTransfer.files.size()));
+    }
     if (!connected) {
         infoLabel->setText("等待设备");
     }

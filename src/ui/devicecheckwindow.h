@@ -14,9 +14,13 @@
 #include <QComboBox>
 #include <QMouseEvent>
 #include <QPointer>
+#include <QStringList>
 #include "devicemanager.h"
 
 class QDialog;
+class QMimeData;
+class QDragEnterEvent;
+class QDropEvent;
 
 class DeviceCheckWindow : public QWidget
 {
@@ -41,6 +45,8 @@ private slots:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -53,6 +59,12 @@ private:
     void finishOperation();
     QProcess *createOperationProcess();
     void releaseOperationProcess(QProcess *process);
+    bool canAcceptFileTransfer() const;
+    QStringList droppedFiles(const QMimeData *mime) const;
+    bool transferFiles(const QStringList &files);
+    void transferNextFile();
+    void finishFileTransferProcess(QProcess *process, bool success, bool failedToStart = false);
+    void finishFileTransfer(const QString &interruption = QString());
     void setupUI();
     void updateUIForMode(DeviceManager::DeviceMode mode);
     void showDeviceDetails();
@@ -77,6 +89,14 @@ private:
     QString pendingFlashImage;
     int waitCounter;
     
+    struct FileTransfer {
+        QStringList files;
+        QString serial;
+        int next = 0;
+        int succeeded = 0;
+        QStringList failures;
+    } fileTransfer;
+
     // 拖动相关
     bool isDragging;
     QPoint dragStartPosition;

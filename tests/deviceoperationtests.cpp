@@ -9,6 +9,7 @@
 #include <QTemporaryDir>
 #include <memory>
 #include <cstdio>
+#include <cstdlib>
 #include "devicecheckwindow.h"
 #include "menuwidget.h"
 #include "repairwindow.h"
@@ -22,10 +23,14 @@
 #include "deviceoperationlease.h"
 #include <QSettings>
 #include <QUuid>
+#include <QMimeData>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 
 namespace {
 QString fixturePath;
 QString fastbootOverride;
+QString adbOverride;
 QByteArray readFile(const QString &path)
 {
     QFile file(path);
@@ -41,7 +46,10 @@ bool putFile(const QString &path, const QByteArray &data)
 
 // 测试专用链接替身：所有业务进程只能启动隔离目录内的本测试程序副本。
 QString ResourceExtractor::getResourcePath() { return fixturePath; }
-QString ResourceExtractor::getAdbPath() { return fixturePath + "/adb.exe"; }
+QString ResourceExtractor::getAdbPath()
+{
+    return adbOverride.isEmpty() ? fixturePath + "/adb.exe" : adbOverride;
+}
 QString ResourceExtractor::getFastbootPath()
 {
     return fastbootOverride.isEmpty() ? fixturePath + "/fastboot.exe" : fastbootOverride;
@@ -71,6 +79,17 @@ private slots:
     void legacyWaitWorksWithApplicationLease();
     void menuStartsMonitoringWithoutOtherWindows();
     void repairStartsMonitoringWithoutOtherWindows();
+    void droppedFilesReachSharedStorage();
+    void invalidDropsAreRejected_data();
+    void invalidDropsAreRejected();
+    void dropRechecksModeAndLease();
+    void transferFailures_data();
+    void transferFailures();
+    void failedTransferStartReleasesOperation();
+    void transferHideAndRepeatedDrop();
+    void transferDestructionDoesNotStartNextFile();
+    void transferDeviceChangeStopsBatch_data();
+    void transferDeviceChangeStopsBatch();
     void rootQuoting_data();
     void rootQuoting();
     void apkCommandsQuoteInstallAndCleanup();
@@ -78,6 +97,10 @@ private slots:
     void moduleCommandsQuoteInstallAndCleanup();
 private:
     void awaitFastboot(DeviceCheckWindow &window);
+    void awaitAdb(DeviceCheckWindow &window);
+    bool dropFiles(DeviceCheckWindow &window, const QList<QUrl> &urls);
+    QList<QJsonArray> pushes() const;
+    QString lastMessage;
     QString audit() const {
         QString result;
         for (const QFileInfo &file : QDir(fixturePath).entryInfoList({"command-*.json"}, QDir::Files))
@@ -187,15 +210,17 @@ void DeviceOperationTests::init()
     fixture->setAutoRemove(false); // Keep test evidence for manual cleanup.
     fixturePath = fixture->path();
     fastbootOverride.clear();
+    adbOverride.clear();
     QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(), ResourceExtractor::getAdbPath()));
     QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(), ResourceExtractor::getFastbootPath()));
     QVERIFY(putFile(fixturePath + "/mode.txt", "fastboot"));
     QVERIFY(putFile(fixturePath + "/behavior.txt", "hang"));
     messages = 0;
+    lastMessage.clear();
     connect(&messageCloser, &QTimer::timeout, this, [this]() {
         for (QWidget *widget : QApplication::topLevelWidgets()) {
             if (auto *message = qobject_cast<QMessageBox *>(widget)) {
-                if (message->isVisible()) { ++messages; message->accept(); }
+                if (message->isVisible()) { ++messages; lastMessage = message->text(); message->accept(); }
             }
         }
     });
@@ -226,6 +251,253 @@ void DeviceOperationTests::awaitFastboot(DeviceCheckWindow &window)
     QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->m_infoProcess->state(), QProcess::NotRunning, 5000);
     DeviceManager::instance()->m_checkTimer->stop();
     window.updateUIForMode(DeviceManager::Fastboot);
+}
+
+void DeviceOperationTests::awaitAdb(DeviceCheckWindow &window)
+{
+    QVERIFY(putFile(fixturePath + "/mode.txt", "adb"));
+    QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->currentMode(), DeviceManager::ADB, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!DeviceManager::instance()->m_isChecking, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!DeviceManager::instance()->m_infoQueryActive, 5000);
+    DeviceManager::instance()->m_checkTimer->stop();
+    window.updateUIForMode(DeviceManager::ADB);
+}
+
+bool DeviceOperationTests::dropFiles(DeviceCheckWindow &window, const QList<QUrl> &urls)
+{
+    QMimeData mime;
+    mime.setUrls(urls);
+    QDragEnterEvent enter(QPoint(30, 80), Qt::CopyAction | Qt::MoveAction, &mime,
+                          Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&window, &enter);
+    if (!enter.isAccepted()) return false;
+    if (enter.dropAction() != Qt::CopyAction) return false;
+    QDropEvent drop(QPointF(30, 80), Qt::CopyAction | Qt::MoveAction, &mime,
+                    Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&window, &drop);
+    return drop.isAccepted() && drop.dropAction() == Qt::CopyAction;
+}
+
+QList<QJsonArray> DeviceOperationTests::pushes() const
+{
+    QList<QJsonArray> result;
+    for (const QFileInfo &file : QDir(fixturePath).entryInfoList({"command-*.json"}, QDir::Files)) {
+        const QJsonArray command = QJsonDocument::fromJson(readFile(file.absoluteFilePath())).array();
+        if (command.contains("push")) result.append(command);
+    }
+    return result;
+}
+
+void DeviceOperationTests::droppedFilesReachSharedStorage()
+{
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "success"));
+    const QStringList names = {QStringLiteral("中文 文件's;&.txt"), "error-failed.txt"};
+    QList<QUrl> urls;
+    for (const QString &name : names) {
+        const QString path = fixturePath + '/' + name;
+        QVERIFY(putFile(path, name.toUtf8()));
+        urls.append(QUrl::fromLocalFile(path));
+    }
+    // Duplicate URLs are copied only once; local files are never removed.
+    urls.append(urls.first());
+    QVERIFY(dropFiles(window, urls));
+    QVERIFY(window.operationInProgress);
+    QCOMPARE(DeviceOperationLease::owner(), &window);
+    QVERIFY(!window.executeButton->isEnabled());
+    QVERIFY(window.statusLabel->text().contains("1/2"));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.operationInProgress, 5000);
+    QTRY_COMPARE(messages, 1);
+    QVERIFY(lastMessage.contains(QStringLiteral("成功：2，失败：0，未传输：0")));
+    QCOMPARE(pushes().size(), 2);
+    for (const QString &name : names) {
+        const QString path = fixturePath + '/' + name;
+        QVERIFY(pushes().contains(QJsonArray{"adb", "-s", "mock-serial", "push", path, "/sdcard/" + name}));
+        QCOMPARE(readFile(fixturePath + "/device/" + name), name.toUtf8());
+        QVERIFY(QFile::exists(path));
+    }
+    QVERIFY(window.currentProcess == nullptr);
+    QVERIFY(DeviceOperationLease::owner() == nullptr);
+    QVERIFY(!DeviceManager::instance()->m_isPaused);
+    QVERIFY(window.executeButton->isEnabled());
+}
+
+void DeviceOperationTests::invalidDropsAreRejected_data()
+{
+    QTest::addColumn<QString>("reason");
+    for (const QString reason : {"none", "fastboot", "lease", "serial", "directory", "remote", "missing", "mixed", "text", "move"})
+        QTest::newRow(qPrintable(reason)) << reason;
+}
+
+void DeviceOperationTests::invalidDropsAreRejected()
+{
+    QFETCH(QString, reason);
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    const QString path = fixturePath + "/valid.txt";
+    QVERIFY(putFile(path, "original"));
+    QList<QUrl> urls{QUrl::fromLocalFile(path)};
+    auto *manager = DeviceManager::instance();
+    QObject other;
+    if (reason == "none") manager->m_currentMode = DeviceManager::None;
+    if (reason == "fastboot") manager->m_currentMode = DeviceManager::Fastboot;
+    if (reason == "serial") manager->m_deviceSerial.clear();
+    if (reason == "lease") QVERIFY(DeviceOperationLease::acquire(&other));
+    if (reason == "directory") urls = {QUrl::fromLocalFile(fixturePath)};
+    if (reason == "remote") urls = {QUrl("https://example.invalid/file.txt")};
+    if (reason == "missing") urls = {QUrl::fromLocalFile(fixturePath + "/missing.txt")};
+    if (reason == "mixed") urls.append(QUrl::fromLocalFile(fixturePath));
+    if (reason == "text" || reason == "move") {
+        QMimeData mime;
+        if (reason == "text") mime.setText(path);
+        else mime.setUrls(urls);
+        QDragEnterEvent enter(QPoint(20, 80), reason == "move" ? Qt::MoveAction : Qt::CopyAction,
+                              &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&window, &enter);
+        QVERIFY(!enter.isAccepted());
+    } else {
+        QVERIFY(!dropFiles(window, urls));
+    }
+    QVERIFY(!window.operationInProgress);
+    QVERIFY(window.currentProcess == nullptr);
+    QCOMPARE(pushes().size(), 0);
+    DeviceOperationLease::release(&other);
+}
+
+void DeviceOperationTests::dropRechecksModeAndLease()
+{
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(ResourceExtractor::getAdbPath())});
+    for (bool changeMode : {true, false}) {
+        QDragEnterEvent enter(QPoint(30, 80), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&window, &enter);
+        QVERIFY(enter.isAccepted());
+        QObject other;
+        if (changeMode) DeviceManager::instance()->m_currentMode = DeviceManager::Fastboot;
+        else QVERIFY(DeviceOperationLease::acquire(&other));
+        QDropEvent drop(QPointF(30, 80), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&window, &drop);
+        QVERIFY(!drop.isAccepted());
+        QVERIFY(!window.operationInProgress);
+        DeviceOperationLease::release(&other);
+        DeviceManager::instance()->m_currentMode = DeviceManager::ADB;
+    }
+    QCOMPARE(pushes().size(), 0);
+}
+
+void DeviceOperationTests::transferFailures_data()
+{
+    QTest::addColumn<QByteArray>("behavior");
+    QTest::newRow("nonzero") << QByteArray("fail-first");
+    QTest::newRow("crash") << QByteArray("crash-first");
+}
+
+void DeviceOperationTests::transferFailures()
+{
+    QFETCH(QByteArray, behavior);
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", behavior));
+    QList<QUrl> urls;
+    for (const QString name : {"first.txt", "second.txt"}) {
+        const QString path = fixturePath + '/' + name;
+        QVERIFY(putFile(path, "data"));
+        urls.append(QUrl::fromLocalFile(path));
+    }
+    QVERIFY(dropFiles(window, urls));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.operationInProgress, 5000);
+    QTRY_COMPARE(messages, 1);
+    QCOMPARE(pushes().size(), 2);
+    QVERIFY(lastMessage.contains(QStringLiteral("成功：1，失败：1，未传输：0")));
+    QVERIFY(lastMessage.contains("first.txt"));
+    QVERIFY(QFile::exists(fixturePath + "/device/second.txt"));
+    QVERIFY(DeviceOperationLease::owner() == nullptr);
+}
+
+void DeviceOperationTests::failedTransferStartReleasesOperation()
+{
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    const QString path = fixturePath + "/first.txt";
+    QVERIFY(putFile(path, "data"));
+    adbOverride = fixturePath + "/missing-adb.exe";
+    QVERIFY(dropFiles(window, {QUrl::fromLocalFile(path), QUrl::fromLocalFile(ResourceExtractor::getFastbootPath())}));
+    QTRY_VERIFY(!window.operationInProgress);
+    QTRY_COMPARE(messages, 1);
+    QVERIFY(lastMessage.contains(QStringLiteral("成功：0，失败：1，未传输：1")));
+    QVERIFY(window.fileTransfer.files.isEmpty());
+    QVERIFY(window.currentProcess == nullptr);
+    QVERIFY(DeviceOperationLease::owner() == nullptr);
+    QVERIFY(!DeviceManager::instance()->m_isPaused);
+    adbOverride.clear();
+}
+
+void DeviceOperationTests::transferHideAndRepeatedDrop()
+{
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "success"));
+    const QString path = fixturePath + "/first.txt";
+    QVERIFY(putFile(path, "data"));
+    window.show();
+    QVERIFY(dropFiles(window, {QUrl::fromLocalFile(path)}));
+    QTRY_COMPARE(window.currentProcess->state(), QProcess::Running);
+    auto *process = window.currentProcess;
+    QVERIFY(!dropFiles(window, {QUrl::fromLocalFile(path)}));
+    window.onRebootButtonClicked();
+    QCOMPARE(window.currentProcess, process);
+    QVERIFY(window.close());
+    QVERIFY(!window.isVisible());
+    QTRY_VERIFY(!window.operationInProgress);
+    QTRY_COMPARE(messages, 1);
+    QCOMPARE(pushes().size(), 1);
+    QVERIFY(QFile::exists(fixturePath + "/device/first.txt"));
+}
+
+void DeviceOperationTests::transferDestructionDoesNotStartNextFile()
+{
+    auto *window = new DeviceCheckWindow;
+    awaitAdb(*window);
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "hang"));
+    QVERIFY(dropFiles(*window, {QUrl::fromLocalFile(ResourceExtractor::getAdbPath()),
+                              QUrl::fromLocalFile(ResourceExtractor::getFastbootPath())}));
+    QTRY_COMPARE(window->currentProcess->state(), QProcess::Running);
+    QTRY_COMPARE(pushes().size(), 1);
+    delete window;
+    QTest::qWait(200);
+    QCOMPARE(pushes().size(), 1);
+    QCOMPARE(messages, 0);
+    QVERIFY(DeviceOperationLease::owner() == nullptr);
+    QVERIFY(!DeviceManager::instance()->m_isPaused);
+}
+
+void DeviceOperationTests::transferDeviceChangeStopsBatch_data()
+{
+    QTest::addColumn<bool>("disconnected");
+    QTest::newRow("disconnected") << true;
+    QTest::newRow("different-serial") << false;
+}
+
+void DeviceOperationTests::transferDeviceChangeStopsBatch()
+{
+    QFETCH(bool, disconnected);
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "success"));
+    QVERIFY(dropFiles(window, {QUrl::fromLocalFile(ResourceExtractor::getAdbPath()),
+                              QUrl::fromLocalFile(ResourceExtractor::getFastbootPath())}));
+    QTRY_COMPARE(window.currentProcess->state(), QProcess::Running);
+    if (disconnected) DeviceManager::instance()->m_currentMode = DeviceManager::None;
+    else DeviceManager::instance()->m_deviceSerial = "different-device";
+    QTRY_VERIFY(!window.operationInProgress);
+    QTRY_COMPARE(messages, 1);
+    QCOMPARE(pushes().size(), 1);
+    QVERIFY(lastMessage.contains(QStringLiteral("未传输：1")));
+    QVERIFY(lastMessage.contains(QStringLiteral("原设备已断开或改变")));
+    QVERIFY(DeviceOperationLease::owner() == nullptr);
 }
 
 void DeviceOperationTests::repeatedActionsKeepRunningFlash()
@@ -628,6 +900,27 @@ int helperMain(QCoreApplication &application)
         QTimer::singleShot(200, &application, [&application]() {
             std::puts("OKAY\nFinished. Total time: 0.2s");
             application.quit();
+        });
+        return application.exec();
+    }
+    if (base == "adb" && args.value(0) == "push" && QFile::exists(directory + "/push-behavior.txt")) {
+        const QByteArray behavior = readFile(directory + "/push-behavior.txt");
+        if (behavior == "hang") return application.exec();
+        QTimer::singleShot(200, &application, [&application, directory, args, behavior]() {
+            if (QFileInfo(args.value(1)).fileName() == "first.txt") {
+                if (behavior == "crash-first") std::abort();
+                if (behavior == "fail-first") {
+                    std::fprintf(stderr, "adb: error: simulated device transfer failure\n");
+                    application.exit(1);
+                    return;
+                }
+            }
+            QDir().mkpath(directory + "/device");
+            const QString target = directory + "/device/" + QFileInfo(args.value(2)).fileName();
+            QFile::remove(target);
+            if (!QFile::copy(args.value(1), target)) { application.exit(1); return; }
+            std::puts("1 file pushed");
+            application.exit(0);
         });
         return application.exec();
     }
