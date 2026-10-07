@@ -213,18 +213,21 @@ void RepairWindow::onUsbFixStep1Finished(int exitCode, QProcess::ExitStatus exit
     connect(repairProcess, &QProcess::errorOccurred,
             this, &RepairWindow::onUsbFixProcessError);
 
-    repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "sh /storage/emulated/0/usb.sh");
+    repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("sh /storage/emulated/0/usb.sh"));
 }
 
 void RepairWindow::onUsbFixStep2Finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
 
-    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+    const QString output = QString::fromUtf8(repairProcess->readAllStandardOutput()).trimmed();
+    const QString errorOutput = QString::fromUtf8(repairProcess->readAllStandardError()).trimmed();
+    if (exitStatus != QProcess::NormalExit || exitCode != 0 ||
+        !output.contains("USB_FIX_OK")) {
         usbFixExecutionFailed = true;
-        usbFixError = QString::fromLocal8Bit(repairProcess->readAllStandardError()).trimmed();
+        usbFixError = errorOutput.isEmpty() ? output : errorOutput;
         if (usbFixError.isEmpty()) {
-            usbFixError = "执行 usb.sh 失败。";
+            usbFixError = "未确认 USB 安装配置修改成功，请检查 Shell ROOT 授权和系统兼容性。";
         }
     }
 
@@ -278,7 +281,7 @@ void RepairWindow::finishUsbFix(bool success, const QString &detail)
     buttons[UsbFix]->setText("USB修复");
 
     if (success) {
-        UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", "USB修复执行完成！", this);
+        UIHelper::showCenteredMessageBox(QMessageBox::Information, "完成", "USB 安装已开启，安装拦截已关闭。\n请重新打开手机设置查看；开关未刷新时请重启手机。", this);
     } else {
         const QString message = detail.isEmpty() ? "USB修复失败。" : "USB修复失败：\n" + detail;
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", message, this);
@@ -295,7 +298,7 @@ void RepairWindow::startUsbFixCleanup()
             this, &RepairWindow::onUsbFixStep3Finished);
     connect(repairProcess, &QProcess::errorOccurred,
             this, &RepairWindow::onUsbFixProcessError);
-    repairProcess->start(adbPath, QStringList() << "shell" << "su" << "-c" << "rm -f /storage/emulated/0/usb.sh");
+    repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f /storage/emulated/0/usb.sh"));
 }
 
 void RepairWindow::fixTmpFolder()
