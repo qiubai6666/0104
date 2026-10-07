@@ -44,6 +44,7 @@ public:
         open(QIODevice::ReadOnly);
         if (!defer) QTimer::singleShot(0,this,[this] { if(done)return; emit readyRead(); emit downloadProgress(bytes.size(),bytes.size()); done=true;setFinished(true); emit finished(); });
     }
+    void setHeader(const QByteArray &name, const QByteArray &value) { setRawHeader(name, value); }
     void abort() override { if(done)return;done=true;setError(OperationCanceledError,"cancelled");setFinished(true);emit finished(); }
     qint64 bytesAvailable() const override { return bytes.size()-offset+QNetworkReply::bytesAvailable(); }
 protected:
@@ -111,6 +112,39 @@ private slots:
         else{QTRY_COMPARE(failed.size(),1);QVERIFY(ready.isEmpty());}
         QDir d(dir.path()+QStringLiteral("/软件/sub"));QVERIFY(d.entryList({"*.part"},QDir::Files).isEmpty());
         for(const auto&r:network.requests){QVERIFY(r.rawHeader("Authorization").isEmpty());QVERIFY(r.rawHeader("Cookie").isEmpty());}
+    }
+    void parallelDownload() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QByteArray payload(17 * 1024 * 1024 + 123, 'P');
+        Network network;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &body) {
+            Q_UNUSED(body);
+            if (r.url().path() == "/api/fs/get")
+                return new Reply(r, api({{"raw_url", "https://files.example.com/large"},
+                                         {"size", double(payload.size())}}), 200);
+            const QByteArray range = r.rawHeader("Range");
+            QRegularExpressionMatch match = QRegularExpression("^bytes=(\\d+)-(\\d+)$").match(QString::fromLatin1(range));
+            if (!match.hasMatch()) return new Reply(r, {}, 200);
+            const qint64 first = match.captured(1).toLongLong();
+            const qint64 last = match.captured(2).toLongLong();
+            auto *reply = new Reply(r, payload.mid(first, last - first + 1), 206);
+            reply->setHeader("Content-Range", QByteArray("bytes ") + QByteArray::number(first) + '-' + QByteArray::number(last) + '/' + QByteArray::number(payload.size()));
+            return reply;
+        };
+        OpenListService service(nullptr, &network, dir.path());
+        OpenList::Entry entry; entry.name = "large.apk"; entry.relativePath = entry.name;
+        entry.remotePath = "/APK/large.apk";
+        QSignalSpy ready(&service, &OpenListService::ready);
+        QSignalSpy failed(&service, &OpenListService::failed);
+        QVERIFY(service.download(entry));
+        QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 5000);
+        QCOMPARE(failed.size(), 0);
+        int ranged = 0;
+        for (const auto &request : network.requests) if (!request.rawHeader("Range").isEmpty()) ++ranged;
+        QCOMPARE(ranged, 4);
+        QFile file(ready.first()[1].toString());
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), payload);
     }
     void resultsAndModuleFormat(){
         QVERIFY(OpenListInstaller::success(0,true,"Success\n",true));QVERIFY(!OpenListInstaller::success(0,true,"Success\nFailure [bad]",true));QVERIFY(!OpenListInstaller::success(0,false,"Success",true));QVERIFY(!OpenListInstaller::success(0,true,"",true));

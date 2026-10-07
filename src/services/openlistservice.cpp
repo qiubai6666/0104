@@ -10,6 +10,7 @@
 #include <QUuid>
 #include <QStorageInfo>
 #include <QRegularExpression>
+#include <utility>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -18,6 +19,12 @@ namespace {
 const QString base = QStringLiteral("https://pan.xn--ucy.xyz");
 QString remoteRoot(bool module) { return module ? QStringLiteral("/模块") : QStringLiteral("/APK"); }
 constexpr qint64 maxJson = 4 * 1024 * 1024;
+// A single HTTP connection can be the bottleneck on some OpenList/CDN setups.
+// Use a few ranged requests for larger files, while retaining a single-stream
+// fallback for servers or signed URLs that do not support byte ranges.
+constexpr qint64 parallelThreshold = 8 * 1024 * 1024;
+constexpr qint64 parallelChunk = 2 * 1024 * 1024;
+constexpr int maxParallelRequests = 4;
 bool apiObject(QNetworkReply *r, QJsonObject *result) {
     if (r->error() != QNetworkReply::NoError || r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200)
         return false;
@@ -196,6 +203,7 @@ bool OpenListService::prepareFile() {
 bool OpenListService::download(const OpenList::Entry &entry) {
     if (m_active || entry.directory) return false;
     m_active = true; const auto generation = ++m_downloadGeneration;
+    m_parallel = false; m_parallelFallback = false; m_segments.clear(); m_parallelReceived = 0;
     m_entry = entry; m_path.clear(); m_part.clear(); m_hash.reset(); m_expectedHash.clear();
     if (!entry.remotePath.startsWith(remoteRoot(entry.module) + '/') || entry.remotePath != remoteRoot(entry.module) + '/' + entry.relativePath || !prepareFile()) {
         fail(QStringLiteral("下载目录不可用或文件路径不安全。")); return false;
@@ -222,9 +230,116 @@ bool OpenListService::download(const OpenList::Entry &entry) {
     });
     return true;
 }
+void OpenListService::startParallel(const QUrl &url, quint64 generation) {
+    m_parallel = true;
+    m_parallelFallback = false;
+    m_parallelReceived = 0;
+    m_segments.clear();
+    const int count = qMin(maxParallelRequests,
+                           qMax(2, int((m_entry.size + parallelChunk - 1) / parallelChunk)));
+    if (!m_file.resize(m_entry.size)) {
+        m_parallel = false;
+        fail(QStringLiteral("下载文件预分配失败，请检查磁盘空间。"));
+        return;
+    }
+    m_segments.resize(count);
+    const qint64 baseSize = m_entry.size / count;
+    const qint64 remainder = m_entry.size % count;
+    for (int i = 0; i < count; ++i) {
+        auto &segment = m_segments[i];
+        segment.start = i * baseSize + qMin<qint64>(i, remainder);
+        segment.end = segment.start + baseSize - 1 + (i < remainder ? 1 : 0);
+        QNetworkRequest req = request(url);
+        req.setRawHeader("Range", QByteArray("bytes=") + QByteArray::number(segment.start) + '-' + QByteArray::number(segment.end));
+        auto *reply = m_network->get(req);
+        segment.reply = reply;
+        reply->setReadBufferSize(4 * 1024 * 1024);
+        connect(reply, &QNetworkReply::readyRead, this, [this, reply, i, url, generation] {
+            if (!m_active || generation != m_downloadGeneration || !m_parallel || m_parallelFallback) return;
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (status == 200) { fallbackToSingleStream(url, generation); return; }
+            if (status == 206) {
+                const auto expected = QByteArray("bytes ") + QByteArray::number(m_segments[i].start) + '-' + QByteArray::number(m_segments[i].end) + '/' + QByteArray::number(m_entry.size);
+                if (reply->rawHeader("Content-Range") != expected) { fail(QStringLiteral("下载分段响应无效。")); return; }
+                consumeSegment(i, reply);
+            }
+        });
+        connect(reply, &QNetworkReply::downloadProgress, this, [this, generation](qint64, qint64) {
+            if (m_active && generation == m_downloadGeneration && m_parallel)
+                emit progress(m_parallelReceived, m_entry.size,
+                              m_parallelReceived * 1000.0 / qMax<qint64>(1, m_clock.elapsed()));
+        });
+        connect(reply, &QNetworkReply::finished, this, [this, reply, i, url, generation] {
+            reply->deleteLater();
+            if (!m_active || generation != m_downloadGeneration || !m_parallel || m_parallelFallback) return;
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (status == 200 || (status >= 300 && status < 400)) { fallbackToSingleStream(url, generation); return; }
+            if (reply->error() != QNetworkReply::NoError || status != 206) {
+                fail(QStringLiteral("下载失败：服务器不支持安全的并行分段下载。")); return;
+            }
+            const auto expected = QByteArray("bytes ") + QByteArray::number(m_segments[i].start) + '-' + QByteArray::number(m_segments[i].end) + '/' + QByteArray::number(m_entry.size);
+            if (reply->rawHeader("Content-Range") != expected) {
+                fail(QStringLiteral("下载分段响应无效。")); return;
+            }
+            if (!consumeSegment(i, reply)) return;
+            auto &segment = m_segments[i];
+            if (segment.received != segment.end - segment.start + 1) {
+                fail(QStringLiteral("下载分段大小不匹配。")); return;
+            }
+            segment.finished = true;
+            for (const auto &part : std::as_const(m_segments)) if (!part.finished) return;
+            m_parallel = false;
+            if (!m_file.flush()) { fail(QStringLiteral("文件写入失败，请检查磁盘空间。")); return; }
+            m_file.close();
+            m_hash.reset();
+            QFile verify(m_part);
+            if (!verify.open(QIODevice::ReadOnly)) { fail(QStringLiteral("无法校验下载文件。")); return; }
+            while (!verify.atEnd()) m_hash.addData(verify.read(4 * 1024 * 1024));
+            verify.close();
+            if (!m_expectedHash.isEmpty() && m_hash.result().toHex() != m_expectedHash) {
+                fail(QStringLiteral("SHA-256 校验失败，禁止安装。")); return;
+            }
+            if (!OpenList::safeDirectory(QFileInfo(m_path).absolutePath(), false) || QFileInfo::exists(m_path) || !QFile::rename(m_part, m_path)) {
+                fail(QStringLiteral("下载文件保存失败，未覆盖既有文件。")); return;
+            }
+            m_part.clear(); m_active = false;
+            emit ready(m_entry, m_path);
+        });
+    }
+}
+void OpenListService::fallbackToSingleStream(const QUrl &url, quint64 generation) {
+    if (!m_parallel || m_parallelFallback || !m_active || generation != m_downloadGeneration) return;
+    m_parallelFallback = true;
+    const auto replies = m_segments;
+    for (const auto &segment : replies) if (segment.reply) segment.reply->abort();
+    m_segments.clear();
+    m_parallel = false;
+    if (!m_file.resize(0) || !m_file.seek(0)) {
+        fail(QStringLiteral("无法切换下载模式。")); return;
+    }
+    m_hash.reset();
+    getFile(url, 0, generation);
+    m_parallelFallback = false;
+}
+bool OpenListService::consumeSegment(int index, QNetworkReply *reply) {
+    if (index < 0 || index >= m_segments.size()) return false;
+    auto &segment = m_segments[index];
+    const QByteArray bytes = reply->readAll();
+    const qint64 expected = segment.end - segment.start + 1;
+    if (segment.received + bytes.size() > expected || !m_file.seek(segment.start + segment.received) || m_file.write(bytes) != bytes.size()) {
+        fail(QStringLiteral("下载大小异常或磁盘写入失败。")); return false;
+    }
+    segment.received += bytes.size();
+    m_parallelReceived += bytes.size();
+    return true;
+}
 void OpenListService::getFile(const QUrl &url, int redirects, quint64 generation) {
     if (!https(url) || redirects > 5) { fail(QStringLiteral("下载重定向不安全或次数过多。")); return; }
-    auto *r = m_network->get(request(url)); m_reply = r; r->setReadBufferSize(256 * 1024);
+    if (m_entry.size >= parallelThreshold && redirects == 0 && !m_parallelFallback) {
+        startParallel(url, generation);
+        return;
+    }
+    auto *r = m_network->get(request(url)); m_reply = r; r->setReadBufferSize(4 * 1024 * 1024);
     connect(r,&QNetworkReply::readyRead,this,[this,r,generation] {
         if (m_active && generation == m_downloadGeneration && r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200) consume(r);
     });
@@ -263,6 +378,8 @@ bool OpenListService::consume(QNetworkReply *r) {
 void OpenListService::fail(const QString &reason) {
     if (!m_active) return;
     m_active = false; ++m_downloadGeneration;
+    for (const auto &segment : std::as_const(m_segments)) if (segment.reply) segment.reply->abort();
+    m_segments.clear(); m_parallel = false; m_parallelFallback = false;
     if (m_reply) { auto r = m_reply; m_reply = nullptr; r->abort(); r->deleteLater(); }
     m_file.close();
     QString message = reason;

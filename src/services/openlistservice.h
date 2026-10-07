@@ -9,6 +9,7 @@
 #include <QElapsedTimer>
 #include <QQueue>
 #include <QSet>
+#include <QVector>
 #include <QJsonObject>
 
 namespace OpenList {
@@ -56,14 +57,28 @@ private:
     };
     void pump(bool module, quint64 generation);
     QNetworkRequest request(const QUrl &url) const;
+    struct Segment {
+        QPointer<QNetworkReply> reply;
+        qint64 start = 0;
+        qint64 end = -1;
+        qint64 received = 0;
+        bool finished = false;
+    };
     void getFile(const QUrl &url, int redirects, quint64 generation);
+    void startParallel(const QUrl &url, quint64 generation);
+    void fallbackToSingleStream(const QUrl &url, quint64 generation);
     bool consume(QNetworkReply *reply);
+    bool consumeSegment(int index, QNetworkReply *reply);
     void fail(const QString &reason);
     bool prepareFile();
     QString m_root, m_path, m_part;
     QNetworkAccessManager *m_network;
     QPointer<QNetworkReply> m_reply;
     QList<QPointer<QNetworkReply>> m_lists;
+    QVector<Segment> m_segments;
+    qint64 m_parallelReceived = 0;
+    bool m_parallel = false;
+    bool m_parallelFallback = false;
     Listing m_listing[2];
     quint64 m_listGeneration = 0, m_downloadGeneration = 0;
     bool m_active = false;
