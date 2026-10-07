@@ -147,7 +147,14 @@ void OpenListService::pump(bool module, quint64 generation) {
                 const QString full = page.path + '/' + name;
                 if (o.value("is_dir").toBool()) {
                     if (page.depth >= 32) { list.error = QStringLiteral("目录层级过深，列表不完整"); continue; }
-                    if (!list.visited.contains(full)) { list.visited.insert(full); list.pending.enqueue({full, 1, page.depth + 1}); }
+                    if (!list.visited.contains(full)) {
+                        list.visited.insert(full); list.pending.enqueue({full, 1, page.depth + 1});
+                        OpenList::Entry folder; folder.name = name; folder.remotePath = full;
+                        folder.relativePath = full.mid(remoteRoot(module).size() + 1);
+                        folder.modified = o.value("modified").toString(); folder.module = module; folder.directory = true;
+                        if (list.entries.size() < 50000) list.entries.append(folder);
+                        else list.error = QStringLiteral("资源过多，列表不完整");
+                    }
                 } else if (name.endsWith(module ? ".zip" : ".apk", Qt::CaseInsensitive)) {
                     OpenList::Entry entry;
                     entry.name = name; entry.remotePath = full;
@@ -187,7 +194,7 @@ bool OpenListService::prepareFile() {
     return true;
 }
 bool OpenListService::download(const OpenList::Entry &entry) {
-    if (m_active) return false;
+    if (m_active || entry.directory) return false;
     m_active = true; const auto generation = ++m_downloadGeneration;
     m_entry = entry; m_path.clear(); m_part.clear(); m_hash.reset(); m_expectedHash.clear();
     if (!entry.remotePath.startsWith(remoteRoot(entry.module) + '/') || entry.remotePath != remoteRoot(entry.module) + '/' + entry.relativePath || !prepareFile()) {

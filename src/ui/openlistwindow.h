@@ -13,11 +13,16 @@ public:
     bool isBusy() const { return m_busy; }
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 private:
+    QPointer<QWidget> m_launcher;
     OpenListService *m_service;
     OpenListInstaller *m_installer;
     QTableWidget *m_tables[2];
     QLineEdit *m_search[2];
+    QPushButton *m_up[2];
+    QLabel *m_directory[2];
+    QString m_currentDirectory[2];
     QLabel *m_counts[2], *m_device, *m_status;
     QPushButton *m_refresh, *m_cancel;
     QProgressBar *m_progress;

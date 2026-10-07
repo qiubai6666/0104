@@ -168,11 +168,12 @@ void DeviceOperationTests::openListMenuAndSingleWindow()
     RepairWindow repair;
     repair.buttons[RepairWindow::OpenList]->click();
     auto *first=repair.openListWindow; QVERIFY(first); QVERIFY(first->isVisible());
+    QVERIFY(!first->parentWidget());
     repair.buttons[RepairWindow::OpenList]->click(); QCOMPARE(repair.openListWindow,first);
     QCloseEvent close; QApplication::sendEvent(first,&close); QVERIFY(!first->isVisible());
     repair.buttons[RepairWindow::OpenList]->click(); QCOMPARE(repair.openListWindow,first); QVERIFY(first->isVisible());
     QObject operation(first); QVERIFY(DeviceOperationLease::acquire(&operation));
-    QVERIFY(!repair.hasActiveOugaTask());
+    QVERIFY(repair.hasActiveOugaTask());
     QVERIFY(!first->close());
     QVERIFY(DeviceOperationLease::busyFor(&repair));
     DeviceOperationLease::release(&operation);

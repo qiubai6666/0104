@@ -12,6 +12,8 @@
 #include <QTableWidget>
 #include <QPushButton>
 #include <QLabel>
+#include <QLineEdit>
+#include <QScreen>
 #include <QProcess>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -87,7 +89,7 @@ private slots:
             return new Reply(r,api({{"content",QJsonValue(QJsonValue::Null)},{"total",0}}),200);
         };
         OpenListService service(nullptr,&network,"unused");QSignalSpy spy(&service,&OpenListService::listingReady);service.refresh();QTRY_COMPARE(spy.size(),2);QCOMPARE(appPages,2);
-        for(const auto&args:spy){bool module=args[0].toBool();auto xs=qvariant_cast<QList<OpenList::Entry>>(args[1]);if(module)QCOMPARE(xs.size(),0);else{QCOMPARE(xs.size(),3);QVERIFY(!args[2].toString().isEmpty());}}
+        for(const auto&args:spy){bool module=args[0].toBool();auto xs=qvariant_cast<QList<OpenList::Entry>>(args[1]);if(module)QCOMPARE(xs.size(),0);else{QCOMPARE(xs.size(),4); QVERIFY(xs[1].directory);QVERIFY(!args[2].toString().isEmpty());}}
     }
     void categoryFailureIndependent(){
         Network network;network.handler=[](const QNetworkRequest&r,const QJsonObject&b){return new Reply(r,b.value("path").toString()==QStringLiteral("/模块")?QByteArray("bad"):api({{"content",QJsonArray{entry("ok.apk")}},{"total",1}}),200);};
@@ -200,16 +202,60 @@ private slots:
             QVERIFY2(result[2].toString().isEmpty(),qPrintable(result[2].toString()));
             const bool module=result[0].toBool();
             for (const auto &e : qvariant_cast<QList<OpenList::Entry>>(result[1])) {
-                QVERIFY(e.relativePath.endsWith(module ? ".zip" : ".apk",Qt::CaseInsensitive));
+                QVERIFY(e.directory || e.relativePath.endsWith(module ? ".zip" : ".apk",Qt::CaseInsensitive));
                 QVERIFY(!e.relativePath.startsWith('/')); QCOMPARE(e.module,module);
             }
         }
     }
-    void uiSnapshot(){OpenListWindow w;w.show();QTest::qWait(30);auto *apps=w.findChild<QTableWidget*>("openListApps");auto *modules=w.findChild<QTableWidget*>("openListModules");QVERIFY(apps);QVERIFY(modules);QVERIFY(apps->mapTo(&w,QPoint()).x()<modules->mapTo(&w,QPoint()).x());for(auto*label:w.findChildren<QLabel*>())QVERIFY(!label->text().contains("pan.xn--ucy"));OpenList::Entry e; e.name=QStringLiteral("很长的中文软件名称用于检查缩放和省略显示.apk"); e.relativePath=QStringLiteral("分类/子目录/")+e.name; e.size=12345678;
+    void folderNavigationAndWindow() {
+        QWidget launcher;
+        OpenListWindow w(&launcher);
+        QVERIFY(!w.parentWidget());
+        QCOMPARE(w.minimumSize(), QSize(qRound(866 * 0.9), qRound(729 * 0.9)));
+        w.show(); QTest::qWait(50);
+        QCOMPARE(w.size(), w.minimumSize());
+        QVERIFY((w.frameGeometry().center() - launcher.screen()->availableGeometry().center()).manhattanLength() <= 2);
+        #ifdef Q_OS_WIN
+        const HWND handle = reinterpret_cast<HWND>(w.winId());
+        QVERIFY(GetWindow(handle, GW_OWNER) == nullptr);
+        QVERIFY((GetWindowLongPtrW(handle, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) == 0);
+        #endif
+        w.showMinimized(); QTRY_VERIFY(w.isMinimized());
+        #ifdef Q_OS_WIN
+        QTRY_VERIFY(IsIconic(handle));
+        #endif
+        w.showNormal();
+        auto *service = w.findChild<OpenListService*>();
+        auto *table = w.findChild<QTableWidget*>("openListApps");
+        auto *up = w.findChild<QPushButton*>("openListAppsUp");
+        OpenList::Entry dir; dir.name = QStringLiteral("中文分类"); dir.relativePath = dir.name; dir.directory = true;
+        OpenList::Entry child; child.name = QStringLiteral("嵌套"); child.relativePath = dir.name + "/" + child.name; child.directory = true;
+        OpenList::Entry file; file.name = "same.apk"; file.relativePath = child.relativePath + "/same.apk";
+        OpenList::Entry empty; empty.name = QStringLiteral("空目录"); empty.relativePath = empty.name; empty.directory = true;
+        emit service->listingReady(false, {dir, child, file, empty}, {});
+        QCOMPARE(table->rowCount(), 2); QVERIFY(!up->isEnabled());
+        emit table->cellDoubleClicked(0, 0); QCOMPARE(table->rowCount(), 1); QVERIFY(up->isEnabled()); QVERIFY(!w.isBusy());
+        emit table->cellDoubleClicked(0, 0); QCOMPARE(table->rowCount(), 1); QCOMPARE(table->item(0, 0)->text(), file.name);
+        up->click(); up->click(); QCOMPARE(table->rowCount(), 2);
+        emit table->cellDoubleClicked(1, 0); QCOMPARE(table->rowCount(), 0); QVERIFY(!w.isBusy());
+        up->click();
+        auto *search = table->parentWidget()->findChild<QLineEdit*>(); QVERIFY(search);
+        search->setText("same.apk"); QCOMPARE(table->rowCount(), 1);
+        QSignalSpy failed(service, &OpenListService::failed);
+        QVERIFY(!service->download(dir)); QVERIFY(failed.isEmpty());
+        auto *modules = w.findChild<QTableWidget*>("openListModules");
+        dir.module = true; file.module = true; file.name = "module.zip"; file.relativePath = dir.name + "/module.zip";
+        emit service->listingReady(true, {dir, file}, {});
+        QCOMPARE(modules->rowCount(), 1);
+        emit modules->cellDoubleClicked(0, 0); QCOMPARE(modules->rowCount(), 1);
+        QCOMPARE(modules->item(0, 0)->text(), file.name);
+        QCOMPARE(table->item(0, 0)->text(), QString("same.apk")); QVERIFY(!w.isBusy());
+        w.close();
+    }
+    void uiSnapshot(){OpenListWindow w;w.show();QTest::qWait(30);auto *apps=w.findChild<QTableWidget*>("openListApps");auto *modules=w.findChild<QTableWidget*>("openListModules");QVERIFY(apps);QVERIFY(modules);QVERIFY(apps->mapTo(&w,QPoint()).x()<modules->mapTo(&w,QPoint()).x());for(auto*label:w.findChildren<QLabel*>())QVERIFY(!label->text().contains("pan.xn--ucy"));OpenList::Entry e; e.name=QStringLiteral("很长的中文软件名称用于检查缩放和省略显示.apk"); e.relativePath=e.name; e.size=12345678;
         auto *service=w.findChild<OpenListService*>(); QVERIFY(service);
         emit service->listingReady(false,{e},{}); emit service->listingReady(true,{},{});
         QTest::qWait(20); auto img=w.grab();if (!qEnvironmentVariable("OPENLIST_SCREENSHOT").isEmpty()) QVERIFY(img.save(qEnvironmentVariable("OPENLIST_SCREENSHOT")));w.close();}
 };
 QTEST_MAIN(OpenListTests)
 #include "openlisttests.moc"
-

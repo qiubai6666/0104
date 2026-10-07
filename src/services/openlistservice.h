@@ -16,6 +16,7 @@ struct Entry {
     QString name, relativePath, remotePath, modified;
     qint64 size = -1;
     bool module = false;
+    bool directory = false;
 };
 QString redact(QString text);
 bool safeComponent(const QString &name);
