@@ -219,8 +219,8 @@ void OpenListInstaller::cleanRemote(bool ok,const QString &message) {
 void OpenListInstaller::end(bool ok,const QString &message) {
     QString result = message;
     if (ok) {
-        if (cleanupDownloadedFile(m_file)) result += QStringLiteral(" 下载文件已自动删除。");
-        else result += QStringLiteral(" 安装成功，但下载文件清理失败：%1").arg(m_file);
+        if (!cleanupDownloadedFile(m_file))
+            result += QStringLiteral(" 安装成功，但下载文件清理失败：%1").arg(m_file);
     } else if (!m_file.isEmpty()) result += QStringLiteral(" 安装包保留在：%1").arg(m_file);
     m_stage = Idle; DeviceOperationLease::release(this); m_file.clear(); m_remoteTouched = false;
     emit completed(ok,result);
