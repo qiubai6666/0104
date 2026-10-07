@@ -194,7 +194,8 @@ void OpenListWindow::updateDevice() {
 }
 void OpenListWindow::closeEvent(QCloseEvent *event) {
     if (m_busy) { event->ignore(); log(QStringLiteral("任务进行中；下载可取消，手机安装请等待结束。")); return; }
-    hide(); event->ignore();
+    // Keep the idle window reusable without vetoing application shutdown.
+    QWidget::closeEvent(event);
 }
 
 void OpenListWindow::showEvent(QShowEvent *event) {

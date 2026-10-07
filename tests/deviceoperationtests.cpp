@@ -26,6 +26,8 @@
 #include <QMimeData>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QNetworkProxy>
+#include <QPushButton>
 
 namespace {
 QString fixturePath;
@@ -59,12 +61,16 @@ QString ResourceExtractor::getNeilImagePath() { return fixturePath + "/Neil.jpg"
 class DeviceOperationTests : public QObject
 {
     Q_OBJECT
+public:
+    static int exitHelper(QApplication &application, const QStringList &arguments);
 private slots:
     void initTestCase();
     void init();
     void ougaSingleWindowAndLease();
     void xiaomiMenuAndSingleWindow();
     void openListMenuAndSingleWindow();
+    void openListApplicationExit_data();
+    void openListApplicationExit();
     void cleanup();
     void repeatedActionsKeepRunningFlash();
     void windowCloseCannotInterruptFlash();
@@ -193,14 +199,79 @@ void DeviceOperationTests::openListMenuAndSingleWindow()
     auto *first=repair.openListWindow; QVERIFY(first); QVERIFY(first->isVisible());
     QVERIFY(!first->parentWidget());
     repair.buttons[RepairWindow::OpenList]->click(); QCOMPARE(repair.openListWindow,first);
-    QCloseEvent close; QApplication::sendEvent(first,&close); QVERIFY(!first->isVisible());
+    QCloseEvent close; QApplication::sendEvent(first,&close); QVERIFY(close.isAccepted());
+    QVERIFY(first->close()); QVERIFY(!first->isVisible());
     repair.buttons[RepairWindow::OpenList]->click(); QCOMPARE(repair.openListWindow,first); QVERIFY(first->isVisible());
     QObject operation(first); QVERIFY(DeviceOperationLease::acquire(&operation));
     QVERIFY(repair.hasActiveOugaTask());
     QVERIFY(!first->close());
     QVERIFY(DeviceOperationLease::busyFor(&repair));
     DeviceOperationLease::release(&operation);
-    first->close();
+    QVERIFY(first->close());
+}
+
+void DeviceOperationTests::openListApplicationExit_data()
+{
+    QTest::addColumn<QString>("state");
+    for (const QString &state : {QString("visible"), QString("minimized"), QString("hidden"), QString("busy")})
+        QTest::newRow(qPrintable(state)) << state;
+}
+
+void DeviceOperationTests::openListApplicationExit()
+{
+    QFETCH(QString, state);
+    QProcess child;
+    child.setWorkingDirectory(fixturePath);
+    child.start(QCoreApplication::applicationFilePath(), {"--exit-helper", state, fixturePath});
+    QVERIFY(child.waitForFinished(10000));
+    const QByteArray output = child.readAllStandardOutput() + child.readAllStandardError();
+    QVERIFY2(child.exitStatus() == QProcess::NormalExit, output.constData());
+    QVERIFY2(child.exitCode() == 0, output.constData());
+    QCOMPARE(readFile(fixturePath + "/exit-result.txt"), QByteArray("all windows closed"));
+    if (state == "busy") QCOMPARE(readFile(fixturePath + "/busy-result.txt"), QByteArray("exit blocked"));
+}
+
+int DeviceOperationTests::exitHelper(QApplication &application, const QStringList &arguments)
+{
+    const QString state = arguments.value(2), evidence = arguments.value(3);
+    // cleanupAndExit may remove only this child's disposable resource directory.
+    fixturePath = evidence + "/exit-resources";
+    QDir().mkpath(fixturePath);
+    adbOverride = evidence + "/adb.exe"; fastbootOverride = evidence + "/fastboot.exe";
+    application.setQuitOnLastWindowClosed(false);
+    // Refuse network traffic locally; never contact the cloud in exit regressions.
+    QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::HttpProxy, QStringLiteral("127.0.0.1"), 1));
+    MenuWidget menu; menu.show();
+    menu.buttons[MenuWidget::RepairTools]->click();
+    auto *repair = menu.repairWindow;
+    repair->buttons[RepairWindow::OpenList]->click();
+    auto *openlist = repair->openListWindow;
+    if (state == "minimized") openlist->showMinimized();
+    if (state == "hidden") openlist->hide();
+    QObject operation(openlist);
+    if (state == "busy" && !DeviceOperationLease::acquire(&operation)) return 90;
+    QTimer messageCloser;
+    QObject::connect(&messageCloser, &QTimer::timeout, &menu, [] {
+        for (QWidget *widget : QApplication::topLevelWidgets())
+            if (auto *message = qobject_cast<QMessageBox *>(widget)) message->accept();
+    });
+    messageCloser.start(10);
+    QObject::connect(&application, &QCoreApplication::aboutToQuit, &menu, [&] {
+        if (!menu.isVisible() && !repair->isVisible() && !openlist->isVisible())
+            putFile(evidence + "/exit-result.txt", "all windows closed");
+    });
+    QTimer::singleShot(50, &menu, [&] {
+        menu.buttons[MenuWidget::Exit]->click(); // Exactly one click when idle.
+        if (state != "busy") return;
+        if (!menu.isVisible() || !repair->isVisible() || !openlist->isVisible() ||
+            DeviceOperationLease::owner() != &operation) { application.exit(92); return; }
+        putFile(evidence + "/busy-result.txt", "exit blocked");
+        DeviceOperationLease::release(&operation);
+        menu.buttons[MenuWidget::Exit]->click(); // Now idle: exit must succeed.
+    });
+    QTimer::singleShot(4000, &application, [&] { application.exit(91); });
+    const int result = application.exec();
+    return result;
 }
 
 void DeviceOperationTests::init()
@@ -944,6 +1015,8 @@ int main(int argc, char **argv)
         return helperMain(application);
     }
     QApplication application(argc, argv);
+    if (application.arguments().value(1) == "--exit-helper")
+        return DeviceOperationTests::exitHelper(application, application.arguments());
     application.setQuitOnLastWindowClosed(false);
     DeviceOperationTests tests;
     return QTest::qExec(&tests, argc, argv);
