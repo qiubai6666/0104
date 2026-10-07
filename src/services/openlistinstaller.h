@@ -43,7 +43,8 @@ signals:
 private:
     enum Stage { Idle, Discover, Verify, ZipList, ZipTest, ZipProperties, RootAccess,
                  Managers, RootChoice, Push, ModuleInstall, RemoteCleanup, ApkInstall,
-                 FailureVerify, FailureDestination, FailurePush, FailureCleanup };
+                 FailureVerify, FailureDestination, FailurePush, FailureCleanup,
+                 ApkRootProbe, ApkRootPush, ApkRootInstall };
     Stage m_stage = Idle;
     OugaCommandRunner *m_runner;
     QString m_adb, m_sevenZip, m_file, m_serial, m_remote, m_selectedManager;
@@ -51,6 +52,8 @@ private:
     bool m_module = false, m_installSuccess = false, m_remoteTouched = false;
     QString m_result, m_fallbackRemote;
     bool m_canTransferFailure = false;
+    enum ApkRootMode { ShellRoot, SuC, SuS };
+    ApkRootMode m_apkRootMode = ShellRoot;
     void command(Stage, const QString &program, const QStringList &, int timeout = 0);
     void adb(Stage, const QStringList &, int timeout = 0);
     void onCompleted(int, bool, const QString &);
@@ -58,6 +61,9 @@ private:
     void cleanRemote(bool, const QString &);
     void finish(bool, const QString &);
     bool handleFailureTransfer(int, bool, const QString &);
+    bool handleApkRoot(int, bool, const QString &);
+    void probeApkRoot();
+    QString apkRootCommand(const QString &) const;
 };
 #endif
 

@@ -68,6 +68,7 @@ public:
     void run(const QString &p,const QStringList&a,int t) override {calls.append({p,a,t});active=true;}
     bool running() const override {return active;}
     void respond(QString out,int code=0,bool normal=true){active=false;emit completed(code,normal,out);}
+    void denyApkRoot() { respond("2000\n"); respond("permission denied",1); respond("permission denied",1); }
 };
 }
 class OpenListTests final : public QObject {
@@ -154,9 +155,73 @@ private slots:
         QCOMPARE(OpenListInstaller::authorizedDevices("List of devices attached\na\tdevice\nb\tunauthorized\nc\toffline\nd\tdevice\n"),QStringList({"a","d"}));
     }
     void apkInstall_data(){QTest::addColumn<bool>("ok");QTest::newRow("success")<<true;QTest::newRow("failure")<<false;}
-    void apkInstall(){QFETCH(bool,ok);QTemporaryDir dir;QString f=dir.filePath("a.apk"),other=dir.filePath("old.apk");QVERIFY(writeFile(f,"a"));QVERIFY(writeFile(other,"old"));Runner runner;OpenListInstaller s(nullptr,&runner,"fake-adb","fake-7z");QSignalSpy done(&s,&OpenListInstaller::completed);QVERIFY(s.install(f,false,"phone"));QVERIFY(DeviceOperationLease::owner()==&s);runner.respond("phone\tdevice\n");QCOMPARE(runner.calls.last().args,QStringList({"-s","phone","install","-r",f}));runner.respond(ok?"Success\n":"Success\nFailure [bad]",0);if(!ok){runner.respond("phone\tdevice");runner.respond("");runner.respond("1 file pushed");}QCOMPARE(done.size(),1);QCOMPARE(done[0][0].toBool(),ok);QCOMPARE(QFileInfo::exists(f),!ok);QVERIFY(QFileInfo::exists(other));}
+    void apkInstall(){QFETCH(bool,ok);QTemporaryDir dir;QString f=dir.filePath("a.apk"),other=dir.filePath("old.apk");QVERIFY(writeFile(f,"a"));QVERIFY(writeFile(other,"old"));Runner runner;OpenListInstaller s(nullptr,&runner,"fake-adb","fake-7z");QSignalSpy done(&s,&OpenListInstaller::completed);QVERIFY(s.install(f,false,"phone"));QVERIFY(DeviceOperationLease::owner()==&s);runner.respond("phone\tdevice\n");runner.denyApkRoot();QCOMPARE(runner.calls.last().args,QStringList({"-s","phone","install","-r",f}));runner.respond(ok?"Success\n":"Success\nFailure [bad]",0);if(!ok){runner.respond("phone\tdevice");runner.respond("");runner.respond("1 file pushed");}QCOMPARE(done.size(),1);QCOMPARE(done[0][0].toBool(),ok);QCOMPARE(QFileInfo::exists(f),!ok);QVERIFY(QFileInfo::exists(other));}
     void disconnectAndRootRefusal(){QTemporaryDir dir;QString f=dir.filePath("m.zip");QVERIFY(writeFile(f,QByteArray("PK\x03\x04",4)));Runner r;OpenListInstaller s(nullptr,&r,"adb","7z");QSignalSpy done(&s,&OpenListInstaller::completed);s.install(f,true,"original");r.respond("other\tdevice");QCOMPARE(done.size(),1);QVERIFY(QFileInfo::exists(f));s.install(f,true,"original");r.respond("original\tdevice");r.respond("Path = module.prop\nEncrypted = -");r.respond("Everything is Ok");r.respond("id=test\nname=Test");r.respond("permission denied",1);r.respond("original\tdevice");r.respond("");r.respond("1 file pushed");QCOMPARE(done.size(),2);QVERIFY(QFileInfo::exists(f));}
     void moduleChoiceAndCleanup(){QTemporaryDir dir;QString f=dir.filePath("m.zip");QVERIFY(writeFile(f,QByteArray("PK\x03\x04",4)));Runner r;OpenListInstaller s(nullptr,&r,"adb","7z");QSignalSpy choice(&s,&OpenListInstaller::rootChoiceRequired),done(&s,&OpenListInstaller::completed);s.install(f,true,"phone");r.respond("phone\tdevice");r.respond("Path = module.prop\nEncrypted = -");r.respond("Everything is Ok");r.respond("id=test\nname=Test");r.respond("0\n");r.respond("OL_MAGISK=/data/adb/magisk/magisk\nOL_KERNELSU=/data/adb/ksu/bin/ksud\n");QCOMPARE(choice.size(),1);s.chooseRoot("KernelSU");QCOMPARE(r.calls.last().args.value(2),QString("push"));QString remote=r.calls.last().args.last();QVERIFY(remote.startsWith("/data/local/tmp/orange-openlist-"));r.respond("1 file pushed");QVERIFY(r.calls.last().args.last().contains("ksud"));r.respond("Done\nOL_INSTALL_SUCCESS\n");QVERIFY(r.calls.last().args.last().contains("rm -f"));r.respond("device disconnected",1);QCOMPARE(done.size(),1);QVERIFY(done[0][0].toBool());QVERIFY(!QFileInfo::exists(f));}
+    void rootApkInstall_data() {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("root-shell") << 0;
+        QTest::newRow("su-c") << 1;
+        QTest::newRow("su-s-only") << 2;
+        QTest::newRow("su-s-retry") << 3;
+        QTest::newRow("failure-transferred") << 4;
+        QTest::newRow("unknown-not-retried") << 5;
+        QTest::newRow("push-failed") << 6;
+        QTest::newRow("cleanup-failed-install-still-success") << 7;
+        QTest::newRow("success-keyword-with-failure") << 8;
+        QTest::newRow("su-c-unknown-not-retried") << 9;
+        QTest::newRow("su-c-crashed-not-retried") << 10;
+    }
+    void rootApkInstall() {
+        QFETCH(int,mode);
+        QTemporaryDir dir; const QString file=dir.filePath(QStringLiteral("中文应用's.apk"));
+        QVERIFY(writeFile(file,"apk"));
+        Runner r; OpenListInstaller s(nullptr,&r,"adb","7z");
+        QSignalSpy done(&s,&OpenListInstaller::completed);
+        QVERIFY(s.install(file,false,"original")); r.respond("original\tdevice");
+        QCOMPARE(r.calls.last().args,QStringList({"-s","original","shell","id -u"}));
+        if (mode==1 || mode==2 || mode==3 || mode==9 || mode==10) {
+            r.respond("2000"); QVERIFY(r.calls.last().args.last().startsWith("su -c "));
+            if (mode==2) { r.respond("permission denied",1); QVERIFY(r.calls.last().args.last().startsWith("su -s ")); }
+        }
+        r.respond("0\n");
+        QCOMPARE(r.calls.last().args.mid(0,4),QStringList({"-s","original","push",file}));
+        const QString remote=r.calls.last().args.last();
+        QVERIFY(remote.startsWith("/data/local/tmp/orange-openlist-")); QVERIFY(remote.endsWith(".apk"));
+        QVERIFY(DeviceOperationLease::owner()==&s); QVERIFY(s.busy());
+        r.respond(mode==6 ? "error: disconnected" : "1 file pushed",mode==6 ? 1 : 0);
+        if (mode!=6) {
+            QVERIFY(r.calls.last().args.last().contains("pm install -r"));
+            QCOMPARE(r.calls.last().timeout,0);
+            if (mode==0) QVERIFY(!r.calls.last().args.last().contains("su "));
+            if (mode==1 || mode==3 || mode==9 || mode==10) QVERIFY(r.calls.last().args.last().startsWith("su -c "));
+            if (mode==2) QVERIFY(r.calls.last().args.last().startsWith("su -s "));
+            if (mode==3) {
+                r.respond("Failure [INSTALL_FAILED_USER_RESTRICTED]",1);
+                QVERIFY(r.calls.last().args.last().startsWith("su -s "));
+            }
+            r.respond(mode==4 ? "Failure [bad]" : mode==5 || mode==9 ? "" : mode==8 ? "Success\nFailure [bad]" : "Success\n",mode==4 ? 1 : 0,mode!=10);
+        }
+        QVERIFY(r.calls.last().args.last().contains("rm -f"));
+        QVERIFY(r.calls.last().args.last().contains(remote));
+        QCOMPARE(done.size(),0); QVERIFY(DeviceOperationLease::owner()==&s);
+        r.respond(mode==7 ? "device offline" : "",mode==7 ? 1 : 0);
+        const bool ok=mode<=3 || mode==7;
+        if (!ok) {
+            QCOMPARE(r.calls.last().args,QStringList({"devices"}));
+            r.respond("original\tdevice"); r.respond("");
+            QCOMPARE(r.calls.last().args.mid(0,4),QStringList({"-s","original","push",file}));
+            QVERIFY(r.calls.last().args.last().startsWith("/sdcard/"));
+            r.respond("1 file pushed");
+        }
+        QCOMPARE(done.size(),1); QCOMPARE(done[0][0].toBool(),ok);
+        QCOMPARE(QFileInfo::exists(file),!ok);
+        QVERIFY(!s.busy()); QVERIFY(!DeviceOperationLease::owner());
+        for (const auto &call:r.calls) {
+            if(call.args==QStringList({"devices"})) continue;
+            QCOMPARE(call.args.mid(0,2),QStringList({"-s","original"}));
+        }
+    }
     void failedInstallTransfer_data() {
         QTest::addColumn<int>("mode");
         QTest::newRow("transferred") << 0;
@@ -177,7 +242,7 @@ private slots:
         Runner r; OpenListInstaller s(nullptr,&r,"adb","7z");
         QSignalSpy done(&s,&OpenListInstaller::completed);
         QVERIFY(s.install(file,false,"original"));
-        r.respond("original\tdevice"); r.respond("Failure [INSTALL_FAILED_USER_RESTRICTED]",1);
+        r.respond("original\tdevice"); r.denyApkRoot(); r.respond("Failure [INSTALL_FAILED_USER_RESTRICTED]",1);
         QVERIFY(s.busy()); QCOMPARE(done.size(),0);
         QCOMPARE(DeviceOperationLease::owner(),static_cast<QObject*>(&s));
         QVERIFY(!s.install(file,false,"other"));
@@ -186,6 +251,7 @@ private slots:
         if (mode!=1 && mode!=2) {
             QCOMPARE(r.calls.last().args.mid(0,3),QStringList({"-s","original","shell"}));
             QVERIFY(r.calls.last().args.last().contains("/sdcard/"));
+            QVERIFY(r.calls.last().args.last().startsWith("set -C;"));
             r.respond(mode==3 ? "permission denied" : "",mode==3 ? 1 : 0);
             if (mode!=3) {
                 QCOMPARE(r.calls.last().args.mid(0,4),QStringList({"-s","original","push",file}));
@@ -214,7 +280,7 @@ private slots:
     void cleanupFailure() {
         QTemporaryDir dir; QString f=dir.filePath("a.apk"); QVERIFY(writeFile(f,"a"));
         Runner r; OpenListInstaller s(nullptr,&r,"adb","7z"); QSignalSpy done(&s,&OpenListInstaller::completed);
-        s.install(f,false,"p"); r.respond("p\tdevice");
+        s.install(f,false,"p"); r.respond("p\tdevice"); r.denyApkRoot();
 #ifdef Q_OS_WIN
         const auto handle=CreateFileW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(f).utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
         QVERIFY(handle!=INVALID_HANDLE_VALUE);
@@ -369,6 +435,7 @@ private slots:
                     QCOMPARE(runner.calls.last().args.mid(0,3),QStringList({"-s","phone","push"}));
                     runner.respond("1 file pushed"); runner.respond("OL_INSTALL_SUCCESS"); runner.respond("");
                 } else {
+                    runner.denyApkRoot();
                     QCOMPARE(runner.calls.last().args.mid(0,4),QStringList({"-s","phone","install","-r"}));
                     runner.respond(mode==1 && i==0 ? "Failure [INSTALL_FAILED_USER_RESTRICTED]" : "Success",mode==1 && i==0 ? 1 : 0);
                     if(mode==1 && i==0) { runner.respond("phone\tdevice"); runner.respond(""); runner.respond("1 file pushed"); }
@@ -412,6 +479,7 @@ private slots:
         QTRY_COMPARE(runner.calls.size(), 2);
         runner.respond("phone\tdevice");
         QTRY_COMPARE(runner.calls.size(), 3);
+        runner.denyApkRoot();
         QCOMPARE(runner.calls.last().args.mid(0, 4), QStringList({"-s", "phone", "install", "-r"}));
         runner.respond("Success");
         QTRY_VERIFY(!window.isBusy());

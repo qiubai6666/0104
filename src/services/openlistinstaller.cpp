@@ -53,7 +53,7 @@ OpenListInstaller::OpenListInstaller(QObject *parent,OugaCommandRunner *runner,c
     connect(m_runner,&OugaCommandRunner::completed,this,&OpenListInstaller::onCompleted);
     connect(m_runner,&OugaCommandRunner::output,this,[this](QString text) {
         // ZIP listing and root probes contain implementation paths, not user logs.
-        if (m_stage == ApkInstall || m_stage == Push || m_stage == ModuleInstall) {
+        if (m_stage == ApkInstall || m_stage == Push || m_stage == ModuleInstall || m_stage == ApkRootPush || m_stage == ApkRootInstall) {
             text.replace(m_file,QStringLiteral("[本次安装包]"));
             if (!m_remote.isEmpty()) text.replace(m_remote,QStringLiteral("[手机临时文件]"));
             emit log(OpenList::redact(text));
@@ -114,6 +114,7 @@ bool OpenListInstaller::install(const QString &file,bool module,const QString &s
     if (serial.isEmpty() || serial.contains(QRegularExpression("\\s")) || !DeviceOperationLease::acquire(this)) {
         emit completed(false,QStringLiteral("目标设备无效或设备操作被占用，文件已保留：%1").arg(file)); return false;
     }
+    m_apkRootMode = ShellRoot;
     m_file = file; m_serial = serial; m_module = module; m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_managers.clear();
     const QFileInfo info(file);
     if (!info.isFile() || info.isSymLink() || !OpenList::safeDirectory(info.absolutePath(),false)) {
@@ -125,7 +126,7 @@ bool OpenListInstaller::install(const QString &file,bool module,const QString &s
             end(false,QStringLiteral("不是有效的 ZIP 模块文件。")); return false;
         }
     }
-    m_remote = "/data/local/tmp/orange-openlist-" + QUuid::createUuid().toString(QUuid::Id128) + ".zip";
+    m_remote = "/data/local/tmp/orange-openlist-" + QUuid::createUuid().toString(QUuid::Id128) + (module ? ".zip" : ".apk");
     command(Verify,m_adb,{"devices"},5000); return true;
 }
 void OpenListInstaller::command(Stage stage,const QString &program,const QStringList &args,int timeout) {
@@ -144,7 +145,7 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
         else emit devicesReady(serials);
         return;
     }
-    if (handleFailureTransfer(code,normal,out)) return;
+    if (handleFailureTransfer(code,normal,out) || handleApkRoot(code,normal,out)) return;
     if (m_stage == RemoteCleanup) {
         if (code != 0 || !normal) emit log(QStringLiteral("手机临时文件清理失败，请检查连接；不会改变已确认的安装结果。"));
         end(m_installSuccess,m_result); return;
@@ -166,7 +167,7 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
     switch (m_stage) {
     case Verify:
         if (!authorizedDevices(out).contains(m_serial)) { end(false,QStringLiteral("原目标手机已断开或未授权，不会切换设备。")); break; }
-        if (!m_module) { m_canTransferFailure = true; emit log(QStringLiteral("正在安装 APK。")); adb(ApkInstall,{"install","-r",m_file}); }
+        if (!m_module) probeApkRoot();
         else command(ZipList,m_sevenZip,{"l","-slt","-ba","-pOrangeOpenListNoPassword","--",m_file},60000);
         break;
     case ZipList:
@@ -207,6 +208,56 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
     case ApkInstall: end(true,QStringLiteral("APK 安装成功。")); break;
     default: break;
     }
+}
+QString OpenListInstaller::apkRootCommand(const QString &command) const {
+    if (m_apkRootMode == ShellRoot) return command;
+    return ShellCommand::asRoot(command,m_apkRootMode == SuC ? "-c" : "-s");
+}
+void OpenListInstaller::probeApkRoot() {
+    adb(ApkRootProbe,{"shell",apkRootCommand("id -u")},10000);
+}
+bool OpenListInstaller::handleApkRoot(int code,bool normal,const QString &out) {
+    if (m_stage == ApkRootProbe) {
+        if (success(code,normal,out,false) && out.split(QRegularExpression("[\\r\\n]+"),Qt::SkipEmptyParts).contains("0")) {
+            m_canTransferFailure = true;
+            m_remoteTouched = true;
+            emit log(QStringLiteral("已获得 Shell Root 权限，使用“APK安装”方式：推送后执行 pm install -r。"));
+            adb(ApkRootPush,{"push",m_file,m_remote});
+        } else if (m_apkRootMode != SuS) {
+            m_apkRootMode = m_apkRootMode == ShellRoot ? SuC : SuS;
+            probeApkRoot();
+        } else {
+            m_canTransferFailure = true;
+            emit log(QStringLiteral("未获得 Shell Root 权限，使用普通 ADB 安装 APK。"));
+            adb(ApkInstall,{"install","-r",m_file});
+        }
+        return true;
+    }
+    if (m_stage == ApkRootPush) {
+        if (!success(code,normal,out,false)) {
+            cleanRemote(false,QStringLiteral("Root APK 安装前推送失败。"));
+        } else {
+            emit log(QStringLiteral("正在通过 Root 安装 APK，请留意手机授权。"));
+            adb(ApkRootInstall,{"shell",apkRootCommand("pm install -r " + ShellCommand::quote(m_remote))});
+        }
+        return true;
+    }
+    if (m_stage == ApkRootInstall) {
+        if (success(code,normal,out,true)) {
+            cleanRemote(true,QStringLiteral("APK 安装成功（Root）。"));
+        } else if (m_apkRootMode == SuC && normal &&
+                   QRegularExpression("\\b(failure|failed|error|denied)\\b",QRegularExpression::CaseInsensitiveOption).match(out).hasMatch()) {
+            // Match the local APK button's compatibility retry, but never retry an unknown result.
+            m_apkRootMode = SuS;
+            emit log(QStringLiteral("su -c 安装失败，尝试“APK安装”按钮的 su -s 兼容方式。"));
+            adb(ApkRootInstall,{"shell",apkRootCommand("pm install -r " + ShellCommand::quote(m_remote))});
+        } else {
+            emit log(OpenList::redact(out));
+            cleanRemote(false,QStringLiteral("Root APK 安装失败或结果无法确认。"));
+        }
+        return true;
+    }
+    return false;
 }
 bool OpenListInstaller::handleFailureTransfer(int code,bool normal,const QString &out) {
     // Failure transfer is not installation success, and must never retry itself.
@@ -255,7 +306,8 @@ void OpenListInstaller::chooseRoot(const QString &manager) {
 }
 void OpenListInstaller::cleanRemote(bool ok,const QString &message) {
     m_installSuccess = ok; m_result = message;
-    adb(RemoteCleanup,{"shell",ShellCommand::asRoot("rm -f " + ShellCommand::quote(m_remote))},10000);
+    const QString cleanup = "rm -f " + ShellCommand::quote(m_remote);
+    adb(RemoteCleanup,{"shell",m_module ? ShellCommand::asRoot(cleanup) : apkRootCommand(cleanup)},10000);
 }
 void OpenListInstaller::end(bool ok,const QString &message) {
     if (!ok && m_canTransferFailure) {
