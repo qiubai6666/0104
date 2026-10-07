@@ -13,6 +13,9 @@
 #include <QScreen>
 #include <QTextStream>
 #include <QUuid>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 #include "xiaomiflashservice.h"
 #include "xiaomiflashwindow.h"
 #include "deviceoperationlease.h"
@@ -161,6 +164,26 @@ private slots:
         QSignalSpy finished(&service, &XiaomiFlashService::finished);
         QVERIFY(service.start(p, &error));
         QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 15000);
+#ifdef Q_OS_WIN
+        const auto nativePath=QDir::toNativeSeparators(path).toStdWString();
+        const DWORD length=GetShortPathNameW(nativePath.c_str(),nullptr,0);
+        QString compatible=QString::fromStdWString(nativePath);
+        if(length>0) {
+            std::wstring buffer(length,L'\0');
+            const DWORD count=GetShortPathNameW(nativePath.c_str(),buffer.data(),length);
+            if(count>0 && count<length) compatible=QString::fromWCharArray(buffer.c_str(),int(count));
+        }
+        const QRegularExpression safePath(R"(^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/\-]+$)");
+        if(!safePath.match(compatible).hasMatch()) {
+            QVERIFY(!finished[0][0].toBool());
+            QVERIFY(finished[0][1].toString().contains(QStringLiteral("无法为修正版脚本生成安全的刷机包路径")));
+            QFile audit(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64")); QVERIFY(audit.open(QIODevice::ReadOnly));
+            const auto trace=audit.readAll(); QVERIFY(!trace.contains("erase|")); QVERIFY(!trace.contains("flash|"));
+            QVERIFY(service.m_runtimeScript.isEmpty()); QVERIFY(!DeviceOperationLease::owner());
+            QFile original(p.script); QVERIFY(original.open(QIODevice::ReadOnly)); QCOMPARE(original.readAll(),originalBytes);
+            QSKIP("No safe ASCII/8.3 fixture path on this volume; verified rejection without any erase/flash");
+        }
+#endif
         QCOMPARE(finished[0][0].toBool(), !eraseFails);
         QFile audit(testPathEnvironment("XIAOMI_TEST_AUDIT_BASE64")); QVERIFY(audit.open(QIODevice::ReadOnly));
         const QByteArray trace = audit.readAll();

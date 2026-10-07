@@ -12,6 +12,7 @@
 
 class OugaFlashWindow;
 class XiaomiFlashWindow;
+class OpenListWindow;
 
 class RepairWindow : public QWidget
 {
@@ -40,7 +41,7 @@ private slots:
 
 private:
     friend class DeviceOperationTests;
-    enum RepairAction { UsbFix, TmpFix, InstallApk, InstallModule, OugaFlash, XiaomiFlash };
+    enum RepairAction { UsbFix, TmpFix, InstallApk, InstallModule, OugaFlash, XiaomiFlash, OpenList };
     enum class ApkInstallStep { Push, InstallWithSuC, InstallWithSuS, DeleteTemporaryFile };
     enum class ModuleInstallStep { Push, Install, DeleteTemporaryFile };
     enum class UsbFixStep { Push, Execute, Cleanup };
@@ -68,6 +69,7 @@ private:
 
     OugaFlashWindow *ougaWindow = nullptr;
     XiaomiFlashWindow *xiaomiWindow = nullptr;
+    OpenListWindow *openListWindow = nullptr;
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;
     QProcess *repairProcess;

@@ -30,3 +30,5 @@ HEADERS += $$PWD/../src/services/deviceoperationlease.h
 include($$PWD/../xiaomi.pri)
 
 include($$PWD/../protected-release.pri)
+
+include($$PWD/../openlist.pri)

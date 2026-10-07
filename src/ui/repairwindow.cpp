@@ -1,6 +1,7 @@
 #include "processmanager.h"
 #include "ougaflashwindow.h"
 #include "xiaomiflashwindow.h"
+#include "openlistwindow.h"
 #include "deviceoperationlease.h"
 #include <QCloseEvent>
 #include "shellcommand.h"
@@ -70,7 +71,8 @@ void RepairWindow::setupUI()
         "安装APK",
         "安装模块",
         "欧加线刷",
-        "小米线刷"
+        "小米线刷",
+        "Openlist"
     };
 
     buttons = UIHelper::createMenuButtons(this, mainLayout, buttonTexts);
@@ -120,6 +122,12 @@ void RepairWindow::onButtonClicked()
         break;
     case InstallModule:
         installModule();
+        break;
+    case OpenList:
+        if (!openListWindow) openListWindow = new OpenListWindow(this);
+        openListWindow->showNormal();
+        openListWindow->raise();
+        openListWindow->activateWindow();
         break;
     case XiaomiFlash:
         if (!xiaomiWindow) xiaomiWindow = new XiaomiFlashWindow(this);
@@ -903,6 +911,7 @@ module_finished:
 }
 
 bool RepairWindow::hasActiveOugaTask() const {
+    if (openListWindow && openListWindow->isBusy()) return true;
     if ((xiaomiWindow && xiaomiWindow->isBusy()) || (ougaWindow && ougaWindow->isBusy())) return true;
     // Taskbar flash windows have no QObject parent: protect both launchers
     // explicitly, including read-only discovery and modal operations.

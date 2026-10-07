@@ -71,3 +71,6 @@ dist/
 # 任务私有输入快照、调试符号与验证证据，不可随源码提交
 /TEMP/
 *.debug
+
+# 云端下载文件属于用户数据，不提交
+/OrangeToolsApp/download/

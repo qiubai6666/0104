@@ -18,6 +18,7 @@
 #include "shellcommand.h"
 #include "ougaflashwindow.h"
 #include "xiaomiflashwindow.h"
+#include "openlistwindow.h"
 #include "deviceoperationlease.h"
 #include <QSettings>
 #include <QUuid>
@@ -55,6 +56,7 @@ private slots:
     void init();
     void ougaSingleWindowAndLease();
     void xiaomiMenuAndSingleWindow();
+    void openListMenuAndSingleWindow();
     void cleanup();
     void repeatedActionsKeepRunningFlash();
     void windowCloseCannotInterruptFlash();
@@ -133,7 +135,9 @@ void DeviceOperationTests::ougaSingleWindowAndLease()
 void DeviceOperationTests::xiaomiMenuAndSingleWindow()
 {
     RepairWindow repair;
-    QCOMPARE(repair.buttons.size(), 6);
+    QCOMPARE(repair.buttons.size(), 7);
+    QCOMPARE(repair.buttons[RepairWindow::OpenList]->text(), QString("Openlist"));
+    QCOMPARE(int(RepairWindow::OpenList), int(RepairWindow::XiaomiFlash) + 1);
     QCOMPARE(repair.buttons[RepairWindow::OugaFlash]->text(), QString("欧加线刷"));
     QCOMPARE(repair.buttons[RepairWindow::XiaomiFlash]->text(), QString("小米线刷"));
     QCOMPARE(int(RepairWindow::XiaomiFlash), int(RepairWindow::OugaFlash) + 1);
@@ -159,6 +163,22 @@ void DeviceOperationTests::xiaomiMenuAndSingleWindow()
     QCOMPARE(repair.xiaomiWindow, first);
     QVERIFY(first->isVisible());
 }
+void DeviceOperationTests::openListMenuAndSingleWindow()
+{
+    RepairWindow repair;
+    repair.buttons[RepairWindow::OpenList]->click();
+    auto *first=repair.openListWindow; QVERIFY(first); QVERIFY(first->isVisible());
+    repair.buttons[RepairWindow::OpenList]->click(); QCOMPARE(repair.openListWindow,first);
+    QCloseEvent close; QApplication::sendEvent(first,&close); QVERIFY(!first->isVisible());
+    repair.buttons[RepairWindow::OpenList]->click(); QCOMPARE(repair.openListWindow,first); QVERIFY(first->isVisible());
+    QObject operation(first); QVERIFY(DeviceOperationLease::acquire(&operation));
+    QVERIFY(!repair.hasActiveOugaTask());
+    QVERIFY(!first->close());
+    QVERIFY(DeviceOperationLease::busyFor(&repair));
+    DeviceOperationLease::release(&operation);
+    first->close();
+}
+
 void DeviceOperationTests::init()
 {
     fixture.reset(new QTemporaryDir(QDir::tempPath() + "/OrangeOperationTests-XXXXXX"));
