@@ -208,6 +208,88 @@ private slots:
             }
         }
     }
+    void batchQueue_data() {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("success") << 0;
+        QTest::newRow("install-failure") << 1;
+        QTest::newRow("download-failure") << 2;
+        QTest::newRow("cancel") << 3;
+        QTest::newRow("disconnect") << 4;
+        QTest::newRow("no-device") << 5;
+        QTest::newRow("mixed-apk-module") << 6;
+    }
+    void batchQueue() {
+        QFETCH(int,mode);
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;
+        int downloads = 0;
+        network.handler=[&](const QNetworkRequest &r,const QJsonObject &body) {
+            if (r.url().path()=="/api/fs/list") return new Reply(r,api({{"content",QJsonArray{}},{"total",0}}),200);
+            if (r.url().path()=="/api/fs/get") {
+                ++downloads;
+                if (mode==2 && downloads==1) return new Reply(r,"bad",500);
+                return new Reply(r,api({{"raw_url","https://files.example.com/"+body.value("path").toString().section('/',-1)},{"size",body.value("path").toString().endsWith(".zip") ? 4 : 3}}),200);
+            }
+            return new Reply(r,r.url().path().endsWith(".zip") ? QByteArray("PK\x03\x04",4) : QByteArray("abc"),200,{},mode==3 && downloads==2);
+        };
+        OpenListService service(nullptr,&network,dir.path()); Runner runner;
+        OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z");
+        OpenListWindow window(nullptr,&service,&installer);
+        QSignalSpy listed(&service,&OpenListService::listingReady);
+        QTRY_COMPARE(listed.size(),2);
+        OpenList::Entry first; first.name="first.apk"; first.relativePath=first.name; first.remotePath="/APK/"+first.name;
+        auto second=first; second.name="second.apk"; second.relativePath=second.name; second.remotePath="/APK/"+second.name;
+        OpenList::Entry folder; folder.name="folder"; folder.relativePath=folder.name; folder.remotePath="/APK/folder"; folder.directory=true;
+        if (mode==6) { second.name="module.zip"; second.relativePath=second.name; second.remotePath=QStringLiteral("/模块/")+second.name; second.module=true; }
+        emit service.listingReady(false,mode==6 ? QList<OpenList::Entry>{first,folder} : QList<OpenList::Entry>{first,second,folder},{});
+        if (mode==6) emit service.listingReady(true,{second},{});
+        auto *table=window.findChild<QTableWidget*>("openListApps"); QVERIFY(table);
+        QCOMPARE(table->selectionMode(),QAbstractItemView::ExtendedSelection);
+        table->selectAll();
+        if (mode==6) window.findChild<QTableWidget*>("openListModules")->selectAll();
+        auto *button=window.findChild<QPushButton*>("openListInstallSelected"); QVERIFY(button);
+        button->click(); QVERIFY(window.isBusy()); QCOMPARE(runner.calls.size(),1);
+        button->click(); emit table->cellDoubleClicked(0,0); QCOMPARE(runner.calls.size(),1);
+        if (mode==5) {
+            runner.respond("phone\tunauthorized"); QTRY_VERIFY(!window.isBusy()); QCOMPARE(downloads,0); return;
+        }
+        runner.respond("phone\tdevice");
+        QTRY_COMPARE(downloads,2);
+        const QString firstFile=dir.filePath(QStringLiteral("软件/first.apk"));
+        const QString secondFile=dir.filePath(mode==6 ? QStringLiteral("模块/module.zip") : QStringLiteral("软件/second.apk"));
+        if (mode==3) {
+            auto *cancel=window.findChild<QPushButton*>();
+            for (auto *candidate : window.findChildren<QPushButton*>()) if (candidate->text()==QStringLiteral("取消下载")) cancel=candidate;
+            QVERIFY(cancel->isEnabled()); cancel->click(); QTRY_VERIFY(!window.isBusy());
+            QCOMPARE(runner.calls.size(),1); QVERIFY(QFileInfo::exists(firstFile)); QVERIFY(!QFileInfo::exists(secondFile));
+            QVERIFY(QDir(dir.filePath(QStringLiteral("软件"))).entryList({"*.part"},QDir::Files).isEmpty()); return;
+        }
+        QTRY_COMPARE(runner.calls.size(),2);
+        QVERIFY(QFileInfo::exists(secondFile));
+        if (mode!=2) QVERIFY(QFileInfo::exists(firstFile));
+        const int installations=mode==2 ? 1 : 2;
+        for (int i=0;i<installations;++i) {
+            if (mode==4) {
+                runner.respond("other-phone\tdevice");
+            } else {
+                runner.respond("phone\tdevice");
+                if (mode==6 && i==1) {
+                    QVERIFY(DeviceOperationLease::owner()==&installer);
+                    runner.respond("Path = module.prop"); runner.respond("Everything is Ok");
+                    runner.respond("id=test\nname=Test"); runner.respond("0\n");
+                    runner.respond("OL_APATCH=/data/adb/ap/bin/apd\n");
+                    QCOMPARE(runner.calls.last().args.mid(0,3),QStringList({"-s","phone","push"}));
+                    runner.respond("1 file pushed"); runner.respond("OL_INSTALL_SUCCESS"); runner.respond("");
+                } else {
+                    QCOMPARE(runner.calls.last().args.mid(0,4),QStringList({"-s","phone","install","-r"}));
+                    runner.respond(mode==1 && i==0 ? "Failure [INSTALL_FAILED_USER_RESTRICTED]" : "Success",mode==1 && i==0 ? 1 : 0);
+                }
+            }
+            if (i+1<installations) QTRY_VERIFY(runner.active);
+        }
+        QTRY_VERIFY(!window.isBusy()); QVERIFY(button->isEnabled());
+        QCOMPARE(QFileInfo::exists(firstFile),mode==1 || mode==4);
+        QCOMPARE(QFileInfo::exists(secondFile),mode==4);
+    }
     void folderNavigationAndWindow() {
         QWidget launcher;
         OpenListWindow w(&launcher);
