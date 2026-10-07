@@ -151,6 +151,8 @@ QByteArray OugaHttpRangeReader::requestSingleRange(quint64 offset, quint64 lengt
   QNetworkRequest request(m_url);
   request.setRawHeader("Range", "bytes=" + QByteArray::number(offset) +
                                    "-" + QByteArray::number(end));
+  // Like VioletToolBox's raw response stream, retain the wire bytes. Explicit
+  // Accept-Encoding disables Qt's automatic decompression and preserves offsets.
   request.setRawHeader("Accept-Encoding", "identity");
   if (!m_validator.isEmpty())
     request.setRawHeader("If-Range", m_validator);
@@ -180,7 +182,8 @@ QByteArray OugaHttpRangeReader::requestSingleRange(quint64 offset, quint64 lengt
     if (status != 206) {
       failure = QString("远程服务器不支持按需 Range（HTTP %1），不会下载完整包或跟随重定向").arg(status);
     } else {
-      const QByteArray encoding = reply->rawHeader("Content-Encoding").trimmed().toLower();
+      // Some servers label raw Range bytes as encoded. Do not reject on that
+      // header alone; validate the actual range/body and Payload hashes instead.
       // Keep byte-boundary validation while supporting CDN-aligned 206
       // responses that cover the requested range
       // or a shorter consecutive segment instead of identical start/end values.
@@ -199,9 +202,7 @@ QByteArray OugaHttpRangeReader::requestSingleRange(quint64 offset, quint64 lengt
       }
       const QByteArray contentLength = reply->rawHeader("Content-Length").trimmed();
       const quint64 declaredLength = contentLength.toULongLong(&okLength);
-      if (!encoding.isEmpty() && encoding != "identity")
-        failure = "远程 Range 响应启用了内容编码，无法按原始字节提取";
-      else if (!match.hasMatch() || !okStart || !okEnd || !okTotal)
+      if (!match.hasMatch() || !okStart || !okEnd || !okTotal)
         failure = "远程 Content-Range 格式无效或缺少可验证的总大小";
       else if (actualStart > actualEnd || actualEnd >= total ||
                total > quint64(std::numeric_limits<qint64>::max()))

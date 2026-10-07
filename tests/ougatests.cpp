@@ -302,7 +302,7 @@ public:
   QByteArray source;
   QString fault;
   quint64 bytesSent = 0;
-  int requests = 0, missingRange = 0;
+  int requests = 0, missingRange = 0, missingIdentity = 0;
   QList<QPair<quint64, quint64>> ranges;
   PayloadRangeServer(const QByteArray &bytes, const QString &mode = {})
       : source(bytes), fault(mode) {
@@ -318,6 +318,10 @@ public:
             return;
           *handled = true;
           ++requests;
+          if (!QRegularExpression("(?:^|\\r\\n)Accept-Encoding:\\s*identity\\r\\n",
+                  QRegularExpression::CaseInsensitiveOption)
+                   .match(QString::fromLatin1(*input)).hasMatch())
+            ++missingIdentity;
           const auto match = QRegularExpression("Range: bytes=([0-9]+)-([0-9]+)",
               QRegularExpression::CaseInsensitiveOption).match(QString::fromLatin1(*input));
           if (!match.hasMatch()) { ++missingRange; socket->disconnectFromHost(); return; }
@@ -365,7 +369,15 @@ public:
                 QByteArray::number(begin + (fault == "range" ? 1 : 0)) + "-" +
                 QByteArray::number(end) + slash + reportedTotal + "\r\n";
           }
-          if (fault == "encoding") header += "Content-Encoding: gzip\r\n";
+          // Metadata-only encoding must not trigger decompression or rejection.
+          if (fault == "encoding" || fault == "encodingCorrupt" ||
+              (fault == "lateEncoding" && late))
+            header += "Content-Encoding: gzip\r\n";
+          if (fault == "encodedBody" || (fault == "lateEncodedBody" && late)) {
+            header += "Content-Encoding: deflate\r\n";
+            // qCompress prefixes the real zlib stream with a Qt-only length.
+            body = qCompress(body).mid(4);
+          }
           header += "ETag: " + QByteArray(fault == "etag" && late ? "\"v2\"" : "\"v1\"") + "\r\n";
           if (fault != "overlong")
             header += "Content-Length: " + QByteArray::number(body.size() + (fault == "length" ? 1 : 0)) + "\r\n";
@@ -4092,7 +4104,8 @@ private slots:
     for (const QString kind : {"raw", "large", "stored", "zip64", "compressed", "duplicate",
          "syntax", "short", "aligned", "unknown", "unknownProbe", "overexpanded",
          "segmentLimit", "200", "late200", "range", "missing", "total", "length", "etag",
-         "encoding", "truncated", "overlong", "redirect", "cancel", "delta",
+         "encoding", "lateEncoding", "encodedBody", "lateEncodedBody", "encodingCorrupt",
+         "truncated", "overlong", "redirect", "cancel", "delta",
          "unsupported", "missingPartition", "existingOutput"})
       QTest::newRow(qPrintable(kind)) << kind;
   }
@@ -4121,6 +4134,13 @@ private slots:
       source = zipBytes("payload.bin", payload, kind == "compressed" ? 8 : 0,
                         kind == "duplicate");
     if (kind == "zip64") source = zip64PayloadBytes(payload);
+    if (kind == "encodingCorrupt") {
+      // Keep every Range/length valid but corrupt one REPLACE extent byte.
+      // Manifest hashes, not the encoding label, must reject this image.
+      const qsizetype position = source.indexOf(boot.left(4096));
+      QVERIFY(position >= 0);
+      source[position] = char(source.at(position) ^ 1);
+    }
     const QString fault = kind == "cancel" ? "stall" : kind;
     PayloadRangeServer server(source, fault);
     OugaPreparation prep;
@@ -4149,10 +4169,12 @@ private slots:
     QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, kind == "segmentLimit" ? 30000 : 10000);
     const bool success = kind == "raw" || kind == "large" ||
                          kind == "stored" || kind == "zip64" || kind == "syntax" ||
-                         kind == "short" || kind == "aligned" || kind == "unknown";
+                         kind == "short" || kind == "aligned" || kind == "unknown" ||
+                         kind == "encoding" || kind == "lateEncoding";
     QCOMPARE(finished.first()[0].toBool(), success);
     QCOMPARE(prepared.size(), success ? 1 : 0);
     QCOMPARE(server.missingRange, 0);
+    QCOMPARE(server.missingIdentity, 0);
     QVERIFY2(!logs.contains("SECRET") && !finished.first()[1].toString().contains("SECRET"),
              "Network credentials leaked in diagnostics");
     QVERIFY2(server.bytesSent < quint64(source.size()) / 2, "Whole OTA was transferred");
@@ -4165,6 +4187,9 @@ private slots:
       QVERIFY(server.requests >= 2);
     } else {
       QVERIFY(!QFileInfo::exists(output + "/boot.img"));
+      if (kind == "encodingCorrupt")
+        QVERIFY2(finished.first()[1].toString().contains("operation data sha256"),
+                 "Corrupt raw response must reach and fail the operation hash check");
       for (const auto &frame : progress) QVERIFY(frame[0].toInt() < 100);
       if (kind == "existingOutput") {
         QCOMPARE(read(output + "/keep.txt"), QByteArray("KEEP"));
