@@ -333,8 +333,8 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
     QPushButton[tone="sky"]:hover { background:#627E97; border-color:#627E97; }
     QPushButton[tone="unpack"] { background:#829D96; color:#FFFFFF; border-color:#829D96; }
     QPushButton[tone="unpack"]:hover { background:#718D86; border-color:#718D86; }
-    QPushButton[tone="start"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
-    QPushButton[tone="start"]:hover { background:#627E97; border-color:#627E97; }
+    QPushButton[tone="start"] { background:#2F80ED; color:#FFFFFF; border-color:#2F80ED; }
+    QPushButton[tone="start"]:hover { background:#1D6FD1; border-color:#1D6FD1; }
     QPushButton[tone="repair"] { background:#E7EEF3; color:#526579; border-color:#C9D7E2; }
     QPushButton[tone="repair"]:hover { background:#DCE7EF; border-color:#B9CBD9; }
     QPushButton[tone="stop"] { background:#E5EBF0; color:#596B7D; border-color:#C8D5DF; }
