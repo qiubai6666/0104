@@ -84,12 +84,12 @@ private slots:
     void recursiveListing(){
         Network network;int appPages=0;
         network.handler=[&](const QNetworkRequest&r,const QJsonObject&b){QString p=b.value("path").toString();QJsonArray a;
-            if(p==QStringLiteral("/root管理器")){int page=b.value("page").toInt();appPages++;if(page==1)a={entry("A.apk"),entry("sub",true),entry("readme.txt"),entry("../bad.apk")};else a={entry("B.APK")};return new Reply(r,api({{"content",a},{"total",101}}),200);}
+            if(p==QStringLiteral("/APK")){int page=b.value("page").toInt();appPages++;if(page==1)a={entry("A.apk"),entry("sub",true),entry("readme.txt"),entry("../bad.apk")};else a={entry("B.APK")};return new Reply(r,api({{"content",a},{"total",101}}),200);}
             if(p.endsWith("/sub"))return new Reply(r,api({{"content",QJsonArray{entry("A.apk")}}, {"total",1}}),200);
             return new Reply(r,api({{"content",QJsonValue(QJsonValue::Null)},{"total",0}}),200);
         };
         OpenListService service(nullptr,&network,"unused");QSignalSpy spy(&service,&OpenListService::listingReady);service.refresh();QTRY_COMPARE(spy.size(),2);QCOMPARE(appPages,2);
-        for(const auto&args:spy){bool module=args[0].toBool();auto xs=qvariant_cast<QList<OpenList::Entry>>(args[1]);if(module)QCOMPARE(xs.size(),0);else{QCOMPARE(xs.size(),4); QVERIFY(xs[1].directory);QVERIFY(!args[2].toString().isEmpty());}}
+        for(const auto&args:spy){bool module=args[0].toBool();auto xs=qvariant_cast<QList<OpenList::Entry>>(args[1]);if(module)QCOMPARE(xs.size(),0);else{QCOMPARE(xs.size(),4); QVERIFY(xs[1].directory); for (const auto &e : xs) QVERIFY(e.remotePath.startsWith("/APK/"));QVERIFY(!args[2].toString().isEmpty());}}
     }
     void categoryFailureIndependent(){
         Network network;network.handler=[](const QNetworkRequest&r,const QJsonObject&b){return new Reply(r,b.value("path").toString()==QStringLiteral("/模块")?QByteArray("bad"):api({{"content",QJsonArray{entry("ok.apk")}},{"total",1}}),200);};
@@ -98,12 +98,13 @@ private slots:
     void download_data(){QTest::addColumn<int>("mode");for(int i=0;i<6;++i)QTest::newRow(qPrintable(QString::number(i)))<<i;}
     void download(){
         QFETCH(int,mode);QTemporaryDir dir;QVERIFY(dir.isValid());Network network;
-        network.handler=[mode](const QNetworkRequest&r,const QJsonObject&){
+        network.handler=[mode](const QNetworkRequest&r,const QJsonObject&body){
+            if(r.url().path()=="/api/fs/get" && body.value("path").toString()!=QStringLiteral("/APK/sub/ok.apk")) return new Reply(r,"bad path",400);
             if(r.url().path()=="/api/fs/get")return new Reply(r,api({{"raw_url",mode==1?"http://unsafe/file":"https://files.example.com/file"},{"size",3},{"hash_info",QJsonObject{{"sha256",mode==2?QString(64,'a'):QString(QCryptographicHash::hash("abc",QCryptographicHash::Sha256).toHex())}}}}),200);
             if(mode==3)return new Reply(r,{},302,QUrl("http://unsafe/file"));
             return new Reply(r,mode==4?"ab":"abc",200,{},mode==5);
         };
-        OpenListService s(nullptr,&network,dir.path());OpenList::Entry e;e.name="ok.apk";e.relativePath="sub/ok.apk";e.remotePath=QStringLiteral("/root管理器/sub/ok.apk");e.size=3;
+        OpenListService s(nullptr,&network,dir.path());OpenList::Entry e;e.name="ok.apk";e.relativePath="sub/ok.apk";e.remotePath=QStringLiteral("/APK/sub/ok.apk");e.size=3;
         QSignalSpy ready(&s,&OpenListService::ready),failed(&s,&OpenListService::failed);QVERIFY(s.download(e));QVERIFY(!s.download(e));
         if(mode==5){QTRY_COMPARE(network.requests.size(),2);s.cancel();}
         if(mode==0){QTRY_COMPARE(ready.size(),1);auto file=ready[0][1].toString();QVERIFY(QFileInfo::exists(file));QVERIFY(writeFile(file,"old"));QVERIFY(s.download(e));QTRY_COMPARE(ready.size(),2);QVERIFY(ready[1][1].toString()!=file);QFile original(file);QVERIFY(original.open(QIODevice::ReadOnly));QCOMPARE(original.readAll(),QByteArray("old"));}

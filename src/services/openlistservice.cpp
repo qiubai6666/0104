@@ -16,7 +16,7 @@
 
 namespace {
 const QString base = QStringLiteral("https://pan.xn--ucy.xyz");
-QString remoteRoot(bool module) { return module ? QStringLiteral("/模块") : QStringLiteral("/root管理器"); }
+QString remoteRoot(bool module) { return module ? QStringLiteral("/模块") : QStringLiteral("/APK"); }
 constexpr qint64 maxJson = 4 * 1024 * 1024;
 bool apiObject(QNetworkReply *r, QJsonObject *result) {
     if (r->error() != QNetworkReply::NoError || r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200)
