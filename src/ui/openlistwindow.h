@@ -42,6 +42,7 @@ private:
     void render(bool module);
     void activate(bool module, int row);
     void startBatch(const QList<OpenList::Entry> &entries);
+    void appendSelection(const OpenList::Entry &selection, QList<OpenList::Entry> &expanded, QSet<QString> &paths) const;
     void advanceBatch();
     void setBusy(bool busy);
     void finish(const QString &message, bool ok = false);

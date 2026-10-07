@@ -324,6 +324,43 @@ private slots:
         QCOMPARE(QFileInfo::exists(firstFile),mode==1 || mode==4);
         QCOMPARE(QFileInfo::exists(secondFile),mode==4);
     }
+    void folderSelectionQueuesChildren() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;
+        int downloads = 0;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &body) {
+            if (r.url().path() == "/api/fs/list") return new Reply(r, api({{"content", QJsonArray{}}, {"total", 0}}), 200);
+            if (r.url().path() == "/api/fs/get") {
+                ++downloads;
+                if (body.value("path").toString() != QStringLiteral("/APK/folder/child.apk")) return new Reply(r, "bad path", 400);
+                return new Reply(r, api({{"raw_url", "https://files.example.com/child.apk"}, {"size", 3}}), 200);
+            }
+            return new Reply(r, QByteArray("abc"), 200);
+        };
+        OpenListService service(nullptr, &network, dir.path()); Runner runner;
+        OpenListInstaller installer(nullptr, &runner, "fake-adb", "fake-7z");
+        OpenListWindow window(nullptr, &service, &installer);
+        QSignalSpy listed(&service, &OpenListService::listingReady);
+        QTRY_COMPARE(listed.size(), 2);
+        OpenList::Entry folder; folder.name = "folder"; folder.relativePath = folder.name;
+        folder.remotePath = "/APK/folder"; folder.directory = true;
+        OpenList::Entry child; child.name = "child.apk"; child.relativePath = "folder/child.apk";
+        child.remotePath = "/APK/folder/child.apk";
+        emit service.listingReady(false, {folder, child}, {});
+        auto *table = window.findChild<QTableWidget*>("openListApps"); QVERIFY(table);
+        QCOMPARE(table->rowCount(), 1);
+        table->selectRow(0);
+        auto *button = window.findChild<QPushButton*>("openListInstallSelected"); QVERIFY(button);
+        button->click(); QVERIFY(window.isBusy()); QCOMPARE(runner.calls.size(), 1);
+        runner.respond("phone\tdevice");
+        QTRY_COMPARE(downloads, 1);
+        QTRY_COMPARE(runner.calls.size(), 2);
+        runner.respond("phone\tdevice");
+        QTRY_COMPARE(runner.calls.size(), 3);
+        QCOMPARE(runner.calls.last().args.mid(0, 4), QStringList({"-s", "phone", "install", "-r"}));
+        runner.respond("Success");
+        QTRY_VERIFY(!window.isBusy());
+        QVERIFY(QFileInfo::exists(dir.filePath(QStringLiteral("软件/folder/child.apk"))) == false);
+    }
     void folderNavigationAndWindow() {
         QWidget launcher;
         OpenListWindow w(&launcher);

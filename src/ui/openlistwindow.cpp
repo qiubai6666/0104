@@ -42,11 +42,11 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
             for (int row = 0; row < m_tables[category]->rowCount(); ++row) {
                 if (!m_tables[category]->item(row,0)->isSelected()) continue;
                 const int index = m_tables[category]->item(row,0)->data(Qt::UserRole).toInt();
-                if (index >= 0 && index < m_entries[category].size() && !m_entries[category][index].directory)
+                if (index >= 0 && index < m_entries[category].size())
                     selected.append(m_entries[category][index]);
             }
         }
-        if (selected.isEmpty()) log(QStringLiteral("请先选择文件；按 Ctrl / Shift 可多选，文件夹不加入队列。"));
+        if (selected.isEmpty()) log(QStringLiteral("请先选择文件或文件夹；按 Ctrl / Shift 可多选。"));
         else startBatch(selected);
     });
     connect(m_service,&OpenListService::listingReady,this,[this](bool module,const QList<OpenList::Entry> &entries,const QString &error) {
@@ -144,7 +144,7 @@ void OpenListWindow::setupUi() {
         connect(m_search[i],&QLineEdit::textChanged,this,[this,i] { render(i); });
         connect(table,&QTableWidget::cellDoubleClicked,this,[this,i](int row,int) { activate(i,row); });
     }
-    m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选后安装选中：先全部下载再逐个安装；双击仍安装单个文件"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
+    m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选后安装选中：先全部下载再逐个安装；选中文件夹可安装其中全部文件"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
     auto *progress = new QHBoxLayout; m_progress = new QProgressBar(this); m_progress->setValue(0); progress->addWidget(m_progress,1);
     m_cancel = new QPushButton(QStringLiteral("取消下载"),this); m_cancel->setEnabled(false); progress->addWidget(m_cancel); layout->addLayout(progress);
     auto *logs = new QGroupBox(QStringLiteral("操作日志"),this); auto *logsLayout = new QVBoxLayout(logs);
@@ -194,7 +194,7 @@ void OpenListWindow::render(bool module) {
         for (int col=1;col<4;++col) table->item(row,col)->setToolTip(table->item(row,col)->text());
     }
     if (table->rowCount() == 0) m_counts[module]->setText(filter.isEmpty() ? QStringLiteral("暂无资源") : QStringLiteral("没有匹配的资源"));
-    else m_counts[module]->setText(QStringLiteral("%1 项 · 双击文件夹进入／文件安装").arg(table->rowCount()));
+    else m_counts[module]->setText(QStringLiteral("%1 项 · 选中文件夹后可一键安装其中全部文件").arg(table->rowCount()));
 }
 void OpenListWindow::activate(bool module,int row) {
     if (m_busy || row < 0 || row >= m_tables[module]->rowCount()) return;
@@ -206,15 +206,34 @@ void OpenListWindow::activate(bool module,int row) {
     }
     startBatch({entry});
 }
+void OpenListWindow::appendSelection(const OpenList::Entry &selection, QList<OpenList::Entry> &expanded, QSet<QString> &paths) const {
+    const int category = selection.module ? 1 : 0;
+    if (selection.directory) {
+        const QString prefix = selection.relativePath + QStringLiteral("/");
+        for (const auto &entry : m_entries[category]) {
+            if (!entry.directory && entry.relativePath.startsWith(prefix)) {
+                const QString key = QString::number(entry.module) + entry.remotePath;
+                if (!paths.contains(key)) { paths.insert(key); expanded.append(entry); }
+            }
+        }
+        return;
+    }
+    const QString key = QString::number(selection.module) + selection.remotePath;
+    if (!paths.contains(key)) { paths.insert(key); expanded.append(selection); }
+}
 void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries) {
     if (m_busy || entries.isEmpty()) return;
     m_queue.clear();
     QSet<QString> paths;
+    bool folderSelected = false;
     for (const auto &entry : entries) {
-        const QString key = QString::number(entry.module) + entry.remotePath;
-        if (!entry.directory && !paths.contains(key)) { paths.insert(key); m_queue.append(entry); }
+        folderSelected = folderSelected || entry.directory;
+        appendSelection(entry, m_queue, paths);
     }
-    if (m_queue.isEmpty()) return;
+    if (m_queue.isEmpty()) {
+        if (folderSelected) log(QStringLiteral("所选文件夹内没有可安装的 APK 或模块文件。"));
+        return;
+    }
     m_downloaded.clear(); m_serial.clear(); m_queueIndex = 0; m_installIndex = 0;
     m_succeeded = 0; m_failed = 0; m_installingBatch = false; m_cancelled = false;
     setBusy(true);
