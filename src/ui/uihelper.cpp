@@ -67,14 +67,18 @@ QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
     QByteArray svg = file.readAll();
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     svg.replace("currentColor", dark ? "#dce8ef" : "#385565");
+    // Render in logical coordinates and preserve the complete 24x24 SVG viewBox.
     QSvgRenderer renderer(svg);
-    QPixmap pixmap(qRound(24 * ratio), qRound(24 * ratio));
-    pixmap.setDevicePixelRatio(ratio);
+    const QSize logicalSize(24, 24);
+    const qreal scale = qMax<qreal>(1.0, ratio);
+    QPixmap pixmap(logicalSize * qRound(scale));
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    renderer.render(&painter, QRectF(0, 0, 24 * ratio, 24 * ratio));
+    painter.scale(scale, scale);
+    renderer.render(&painter, QRectF(QPointF(0, 0), QSizeF(logicalSize)));
+    pixmap.setDevicePixelRatio(scale);
     return QIcon(pixmap);
 }
 
