@@ -66,7 +66,7 @@ QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
     if (!file.open(QIODevice::ReadOnly)) return {};
     QByteArray svg = file.readAll();
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
-    svg.replace("currentColor", dark ? "#c8d6df" : "#526d7b");
+    svg.replace("currentColor", dark ? "#dce8ef" : "#385565");
     QSvgRenderer renderer(svg);
     QPixmap pixmap(qRound(24 * ratio), qRound(24 * ratio));
     pixmap.setDevicePixelRatio(ratio);
@@ -74,7 +74,7 @@ QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    renderer.render(&painter, QRectF(2 * ratio, 2 * ratio, 20 * ratio, 20 * ratio));
+    renderer.render(&painter, QRectF(0, 0, 24 * ratio, 24 * ratio));
     return QIcon(pixmap);
 }
 
@@ -270,4 +270,6 @@ QMessageBox::StandardButton UIHelper::showCenteredQuestion(const QString &title,
 
     return static_cast<QMessageBox::StandardButton>(msgBox.exec());
 }
+
+
 
