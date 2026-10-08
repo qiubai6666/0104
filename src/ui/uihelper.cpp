@@ -79,7 +79,10 @@ QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    renderer.render(&painter, QRectF(0, 0, pixels, pixels));
+    // setDevicePixelRatio already scales the painter. Its bounds must stay
+    // in logical pixels, otherwise DPR > 1 clips the right/bottom strokes.
+    renderer.render(&painter, QRectF(0, 0, 24, 24));
+    painter.end();
     return QIcon(pixmap);
 }
 QString UIHelper::textButtonStyle()
@@ -274,10 +277,3 @@ QMessageBox::StandardButton UIHelper::showCenteredQuestion(const QString &title,
 
     return static_cast<QMessageBox::StandardButton>(msgBox.exec());
 }
-
-
-
-
-
-
-
