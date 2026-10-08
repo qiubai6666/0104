@@ -7,8 +7,8 @@
 
 ScreenCastController::ScreenCastController(QObject *parent) : QObject(parent)
 {
-    // A short backoff also handles early scrcpy failures while ADB still reports
-    // the rebooting device online. Do not spawn a tight restart loop.
+    // Failed/disconnected sessions still back off while ADB may report a
+    // rebooting device online. Normal window closes do not need this delay.
     m_retryTimer.setSingleShot(true);
     m_retryTimer.setInterval(2000);
     connect(&m_retryTimer, &QTimer::timeout, this, &ScreenCastController::tryStart);
@@ -86,9 +86,10 @@ void ScreenCastController::tryStart()
     });
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, process](int code, QProcess::ExitStatus exit) {
-        finish(process, code == 0 && exit == QProcess::NormalExit ?
-               QStringLiteral("投屏窗口已关闭，将自动恢复；再次点击取消自动投屏") :
-               QStringLiteral("投屏已结束或启动失败，将自动重试；再次点击取消自动投屏"));
+        const bool normalExit = code == 0 && exit == QProcess::NormalExit;
+        finish(process, normalExit ?
+               QStringLiteral("投屏窗口已关闭，正在自动恢复；再次点击取消自动投屏") :
+               QStringLiteral("投屏已结束或启动失败，将自动重试；再次点击取消自动投屏"), normalExit);
     });
     setState(Starting, QStringLiteral("正在启动投屏；再次点击取消自动投屏"));
     if (m_process != process || m_state != Starting) return;
@@ -97,9 +98,12 @@ void ScreenCastController::tryStart()
                    {"--max-size", "1024", "--video-bit-rate", "4M", "--serial", m_serial});
 }
 
-void ScreenCastController::finish(QProcess *process, const QString &status)
+void ScreenCastController::finish(QProcess *process, const QString &status, bool normalExit)
 {
     if (process != m_process) return;
+    auto *manager = DeviceManager::instance();
+    const bool restartSameDevice = normalExit && m_state == Streaming &&
+        manager->currentMode() == DeviceManager::ADB && manager->deviceSerial() == m_serial;
     m_startTimer.stop();
     disconnect(process, nullptr, this, nullptr);
     m_process = nullptr;
@@ -108,9 +112,11 @@ void ScreenCastController::finish(QProcess *process, const QString &status)
     const QString finalStatus = m_stopStatus.isEmpty() ? status : m_stopStatus;
     m_stopStatus.clear();
     if (m_autoCastEnabled) {
-        // Set the timer before emitting stateChanged: a manual cancel from that
-        // signal must be able to cancel both the pending retry and the intent.
-        m_retryTimer.start();
+        // Schedule before stateChanged so a reentrant manual stop cannot leave
+        // a live failure timer. The queued fast path also rechecks user intent,
+        // device availability and operation leases without recursive startup.
+        if (restartSameDevice) QTimer::singleShot(0, this, &ScreenCastController::tryStart);
+        else m_retryTimer.start();
         setState(WaitingForDevice, finalStatus);
     } else {
         setState(Idle, QStringLiteral("点击开始投屏"));

@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -247,9 +248,129 @@ private slots:
         QVERIFY(QFile::rename(fixturePath + "/missing-scrcpy.exe", fixturePath + "/scrcpy.exe"));
         QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Streaming);
     }
+    void normalWindowCloseRestartsWithoutBackoff() {
+        ScreenCastController controller;
+        // An exaggerated failure delay proves normal closes do not use it.
+        controller.m_retryTimer.setInterval(10000);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        QElapsedTimer reopening;
+        bool usedBackoff = false;
+        connect(&controller, &ScreenCastController::stateChanged, this, [&] {
+            if (controller.state() == ScreenCastController::WaitingForDevice) {
+                reopening.start();
+                usedBackoff |= controller.m_retryTimer.isActive();
+            }
+        });
+        for (int close = 0; close < 3; ++close) {
+            reopening.invalidate();
+            QVERIFY(writeFile(fixturePath + "/close-request.txt", "close"));
+            QTRY_COMPARE_WITH_TIMEOUT(scrcpyCommands().size(), close + 2, 1500);
+            QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+            QVERIFY(reopening.isValid());
+            QVERIFY(!usedBackoff);
+            QVERIFY2(reopening.elapsed() < 1500, "Normal window close was delayed by failure backoff");
+            qInfo() << "Normal close-to-restart:" << reopening.elapsed() << "ms";
+            // Device-info notifications must not launch another replacement.
+            for (int update = 0; update < 5; ++update) controller.checkDevice();
+            QTest::qWait(100);
+            QCOMPARE(scrcpyCommands().size(), close + 2);
+        }
+        QCOMPARE(controller.m_retryTimer.interval(), 10000);
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Idle);
+        QTest::qWait(150);
+        QCOMPARE(scrcpyCommands().size(), 4);
+    }
+    void manualCancelDuringImmediateRestartRemainsStopped() {
+        MenuWidget menu;
+        freeze(menu);
+        auto *controller = menu.screenCastController;
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        auto *button = menu.buttons[MenuWidget::ScreenCast];
+        button->click();
+        QTRY_COMPARE(controller->state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        bool canceled = false;
+        connect(controller, &ScreenCastController::stateChanged, this, [&] {
+            if (controller->state() == ScreenCastController::WaitingForDevice) {
+                canceled = true;
+                button->click();
+            }
+        });
+        QVERIFY(writeFile(fixturePath + "/close-request.txt", "close"));
+        QTRY_COMPARE(controller->state(), ScreenCastController::Idle);
+        QVERIFY(canceled);
+        QVERIFY(!controller->m_autoCastEnabled);
+        QVERIFY(!controller->m_retryTimer.isActive());
+        QTest::qWait(250);
+        QCOMPARE(scrcpyCommands().size(), 1);
+    }
+    void normalCloseDuringOperationWaitsForLease() {
+        ScreenCastController controller;
+        controller.m_retryTimer.setInterval(10000);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        QObject operation;
+        QVERIFY(DeviceOperationLease::acquire(&operation));
+        QVERIFY(writeFile(fixturePath + "/close-request.txt", "close"));
+        QTRY_COMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(!controller.m_retryTimer.isActive());
+        QTest::qWait(150);
+        QCOMPARE(scrcpyCommands().size(), 1);
+        DeviceOperationLease::release(&operation);
+        QTRY_COMPARE_WITH_TIMEOUT(scrcpyCommands().size(), 2, 1500);
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+    }
+    void failedRestartAfterNormalCloseStillBacksOff() {
+        ScreenCastController controller;
+        controller.m_retryTimer.setInterval(600);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        QVERIFY(writeFile(fixturePath + "/behavior.txt", "fail"));
+        QVERIFY(writeFile(fixturePath + "/close-request.txt", "close"));
+        QTRY_COMPARE_WITH_TIMEOUT(scrcpyCommands().size(), 2, 1500);
+        QTRY_VERIFY(controller.m_retryTimer.isActive());
+        QCOMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        QCOMPARE(controller.m_retryTimer.interval(), 600);
+        QVERIFY(writeFile(fixturePath + "/behavior.txt", ""));
+        for (int update = 0; update < 5; ++update) controller.checkDevice();
+        QTest::qWait(100);
+        QCOMPARE(scrcpyCommands().size(), 2);
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 3);
+    }
+    void fastRestartRechecksDeviceBeforeLaunch() {
+        ScreenCastController controller;
+        controller.m_retryTimer.setInterval(10000);
+        auto *manager = DeviceManager::instance();
+        manager->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        connect(&controller, &ScreenCastController::stateChanged, this, [&] {
+            if (controller.state() == ScreenCastController::WaitingForDevice)
+                manager->setDetectedDevice(DeviceManager::None, {});
+        });
+        QVERIFY(writeFile(fixturePath + "/close-request.txt", "close"));
+        QTRY_COMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(!controller.m_retryTimer.isActive());
+        QTest::qWait(150);
+        QCOMPARE(scrcpyCommands().size(), 1);
+        manager->setDetectedDevice(DeviceManager::ADB, "PHONE_B");
+        QTRY_COMPARE_WITH_TIMEOUT(scrcpyCommands().size(), 2, 1500);
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QVERIFY(scrcpyCommands().contains(QJsonArray{"scrcpy", "--max-size", "1024",
+            "--video-bit-rate", "4M", "--serial", "PHONE_B"}));
+    }
     void processExitAutomaticallyRestarts_data() {
         QTest::addColumn<QByteArray>("behavior");
-        QTest::newRow("window-closed") << QByteArray("close");
         QTest::newRow("start-failed") << QByteArray("fail");
         QTest::newRow("crashed") << QByteArray("crash");
     }
@@ -430,7 +551,7 @@ private slots:
         QCOMPARE(controller.state(), ScreenCastController::Idle);
     }
     void retryRespectsLeaseAndCancellation() {
-        QVERIFY(writeFile(fixturePath + "/behavior.txt", "close"));
+        QVERIFY(writeFile(fixturePath + "/behavior.txt", "fail"));
         ScreenCastController controller;
         controller.m_retryTimer.setInterval(80);
         DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
@@ -575,9 +696,15 @@ int helperMain(QCoreApplication &application) {
     if (!audit.open(QIODevice::WriteOnly)) return 90;
     audit.write(QJsonDocument(command).toJson(QJsonDocument::Compact)); audit.close();
     if (base == "scrcpy") {
+        QTimer closeRequest;
+        closeRequest.setInterval(10);
+        QObject::connect(&closeRequest, &QTimer::timeout, &application, [&] {
+            if (QFile::remove(directory + "/close-request.txt")) application.exit(0);
+        });
+        closeRequest.start();
         const auto behavior = readFile(directory + "/behavior.txt").trimmed();
-        if (behavior == "close" || behavior == "fail") {
-            QTimer::singleShot(300, &application, [&application, behavior] { application.exit(behavior == "fail" ? 1 : 0); });
+        if (behavior == "fail") {
+            QTimer::singleShot(300, &application, [&application] { application.exit(1); });
         } else if (behavior == "crash") QTimer::singleShot(300, &application, [] { std::abort(); });
         return application.exec();
     }

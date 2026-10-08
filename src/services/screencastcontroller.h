@@ -29,7 +29,7 @@ private:
     void checkDevice();
     void stopCurrentProcess();
     void setState(State state, const QString &status);
-    void finish(QProcess *process, const QString &status);
+    void finish(QProcess *process, const QString &status, bool normalExit = false);
     bool m_autoCastEnabled = false;
     State m_state = Idle;
     QString m_statusText = QStringLiteral("点击开始投屏");
