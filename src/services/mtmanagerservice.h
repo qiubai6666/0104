@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QElapsedTimer>
 
+class OpenListService;
 class MtManagerService final : public QObject {
     Q_OBJECT
 public:
@@ -26,9 +27,11 @@ private:
     void parsePage(QNetworkReply *reply);
     void startDownload(const QUrl &url, const QString &version);
     void finishFailure(const QString &message);
+    bool useParallel(QNetworkReply *reply);
     static bool validDownloadUrl(const QUrl &url);
     QString uniqueApkPath(const QString &version) const;
     QNetworkAccessManager *m_network;
+    OpenListService *m_downloader;
     QString m_root;
     QPointer<QNetworkReply> m_reply;
     QFile m_file;

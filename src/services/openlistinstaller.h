@@ -45,11 +45,14 @@ signals:
     void completed(bool success, const QString &message);
     void log(const QString &text);
 private:
-    enum Stage { Idle, Discover, Verify, ZipList, ZipTest, ZipProperties, RootAccess,
+    enum Stage { Idle, WaitingDevice, Discover, Verify, ZipList, ZipTest, ZipProperties, RootAccess,
                  Managers, RootChoice, Push, ModuleInstall, RemoteCleanup, ApkInstall,
                  TransferVerify, TransferDestination, TransferPush, TransferCleanup,
                  ApkRootProbe, ApkRootPush, ApkRootInstall };
     Stage m_stage = Idle;
+    QTimer m_deviceWait;
+    int m_deviceWaitAttempts = 0;
+    void startDeviceDiscovery();
     OugaCommandRunner *m_runner;
     QString m_adb, m_sevenZip, m_file, m_serial, m_remote, m_selectedManager;
     QMap<QString,QString> m_managers;

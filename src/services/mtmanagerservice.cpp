@@ -13,9 +13,30 @@ const qint64 kMaxPage = 4 * 1024 * 1024;
 
 MtManagerService::MtManagerService(QObject *parent, QNetworkAccessManager *network, const QString &downloadRoot)
     : QObject(parent), m_network(network ? network : new QNetworkAccessManager(this)),
-      m_root(downloadRoot.isEmpty() ? OpenList::defaultDownloadRoot() : downloadRoot) {}
+      m_root(downloadRoot.isEmpty() ? OpenList::defaultDownloadRoot() : downloadRoot) {
+    m_downloader = new OpenListService(this, m_network, m_root);
+    connect(m_downloader, &OpenListService::progress, this, &MtManagerService::progress);
+    connect(m_downloader, &OpenListService::failed, this, [this](const QString &message) {
+        if (m_active) finishFailure(message);
+    });
+    connect(m_downloader, &OpenListService::ready, this, [this](const OpenList::Entry &, const QString &file) {
+        if (!m_active) return;
+        QFile apk(file);
+        const bool valid = apk.open(QIODevice::ReadOnly) && apk.read(4) == QByteArray("PK\x03\x04", 4);
+        apk.close();
+        if (!valid) {
+            const bool removed = QFile::remove(file);
+            finishFailure(removed ? QStringLiteral("下载内容不是有效 APK。") :
+                QStringLiteral("下载内容不是有效 APK，清理失败，文件保留：%1").arg(file));
+            return;
+        }
+        m_path = file; m_active = false;
+        emit log(QStringLiteral("MT 管理器下载完成。")); emit ready(m_version, file);
+    });
+}
 
 MtManagerService::~MtManagerService() {
+    m_active = false; m_downloader->cancel();
     if (m_reply) { disconnect(m_reply, nullptr, this, nullptr); m_reply->abort(); m_reply->deleteLater(); }
     m_file.close();
     if (!m_part.isEmpty()) QFile::remove(m_part);
@@ -31,6 +52,9 @@ void MtManagerService::fetchPage() {
     QNetworkRequest req(kPage);
     req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("OrangeTools/1.0"));
     req.setTransferTimeout(30000);
+    req.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
+    req.setAttribute(QNetworkRequest::CookieSaveControlAttribute, QNetworkRequest::Manual);
+    req.setAttribute(QNetworkRequest::AuthenticationReuseAttribute, QNetworkRequest::Manual);
     m_reply = m_network->get(req);
     connect(m_reply, &QNetworkReply::finished, this, [this] { if (m_reply) parsePage(m_reply); });
 }
@@ -74,12 +98,17 @@ void MtManagerService::startDownload(const QUrl &url, const QString &version) {
     if (m_path.isEmpty()) { finishFailure(QStringLiteral("下载目录不可写或无法生成唯一文件名。")); return; }
     m_part = m_path + QStringLiteral(".") + QUuid::createUuid().toString(QUuid::Id128) + QStringLiteral(".part");
     m_file.setFileName(m_part);
-    if (!m_file.open(QIODevice::WriteOnly)) { finishFailure(QStringLiteral("无法创建 MT 管理器下载文件。")); return; }
+    if (!m_file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) { m_part.clear(); finishFailure(QStringLiteral("无法创建 MT 管理器下载文件。")); return; }
     QNetworkRequest req(url); req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("OrangeTools/1.0"));
     req.setTransferTimeout(30000);
+    req.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
+    req.setAttribute(QNetworkRequest::CookieSaveControlAttribute, QNetworkRequest::Manual);
+    req.setAttribute(QNetworkRequest::AuthenticationReuseAttribute, QNetworkRequest::Manual);
+    req.setRawHeader("Accept-Encoding", "identity");
+    req.setRawHeader("Range", "bytes=0-0");
     m_reply = m_network->get(req); m_clock.start();
     connect(m_reply, &QNetworkReply::metaDataChanged, this, [this] {
-        if (!m_reply) return;
+        if (!m_reply || useParallel(m_reply)) return;
         const QVariant length = m_reply->header(QNetworkRequest::ContentLengthHeader);
         if (length.isValid() && length.toLongLong() > 0) {
             m_total = length.toLongLong();
@@ -87,7 +116,7 @@ void MtManagerService::startDownload(const QUrl &url, const QString &version) {
         }
     });
     connect(m_reply, &QNetworkReply::readyRead, this, [this] {
-        if (!m_reply) return;
+        if (!m_reply || useParallel(m_reply)) return;
         const auto data = m_reply->readAll();
         if (!data.isEmpty()) {
             if (m_file.write(data) != data.size()) { finishFailure(QStringLiteral("下载文件写入失败，请检查磁盘空间及占用情况。")); return; }
@@ -101,7 +130,7 @@ void MtManagerService::startDownload(const QUrl &url, const QString &version) {
         emit progress(shown, m_total, m_clock.elapsed() > 0 ? shown * 1000.0 / m_clock.elapsed() : 0);
     });
     connect(m_reply, &QNetworkReply::finished, this, [this] {
-        if (!m_reply) return;
+        if (!m_reply || useParallel(m_reply)) return;
         const auto reply = m_reply;
         const bool ok = reply->error() == QNetworkReply::NoError;
         const auto tail = reply->readAll();
@@ -124,11 +153,34 @@ void MtManagerService::startDownload(const QUrl &url, const QString &version) {
         m_part.clear(); m_active=false; emit log(QStringLiteral("MT 管理器下载完成。")); emit ready(m_version,m_path);
     });
 }
+bool MtManagerService::useParallel(QNetworkReply *reply) {
+    if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 206) return false;
+    const auto match = QRegularExpression(QStringLiteral("^bytes 0-0/([0-9]+)$")).match(QString::fromLatin1(reply->rawHeader("Content-Range")));
+    bool ok = false;
+    const qint64 size = match.captured(1).toLongLong(&ok);
+    const QUrl url = reply->url();
+    if (reply->error() != QNetworkReply::NoError || !match.hasMatch() || !ok || size < 4 || !OpenListService::https(url)) {
+        finishFailure(QStringLiteral("MT 下载分段探测响应无效。")); return true;
+    }
+    m_reply = nullptr;
+    disconnect(reply, nullptr, this, nullptr); reply->abort(); reply->deleteLater();
+    m_file.close();
+    if (!QFile::remove(m_part)) { finishFailure(QStringLiteral("下载临时文件清理失败。")); return true; }
+    m_part.clear();
+    OpenList::Entry entry;
+    entry.name = QStringLiteral("MT管理器-%1.apk").arg(m_version);
+    entry.relativePath = entry.name; entry.size = size;
+    emit log(QStringLiteral("正在加速下载 MT 管理器…"));
+    if (!m_downloader->downloadDirect(entry, url) && m_active)
+        finishFailure(QStringLiteral("无法启动 MT 管理器下载。"));
+    return true;
+}
 void MtManagerService::finishFailure(const QString &message) {
     // Detach before abort: abort may synchronously emit finished.
     const auto reply = m_reply;
     m_reply = nullptr;
     m_active = false;
+    m_downloader->cancel();
     if (reply) { disconnect(reply, nullptr, this, nullptr); reply->abort(); reply->deleteLater(); }
     if (m_file.isOpen()) m_file.close(); if (!m_part.isEmpty()) QFile::remove(m_part);
     m_part.clear(); emit failed(message);

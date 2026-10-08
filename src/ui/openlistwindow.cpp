@@ -48,7 +48,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     });
     connect(m_mtService,&MtManagerService::log,this,&OpenListWindow::log);
     connect(m_mtService,&MtManagerService::failed,this,[this](const QString &message) { if (!m_mtTask) return; m_mtTask=false; finish(message); });
-    connect(m_mtService,&MtManagerService::ready,this,[this](const QString &version,const QString &file) { if (!m_mtTask) return; m_progress->setRange(0,100); m_progress->setValue(100); m_mtFile=file; log(QStringLiteral("正在安装 MT 管理器（版本 %1）…").arg(version)); m_installer->inspectDevices(); });
+    connect(m_mtService,&MtManagerService::ready,this,[this](const QString &version,const QString &file) { if (!m_mtTask) return; m_progress->setRange(0,100); m_progress->setValue(100); m_mtFile=file; log(QStringLiteral("MT 管理器下载完成（版本 %1），正在检测手机…").arg(version)); m_installer->inspectDevices(); });
     connect(m_service,&OpenListService::listingReady,this,[this](bool module,const QList<OpenList::Entry> &entries,const QString &error) {
         m_entries[module] = entries; render(module);
         if (!error.isEmpty()) m_counts[module]->setText(error);
@@ -80,7 +80,11 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         if (m_mtTask) {
             bool accepted = true; m_serial = serials.size() == 1 ? serials.first() : QInputDialog::getItem(this,QStringLiteral("选择目标手机"),QStringLiteral("已连接多台设备，请选择目标手机："),serials,0,false,&accepted);
             if (!accepted || m_serial.isEmpty()) { m_mtTask=false; finish(QStringLiteral("未选择手机，未开始安装。")); return; }
-            updateDevice(); m_installer->install(m_mtFile,false,m_serial); return;
+            updateDevice();
+            QTimer::singleShot(0, this, [this] {
+                if (m_mtTask && m_busy) m_installer->install(m_mtFile,false,m_serial);
+            });
+            return;
         }
         bool accepted = true;
         m_serial = serials.size() == 1 ? serials.first() : QInputDialog::getItem(this,QStringLiteral("选择目标手机"),QStringLiteral("已连接多台设备，请选择目标手机："),serials,0,false,&accepted);
@@ -95,7 +99,11 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     });
     connect(m_installer,&OpenListInstaller::completed,this,[this](bool ok,const QString &message) {
         if (!m_busy) return;
-        if (m_mtTask) { m_mtTask=false; m_mtFile.clear(); finish(message); return; }
+        if (m_mtTask) {
+            const QString result = !ok && !m_mtFile.isEmpty() && !message.contains(m_mtFile)
+                ? message + QStringLiteral(" 安装包保留在：%1").arg(m_mtFile) : message;
+            m_mtTask=false; m_mtFile.clear(); finish(result); return;
+        }
         if (!m_installingBatch) { finish(message); return; }
         if (ok) ++m_succeeded; else ++m_failed;
         log(message);

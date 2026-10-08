@@ -22,9 +22,9 @@ constexpr qint64 maxJson = 4 * 1024 * 1024;
 // A single HTTP connection can be the bottleneck on some OpenList/CDN setups.
 // Use a few ranged requests for larger files, while retaining a single-stream
 // fallback for servers or signed URLs that do not support byte ranges.
-constexpr qint64 parallelThreshold = 8 * 1024 * 1024;
-constexpr qint64 parallelChunk = 2 * 1024 * 1024;
-constexpr int maxParallelRequests = 4;
+constexpr qint64 parallelThreshold = 2 * 1024 * 1024;
+constexpr qint64 parallelChunk = 1 * 1024 * 1024;
+constexpr int maxParallelRequests = 6;
 bool apiObject(QNetworkReply *r, QJsonObject *result) {
     if (r->error() != QNetworkReply::NoError || r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200)
         return false;
@@ -97,6 +97,7 @@ bool OpenListService::https(const QUrl &url) {
 }
 QNetworkRequest OpenListService::request(const QUrl &url) const {
     QNetworkRequest r(url);
+    r.setRawHeader("Accept-Encoding", "identity");
     r.setTransferTimeout(30000);
     r.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     r.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
@@ -228,6 +229,20 @@ bool OpenListService::download(const OpenList::Entry &entry) {
         if (!m_expectedHash.isEmpty()) emit log(QStringLiteral("下载后将校验发布方 SHA-256。"));
         m_clock.start(); getFile(url,0,generation);
     });
+    return true;
+}
+bool OpenListService::downloadDirect(const OpenList::Entry &entry, const QUrl &url) {
+    if (m_active || entry.directory || entry.size < 0 || !https(url)) return false;
+    m_active = true;
+    const auto generation = ++m_downloadGeneration;
+    m_parallel = false; m_parallelFallback = false; m_segments.clear(); m_parallelReceived = 0;
+    m_entry = entry; m_path.clear(); m_part.clear(); m_hash.reset(); m_expectedHash.clear();
+    if (!prepareFile()) { fail(QStringLiteral("下载目录不可用或文件路径不安全。")); return false; }
+    const QStorageInfo storage(QFileInfo(m_path).absolutePath());
+    if (storage.isValid() && storage.isReady() && storage.bytesAvailable() >= 0 && storage.bytesAvailable() < entry.size) {
+        fail(QStringLiteral("下载目录所在磁盘空间不足。")); return false;
+    }
+    m_clock.start(); getFile(url, 0, generation);
     return true;
 }
 void OpenListService::startParallel(const QUrl &url, quint64 generation) {

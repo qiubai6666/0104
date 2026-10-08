@@ -53,6 +53,8 @@ OpenListInstaller::OpenListInstaller(QObject *parent,OugaCommandRunner *runner,c
       m_adb(adbPath.isEmpty() ? ResourceExtractor::getAdbPath() : adbPath),
       m_sevenZip(sevenZip.isEmpty() ? QDir(ResourceExtractor::getResourcePath()).filePath("bin/7zip/7z.exe") : sevenZip) {
     setProperty(DeviceOperationLease::ApplicationExitExemptProperty, true);
+    m_deviceWait.setInterval(100);
+    connect(&m_deviceWait, &QTimer::timeout, this, &OpenListInstaller::startDeviceDiscovery);
     connect(m_runner,&OugaCommandRunner::completed,this,&OpenListInstaller::onCompleted);
     connect(m_runner,&OugaCommandRunner::output,this,[this](const QString &text) { streamLog(text); });
     connect(m_runner,&OugaCommandRunner::stalled,this,[this] {
@@ -125,8 +127,24 @@ bool OpenListInstaller::cleanupDownloadedFile(const QString &file) {
 }
 bool OpenListInstaller::inspectDevices() {
     if (busy()) return false;
-    if (!DeviceOperationLease::acquire(this)) { emit completed(false,QStringLiteral("其他设备操作尚未结束。")); return false; }
-    command(Discover,m_adb,{"devices"},5000); return true;
+    if (DeviceOperationLease::owner() && DeviceOperationLease::owner() != this) {
+        emit completed(false,QStringLiteral("其他设备操作尚未结束，请等待后重试。")); return false;
+    }
+    m_stage = WaitingDevice; m_deviceWaitAttempts = 0;
+    startDeviceDiscovery(); return true;
+}
+void OpenListInstaller::startDeviceDiscovery() {
+    if (m_stage != WaitingDevice) { m_deviceWait.stop(); return; }
+    if (DeviceOperationLease::acquire(this)) {
+        m_deviceWait.stop(); command(Discover,m_adb,{"devices"},5000); return;
+    }
+    if (DeviceOperationLease::owner() || ++m_deviceWaitAttempts >= 50) {
+        m_deviceWait.stop(); m_stage = Idle;
+        emit completed(false,QStringLiteral("设备通道仍被其他操作占用，请等待后重试。")); return;
+    }
+    if (!m_deviceWait.isActive()) {
+        emit log(QStringLiteral("正在等待设备通道空闲…")); m_deviceWait.start();
+    }
 }
 bool OpenListInstaller::install(const QString &file,bool module,const QString &serial) {
     if (busy()) return false;

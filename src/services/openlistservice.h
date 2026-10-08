@@ -36,6 +36,8 @@ public:
     ~OpenListService() override;
     void refresh();
     bool download(const OpenList::Entry &entry);
+    // Direct HTTPS downloads share the same range, validation and cleanup engine.
+    bool downloadDirect(const OpenList::Entry &entry, const QUrl &url);
     void cancel();
     bool downloading() const { return m_active; }
     static bool https(const QUrl &url);

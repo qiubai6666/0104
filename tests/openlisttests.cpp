@@ -16,6 +16,7 @@
 #include <QScreen>
 #include <QProcess>
 #include <QThread>
+#include <QScopeGuard>
 #include <cstdio>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -113,6 +114,71 @@ private slots:
         QCOMPARE(DeviceOperationLease::owner(), static_cast<QObject *>(&installer));
         DeviceOperationLease::release(&installer);
         QVERIFY(!DeviceOperationLease::blocksApplicationExit());
+    }
+    void deviceChannelTransientBusy() {
+        Runner runner; OpenListInstaller installer(nullptr, &runner, "fake-adb", "fake-7z");
+        bool idle = false;
+        DeviceOperationLease::setIdleCheck([&] { return idle; });
+        const auto resetIdle = qScopeGuard([] { DeviceOperationLease::setIdleCheck({}); });
+        QSignalSpy devices(&installer, &OpenListInstaller::devicesReady);
+        QVERIFY(installer.inspectDevices()); QVERIFY(installer.busy()); QVERIFY(runner.calls.isEmpty());
+        idle = true;
+        QTRY_COMPARE(runner.calls.size(), 1);
+        runner.respond("phone\tdevice\n");
+        QCOMPARE(devices.size(), 1); QVERIFY(!installer.busy());
+        DeviceOperationLease::setIdleCheck({});
+    }
+    void mtRangeDownload() {
+        QTemporaryDir dir; Network network;
+        const QByteArray apk = QByteArray("PK\x03\x04",4) + QByteArray(9 * 1024 * 1024, 'm');
+        network.handler = [&](const QNetworkRequest &req, const QJsonObject &) {
+            if (req.url().host() == "mt.cc") return new Reply(req,
+                "<a href=\"https://pan.mt2.cn/apk/26091198/clone-target28\">download</a>", 200);
+            const auto range = QRegularExpression("^bytes=(\\d+)-(\\d+)$").match(QString::fromLatin1(req.rawHeader("Range")));
+            const qint64 first = range.captured(1).toLongLong(), last = range.captured(2).toLongLong();
+            auto *reply = new Reply(req, apk.mid(first, last-first+1), 206);
+            reply->setHeader("Content-Range", QByteArray("bytes ") + QByteArray::number(first) + '-' + QByteArray::number(last) + '/' + QByteArray::number(apk.size()));
+            return reply;
+        };
+        MtManagerService service(nullptr, &network, dir.path());
+        QSignalSpy ready(&service, &MtManagerService::ready), failed(&service, &MtManagerService::failed);
+        service.start(); QTRY_COMPARE(ready.size(), 1); QVERIFY(failed.isEmpty());
+        QCOMPARE(network.requests.size(), 8); // Page, 1-byte probe, six simultaneous ranges.
+        QFile file(ready[0][1].toString()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), apk);
+        QVERIFY(!service.active());
+        QCOMPARE(QDir(dir.filePath(QStringLiteral("软件"))).entryList({"*.part"}, QDir::Files).size(), 0);
+    }
+    void directRangeFallback() {
+        QTemporaryDir dir; Network network;
+        const QByteArray payload(3 * 1024 * 1024, 'f');
+        network.handler = [&](const QNetworkRequest &req, const QJsonObject &) {
+            return new Reply(req, payload, 200); // Server ignores Range.
+        };
+        OpenListService service(nullptr, &network, dir.path());
+        OpenList::Entry entry; entry.name = entry.relativePath = "fallback.apk"; entry.size = payload.size();
+        QSignalSpy ready(&service, &OpenListService::ready), failed(&service, &OpenListService::failed);
+        QVERIFY(service.downloadDirect(entry, QUrl("https://files.example.com/file")));
+        QTRY_COMPARE(ready.size(), 1); QVERIFY(failed.isEmpty());
+        QFile file(ready[0][1].toString()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), payload);
+        QVERIFY(network.requests.last().rawHeader("Range").isEmpty());
+        QVERIFY(!service.downloadDirect(entry, QUrl("http://files.example.com/file")));
+    }
+    void mtRangeCancel() {
+        QTemporaryDir dir; Network network; int ranges = 0;
+        network.handler = [&](const QNetworkRequest &req, const QJsonObject &) {
+            if (req.url().host() == "mt.cc") return new Reply(req,
+                "<a href=\"https://pan.mt2.cn/apk/26091198/clone-target28\">download</a>", 200);
+            if (req.rawHeader("Range") == "bytes=0-0") {
+                auto *reply = new Reply(req, "P", 206);
+                reply->setHeader("Content-Range", "bytes 0-0/9437184"); return reply;
+            }
+            ++ranges; return new Reply(req, {}, 206, {}, true);
+        };
+        MtManagerService service(nullptr, &network, dir.path());
+        QSignalSpy ready(&service, &MtManagerService::ready), failed(&service, &MtManagerService::failed);
+        service.start(); QTRY_COMPARE(ranges, 6); service.cancel(); service.cancel();
+        QCOMPARE(failed.size(), 1); QVERIFY(ready.isEmpty()); QVERIFY(!service.active());
+        QCOMPARE(QDir(dir.filePath(QStringLiteral("软件"))).entryList(QDir::Files).size(), 0);
     }
     void mtDownloadCompletion() {
         QTemporaryDir dir;
@@ -251,7 +317,7 @@ private slots:
         for(const auto &line:logs) QVERIFY(!line[0].toString().contains(QStringLiteral("未提供发布方 SHA-256")));
         int ranged = 0;
         for (const auto &request : network.requests) if (!request.rawHeader("Range").isEmpty()) ++ranged;
-        QCOMPARE(ranged, 4);
+        QCOMPARE(ranged, 6);
         QFile file(ready.first()[1].toString());
         QVERIFY(file.open(QIODevice::ReadOnly));
         QCOMPARE(file.readAll(), payload);
