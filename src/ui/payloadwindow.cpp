@@ -76,12 +76,13 @@ void PayloadWindow::setupUI()
 {
     QWidget *container = this;
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(22, 20, 22, 20);
-    mainLayout->setSpacing(8);
+    mainLayout->setContentsMargins(UIHelper::DrawerHorizontalMargin, UIHelper::DrawerVerticalMargin,
+                                   UIHelper::DrawerHorizontalMargin, UIHelper::DrawerVerticalMargin);
+    mainLayout->setSpacing(6);
     QLabel *titleLabel = new QLabel("Payload 分区提取", container);
     titleLabel->setStyleSheet("color:#2c3e50; background:transparent; font-size:17px; font-weight:normal;");
     mainLayout->addWidget(titleLabel);
-    mainLayout->addSpacing(5);
+    mainLayout->addSpacing(3);
     // URL 输入
     QLabel *urlLabel = new QLabel("Payload 链接：", container);
     urlLabel->setStyleSheet("QLabel { color: #2c3e50; background: transparent; font-size: 13px; }");
@@ -89,7 +90,7 @@ void PayloadWindow::setupUI()
     
     urlEdit = new QLineEdit(container);
     urlEdit->setPlaceholderText("粘贴链接或路径");
-    urlEdit->setMinimumHeight(36);
+    urlEdit->setMinimumHeight(34);
     urlEdit->setStyleSheet(R"(
         QLineEdit {
             padding: 6px 10px;
@@ -159,7 +160,7 @@ void PayloadWindow::setupUI()
     buttonLayout->setSpacing(10);
     
     cancelButton = new QPushButton("取消", container);
-    cancelButton->setFixedHeight(36);
+    cancelButton->setFixedHeight(UIHelper::DrawerButtonHeight);
     cancelButton->setCursor(Qt::PointingHandCursor);
     cancelButton->setStyleSheet(R"(
         QPushButton {
@@ -183,7 +184,7 @@ void PayloadWindow::setupUI()
     )");
     
     extractButton = new QPushButton("开始提取", container);
-    extractButton->setFixedHeight(36);
+    extractButton->setFixedHeight(UIHelper::DrawerButtonHeight);
     extractButton->setCursor(Qt::PointingHandCursor);
     extractButton->setStyleSheet(R"(
         QPushButton {

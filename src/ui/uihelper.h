@@ -18,7 +18,8 @@ public:
     enum { MenuButtonHeight = 40 };
     // Shared logical-pixel dimensions for the capsule and its first-level drawers.
     enum { MainMenuWidth = 48, MainMenuButtonSize = 38, MainMenuIconSize = 24,
-           DrawerWidth = 318, DrawerHeight = 380 };
+           DrawerWidth = 296, DrawerHeight = 336,
+           DrawerHorizontalMargin = 20, DrawerVerticalMargin = 18, DrawerButtonHeight = 34 };
 
     // 为纵向菜单创建统一样式的按钮；各窗口自己连接业务信号。
     static QVector<QPushButton *> createMenuButtons(QWidget *parent,

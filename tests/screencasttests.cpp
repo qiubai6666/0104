@@ -105,7 +105,10 @@ private slots:
             drawer->show();
             drawer->layout()->activate();
             UIHelper::positionDrawer(drawer, menu.geometry());
-            QCOMPARE(drawer->size(), QSize(318, 380));
+            QCOMPARE(drawer->size(), QSize(296, 336));
+            QVERIFY(drawer->height() < menu.height());
+            QVERIFY(drawer->y() > menu.y());
+            QVERIFY(drawer->geometry().bottom() < menu.geometry().bottom());
             QVERIFY2(drawer->layout()->minimumSize().height() <= drawer->height(),
                      qPrintable(drawer->windowTitle() + " layout overflows"));
             QCOMPARE(drawer->property("surfaceRadius").toInt(), 28);
@@ -114,29 +117,48 @@ private slots:
                 QVERIFY2(drawer->rect().contains(bounds), qPrintable(button->text()));
             }
         }
+        DeviceManager::instance()->stopMonitoring();
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "TEST1234");
+        const QString deviceInfo = QStringLiteral(
+            "设备名称：测试设备\n设备代号：TEST\n安卓版本：16\nA/B 分区：a\n解锁状态：已解锁");
         QVERIFY(QMetaObject::invokeMethod(&device, "onDeviceInfoUpdated", Qt::DirectConnection,
-            Q_ARG(QString, QStringLiteral("型号：测试设备\n系统：Android 16\n序列号：TEST1234\n状态：已连接"))));
+            Q_ARG(QString, deviceInfo)));
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
         device.layout()->activate();
-        QCOMPARE(device.size(), QSize(318, 380));
+        QCOMPARE(device.size(), QSize(296, 336));
+        bool deviceInfoShown = false;
+        for (auto *label : device.findChildren<QLabel *>()) {
+            if (label->text() != deviceInfo) continue;
+            deviceInfoShown = true;
+            QVERIFY2(label->heightForWidth(label->width()) <= label->height(),
+                     qPrintable(QString("Device information needs %1px but has %2px; drawer minimum %3px")
+                         .arg(label->heightForWidth(label->width())).arg(label->height())
+                         .arg(device.layout()->minimumSize().height())));
+        }
+        QVERIFY(deviceInfoShown);
         // Toggling a submenu reuses the same dimensions and still hides it.
         menu.repairWindow = new RepairWindow;
         menu.repairWindow->setAttribute(Qt::WA_DontShowOnScreen);
         menu.buttons[MenuWidget::RepairTools]->click();
         QVERIFY(menu.repairWindow->isVisible());
-        QCOMPARE(menu.repairWindow->size(), QSize(318, 380));
+        QCOMPARE(menu.repairWindow->size(), QSize(296, 336));
         menu.buttons[MenuWidget::RepairTools]->click();
         QVERIFY(!menu.repairWindow->isVisible());
         const QString output = qEnvironmentVariable("COMPACT_MENU_PREVIEW");
         if (!output.isEmpty()) {
-            QImage sheet(1450, 450, QImage::Format_ARGB32_Premultiplied);
+            const int menuY = 48;
+            const int drawerY = menuY + (menu.height() - UIHelper::DrawerHeight) / 2;
+            const int drawerStep = UIHelper::DrawerWidth + 18;
+            QImage sheet(86 + drawers.size() * drawerStep, menuY + menu.height() + 20,
+                         QImage::Format_ARGB32_Premultiplied);
             sheet.fill(QColor("#dce8ed"));
             QPainter painter(&sheet);
             painter.setPen(QColor("#385565"));
             painter.setFont(QFont("Microsoft YaHei", 10));
-            painter.drawText(16, 26, QStringLiteral("主菜单 48px / 次菜单统一 318 × 380px"));
-            menu.render(&painter, QPoint(16, 48));
+            painter.drawText(16, 26, QStringLiteral("主菜单 48 × 372px / 次菜单统一 296 × 336px"));
+            menu.render(&painter, QPoint(16, menuY));
             for (int i = 0; i < drawers.size(); ++i)
-                drawers[i]->render(&painter, QPoint(86 + i * 336, 48));
+                drawers[i]->render(&painter, QPoint(86 + i * drawerStep, drawerY));
             painter.end();
             QVERIFY(sheet.save(output));
         }

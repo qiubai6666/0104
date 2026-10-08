@@ -106,7 +106,8 @@ QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayou
     int splitIndex, const QString &firstGroup, const QString &secondGroup)
 {
     applyFloatingSurface(parent);
-    layout->setContentsMargins(22, 20, 22, 20);
+    layout->setContentsMargins(DrawerHorizontalMargin, DrawerVerticalMargin,
+                              DrawerHorizontalMargin, DrawerVerticalMargin);
     layout->setSpacing(4);
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     parent->setStyleSheet(QString("QLabel {background:transparent; color:%1; font-family:'Segoe UI','Microsoft YaHei';}")
@@ -124,7 +125,7 @@ QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayou
         const int begin = group == 0 ? 0 : splitIndex;
         const int end = group == 0 ? splitIndex : texts.size();
         if (begin == end) continue;
-        layout->addSpacing(10);
+        layout->addSpacing(8);
         if (group == 1) {
             auto *line = new QWidget(parent);
             line->setFixedHeight(1);
@@ -144,7 +145,7 @@ QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayou
             auto *button = new QPushButton(texts[index], parent);
             button->setObjectName(QString("drawerAction%1").arg(index));
             button->setCursor(Qt::PointingHandCursor);
-            button->setFixedHeight(38);
+            button->setFixedHeight(DrawerButtonHeight);
             button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
             button->setToolTip(texts[index]);
             button->setStyleSheet(textButtonStyle());

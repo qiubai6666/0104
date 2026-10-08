@@ -391,13 +391,14 @@ void DeviceCheckWindow::setupUI()
     UIHelper::applyFloatingSurface(this);
     QWidget *container = this;
     mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(8);
-    mainLayout->setContentsMargins(22, 20, 22, 20);
+    mainLayout->setSpacing(4);
+    mainLayout->setContentsMargins(UIHelper::DrawerHorizontalMargin, UIHelper::DrawerVerticalMargin,
+                                   UIHelper::DrawerHorizontalMargin, UIHelper::DrawerVerticalMargin);
 
     // 标题去掉独立边框，避免小窗口内重复套卡。
     QLabel *titleLabel = new QLabel("设备检测", container);
     titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    titleLabel->setFixedHeight(28);
+    titleLabel->setFixedHeight(24);
     titleLabel->setStyleSheet(
         "QLabel {"
         "   color: #2c3e50;"
@@ -408,7 +409,7 @@ void DeviceCheckWindow::setupUI()
         "}"
     );
     mainLayout->addWidget(titleLabel);
-    mainLayout->addSpacing(8);
+    mainLayout->addSpacing(4);
     
     // 单一浅蓝信息面板，细色带区分信息与操作，不使用图标或表情。
     QWidget *statusCard = new QWidget(container);
@@ -423,12 +424,12 @@ void DeviceCheckWindow::setupUI()
         "}"
     );
     QVBoxLayout *statusLayout = new QVBoxLayout(statusCard);
-    statusLayout->setSpacing(4);
-    statusLayout->setContentsMargins(0, 5, 0, 5);
+    statusLayout->setSpacing(3);
+    statusLayout->setContentsMargins(0, 4, 0, 4);
     
     statusLabel = new QLabel("检测中...", statusCard);
     statusLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    statusLabel->setFixedHeight(25);  // 固定状态标签高度
+    statusLabel->setFixedHeight(22);  // 固定状态标签高度
     statusLabel->setStyleSheet(
         "QLabel {"
         "   color: #2c3e50;"
@@ -499,7 +500,7 @@ void DeviceCheckWindow::setupUI()
     rebootComboBox->addItem("重启到Fastboot");
     rebootComboBox->addItem("重启到Fastbootd");
     rebootComboBox->addItem("重启到EDL");
-    rebootComboBox->setFixedHeight(34);
+    rebootComboBox->setFixedHeight(32);
     rebootComboBox->setEnabled(false);
     rebootComboBox->setStyleSheet(
         "QComboBox {"
@@ -599,7 +600,7 @@ void DeviceCheckWindow::setupUI()
     footerDivider->setFixedHeight(1);
     footerDivider->setStyleSheet("QWidget#deviceFooterDivider { background: #E7EEF6; border: none; }");
     mainLayout->addWidget(footerDivider);
-    mainLayout->addSpacing(7);
+    mainLayout->addSpacing(2);
 
     // 刷入分区按钮（2列1行）
     QWidget *flashWidget = new QWidget(container);
