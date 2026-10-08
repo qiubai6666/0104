@@ -333,7 +333,7 @@ bool OpenListInstaller::handleTransfer(int code,bool normal,const QString &out) 
     }
     if (m_stage == TransferPush) {
         if (success(code,normal,out,false)) {
-            finish(m_transferOnly,m_transferOnly ? QStringLiteral("传输完成：%1").arg(m_fallbackRemote) : m_result + QStringLiteral(" 安装包已推送到手机：%1，可手动安装。").arg(m_fallbackRemote));
+            finish(m_transferOnly,m_transferOnly ? QStringLiteral("传输完成：%1").arg(m_fallbackRemote) : m_result);
         } else {
             m_result += QStringLiteral(" 文件传输失败，请检查手机连接和存储空间。");
             adb(TransferCleanup,{"shell","rm -f " + ShellCommand::quote(m_fallbackRemote)});
@@ -368,7 +368,6 @@ void OpenListInstaller::end(bool ok,const QString &message) {
             return;
         }
         m_result = message;
-        emit log(QStringLiteral("安装未成功，正在尝试将安装包推送到原目标手机的内部存储根目录。"));
         command(TransferVerify,m_adb,{"devices"},5000);
         return;
     }

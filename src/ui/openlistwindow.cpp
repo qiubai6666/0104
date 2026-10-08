@@ -21,7 +21,6 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QTimer>
-#include <algorithm>
 
 OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenListInstaller *installer)
     : QWidget(nullptr), m_launcher(parent), m_service(service ? service : new OpenListService(this)),
@@ -296,8 +295,6 @@ void OpenListWindow::advanceBatch() {
     }
     QString summary = QStringLiteral("批量任务完成：成功 %1，失败 %2，共 %3 个文件。")
         .arg(m_succeeded).arg(m_failed).arg(m_queue.size());
-    if (!m_transferOnly && std::any_of(m_downloaded.cbegin(),m_downloaded.cend(),[](const Downloaded &item) { return item.entry.module; }))
-        summary += QStringLiteral("模块可能需要手动重启后生效。");
     finish(summary,m_failed == 0);
 }
 void OpenListWindow::setBusy(bool busy) {
