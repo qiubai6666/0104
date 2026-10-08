@@ -72,7 +72,9 @@ QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
     pixmap.setDevicePixelRatio(ratio);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
-    renderer.render(&painter, QRectF(0, 0, 24 * ratio, 24 * ratio));
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    renderer.render(&painter, QRectF(2 * ratio, 2 * ratio, 20 * ratio, 20 * ratio));
     return QIcon(pixmap);
 }
 
@@ -268,3 +270,4 @@ QMessageBox::StandardButton UIHelper::showCenteredQuestion(const QString &title,
 
     return static_cast<QMessageBox::StandardButton>(msgBox.exec());
 }
+

@@ -102,9 +102,9 @@ void MenuWidget::setupUI()
             mainLayout->addSpacing(5);
         }
         auto *button = new QPushButton(this);
-        button->setFixedSize(46, 46);
+        button->setFixedSize(50, 50);
         button->setIcon(UIHelper::menuIcon(icons[index], devicePixelRatioF()));
-        button->setIconSize(QSize(24, 24));
+        button->setIconSize(QSize(26, 26));
         button->setToolTip(labels[index]);
         button->setAccessibleName(labels[index]);
         button->setObjectName(QString("menuAction%1").arg(index));
@@ -471,3 +471,4 @@ void MenuWidget::onCleanupProcessFinished()
     qDebug() << "退出应用程序";
     QApplication::quit();
 }
+
