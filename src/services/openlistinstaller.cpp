@@ -256,7 +256,7 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
     case Push:
         emit log(QStringLiteral("正在安装模块，请留意手机 Root 授权。"));
         adb(ModuleInstall,{"shell",ShellCommand::asRoot(m_managers.value(m_selectedManager) + ' ' + ShellCommand::quote(m_remote) + QStringLiteral("; rc=$?; if [ \"$rc\" -eq 0 ]; then printf '\\nOL_INSTALL_SUCCESS\\n'; fi; exit \"$rc\""))}); break;
-    case ModuleInstall: cleanRemote(true,QStringLiteral("模块安装成功；可能需要重启手机，尚未验证模块生效。")); break;
+    case ModuleInstall: cleanRemote(true,QStringLiteral("模块安装成功。")); break;
     case ApkInstall: end(true,QStringLiteral("APK 安装成功。")); break;
     default: break;
     }
