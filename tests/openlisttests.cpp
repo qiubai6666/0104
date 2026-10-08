@@ -7,6 +7,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
+#include <QStandardPaths>
+#include <QUuid>
 #include <QSignalSpy>
 #include <QFile>
 #include <QTableWidget>
@@ -41,6 +43,10 @@ QJsonObject entry(QString name,bool dir=false,qint64 size=3) {
     return {{"name",name},{"is_dir",dir},{"size",double(size)},{"modified","2026-10-07T08:00:00Z"}};
 }
 bool writeFile(const QString &path,const QByteArray &bytes) { QFile f(path); return f.open(QIODevice::WriteOnly) && f.write(bytes)==bytes.size(); }
+// A hypothetical SFX directory outside the source tree; never write to this path.
+QString sfxDirectory() {
+    return QDir(QDir::rootPath()).filePath("OpenList-sfx-fixture-" + QUuid::createUuid().toString(QUuid::Id128));
+}
 class Reply final : public QNetworkReply {
 public:
     QByteArray bytes; qint64 offset=0; bool done=false;
@@ -256,6 +262,92 @@ private slots:
         QVERIFY(OpenList::safeComponent(QStringLiteral("软件.apk")));
         auto t=OpenList::redact("https://server/x?sign=secret /www/wwwroot/secret token=abc"); QVERIFY(!t.contains("server"));QVERIFY(!t.contains("wwwroot"));QVERIFY(!t.contains("abc"));
         QCOMPARE(OpenListService::sha256({{"hash_info",QJsonObject{{"SHA-256",QString(64,'a')}}}}),QString(64,'a'));
+    }
+    void downloadRootResolution() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString localData = dir.filePath(QStringLiteral("用户数据/QiuBai/Orange Tools"));
+        const QString app = dir.filePath("OrangeToolsApp");
+        QVERIFY(QDir().mkdir(app));
+        QCOMPARE(OpenList::resolveDownloadRoot(app, localData), app + "/download");
+        QCOMPARE(OpenList::resolveDownloadRoot(app + "/./", {}), app + "/download");
+
+        const QString project = dir.filePath(QStringLiteral("中文项目"));
+        const QString build = project + "/build/release";
+        QVERIFY(QDir().mkpath(build));
+        QVERIFY(writeFile(project + "/OrangeTools.pro", "# project marker"));
+        QCOMPARE(OpenList::resolveDownloadRoot(build, localData), project + "/OrangeToolsApp/download");
+        QCOMPARE(OpenList::resolveDownloadRoot(build, {}), project + "/OrangeToolsApp/download");
+
+        const QString sfx = sfxDirectory();
+        QVERIFY(!QFileInfo::exists(sfx));
+        const QString persistentRoot = localData + "/download";
+        QCOMPARE(OpenList::resolveDownloadRoot(sfx + "/instance-one", localData), persistentRoot);
+        QCOMPARE(OpenList::resolveDownloadRoot(sfx + "/instance-two", localData), persistentRoot);
+        QVERIFY(!QFileInfo::exists(localData)); // Resolving a location must not create it.
+        QVERIFY(OpenList::resolveDownloadRoot(sfx, {}).isEmpty());
+        QVERIFY(OpenList::resolveDownloadRoot(sfx, "relative-data").isEmpty());
+        QVERIFY(OpenList::resolveDownloadRoot({}, localData).isEmpty());
+        QVERIFY(OpenList::resolveDownloadRoot("relative-app", localData).isEmpty());
+        QCOMPARE(OpenList::defaultDownloadRoot(), OpenList::resolveDownloadRoot(
+            QCoreApplication::applicationDirPath(),
+            QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)));
+    }
+    void sfxPersistentDownloads_data() {
+        QTest::addColumn<bool>("module");
+        QTest::newRow("apk") << false;
+        QTest::newRow("module") << true;
+    }
+    void sfxPersistentDownloads() {
+        QFETCH(bool, module);
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString localData = dir.filePath(QStringLiteral("持久数据/QiuBai/Orange Tools"));
+        const QString firstRoot = OpenList::resolveDownloadRoot(sfxDirectory(), localData);
+        const QString secondRoot = OpenList::resolveDownloadRoot(sfxDirectory(), localData);
+        QCOMPARE(firstRoot, localData + "/download"); QCOMPARE(secondRoot, firstRoot);
+        const QByteArray bytes = QByteArray("PK\x03\x04", 4) + "fixture";
+        Network network;
+        network.handler = [&](const QNetworkRequest &request, const QJsonObject &) {
+            if (request.url().path() == "/api/fs/get") return new Reply(request,
+                api({{"raw_url", "https://files.example.com/package"}, {"size", bytes.size()}}), 200);
+            return new Reply(request, bytes, 200);
+        };
+        OpenList::Entry entry;
+        entry.module = module; entry.name = module ? "alpha.zip" : "alpha.apk";
+        entry.relativePath = QStringLiteral("中文 分类/") + entry.name;
+        entry.remotePath = (module ? QStringLiteral("/模块/") : QStringLiteral("/APK/")) + entry.relativePath;
+        entry.size = bytes.size();
+        OpenListService first(nullptr, &network, firstRoot), second(nullptr, &network, secondRoot);
+        QSignalSpy firstReady(&first, &OpenListService::ready), secondReady(&second, &OpenListService::ready);
+        QVERIFY(first.download(entry)); QTRY_COMPARE(firstReady.size(), 1);
+        const QString firstFile = firstReady[0][1].toString();
+        QCOMPARE(firstFile, firstRoot + (module ? QStringLiteral("/模块/") : QStringLiteral("/软件/")) + entry.relativePath);
+        QVERIFY(second.download(entry)); QTRY_COMPARE(secondReady.size(), 1);
+        const QString secondFile = secondReady[0][1].toString(); QVERIFY(secondFile != firstFile);
+        QFile original(firstFile), downloaded(secondFile);
+        QVERIFY(original.open(QIODevice::ReadOnly)); QVERIFY(downloaded.open(QIODevice::ReadOnly));
+        QCOMPARE(original.readAll(), bytes); QCOMPARE(downloaded.readAll(), bytes);
+        QVERIFY(QDir(QFileInfo(firstFile).absolutePath()).entryList({"*.part"}, QDir::Files).isEmpty());
+    }
+    void downloadRootUnavailable_data() {
+        QTest::addColumn<bool>("sfx");
+        QTest::newRow("portable-no-fallback-on-failure") << false;
+        QTest::newRow("sfx-persistent-directory-blocked") << true;
+    }
+    void downloadRootUnavailable() {
+        QFETCH(bool, sfx);
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString localData = dir.filePath("local-data");
+        const QString root = OpenList::resolveDownloadRoot(sfx ? sfxDirectory() : dir.filePath("OrangeToolsApp"), localData);
+        QVERIFY(QDir().mkpath(QFileInfo(root).absolutePath()));
+        QVERIFY(writeFile(root, "keep existing file")); // A file blocks the selected download directory.
+        Network network;
+        OpenListService service(nullptr, &network, root); QSignalSpy failed(&service, &OpenListService::failed);
+        OpenList::Entry entry; entry.name = "alpha.apk"; entry.relativePath = entry.name; entry.size = 3;
+        QVERIFY(!service.downloadDirect(entry, QUrl("https://files.example.com/package")));
+        QCOMPARE(failed.size(), 1); QVERIFY(network.requests.isEmpty()); QVERIFY(!service.downloading());
+        QFile blocker(root); QVERIFY(blocker.open(QIODevice::ReadOnly));
+        QCOMPARE(blocker.readAll(), QByteArray("keep existing file"));
+        if (!sfx) QVERIFY(!QFileInfo::exists(localData));
     }
     void recursiveListing(){
         Network network;int appPages=0;
@@ -488,7 +580,8 @@ private slots:
         QCOMPARE(done.size(),1); QVERIFY(!done[0][0].toBool());
         const QString result=done[0][1].toString();
         QVERIFY(result.contains(QStringLiteral("安装包保留在")));
-        QCOMPARE(result.contains(QStringLiteral("已推送到手机")),mode==0);
+        // Successful fallback push is intentionally silent after log simplification.
+        QVERIFY(!result.contains(QStringLiteral("已推送到手机")));
         if(mode==7) QVERIFY(result.contains(QStringLiteral("不完整文件清理失败")));
         QVERIFY(QFileInfo::exists(file)); QVERIFY(QFileInfo::exists(existing));
         QVERIFY(!s.busy()); QVERIFY(!DeviceOperationLease::owner());
@@ -574,6 +667,12 @@ private slots:
         if (!CreateSymbolicLinkW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(link).utf16()),reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(target).utf16()),SYMBOLIC_LINK_FLAG_DIRECTORY | 0x2)) QSKIP("Windows symbolic-link permission unavailable");
         QVERIFY(!OpenList::safeDirectory(link,false)); QVERIFY(!OpenList::safeDirectory(link+"/sub",true));
         QVERIFY(!QFileInfo::exists(target+"/sub"));
+        const QString root = OpenList::resolveDownloadRoot(sfxDirectory(), link);
+        Network network;
+        OpenListService service(nullptr, &network, root);
+        OpenList::Entry entry; entry.name = "alpha.apk"; entry.relativePath = entry.name; entry.size = 3;
+        QVERIFY(!service.downloadDirect(entry, QUrl("https://files.example.com/package")));
+        QVERIFY(network.requests.isEmpty()); QVERIFY(!QFileInfo::exists(target + "/download"));
         QVERIFY(RemoveDirectoryW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(link).utf16())));
 #endif
     }

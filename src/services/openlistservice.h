@@ -22,6 +22,7 @@ struct Entry {
 QString redact(QString text);
 bool safeComponent(const QString &name);
 bool safeDirectory(const QString &path, bool create);
+QString resolveDownloadRoot(const QString &applicationDirectory, const QString &localDataDirectory);
 QString defaultDownloadRoot();
 }
 Q_DECLARE_METATYPE(OpenList::Entry)

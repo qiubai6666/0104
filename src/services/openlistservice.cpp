@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QStandardPaths>
 #include <QUuid>
 #include <QStorageInfo>
 #include <QRegularExpression>
@@ -73,13 +74,21 @@ bool OpenList::safeDirectory(const QString &path, bool create) {
     }
     return true;
 }
-QString OpenList::defaultDownloadRoot() {
-    QDir dir(QCoreApplication::applicationDirPath());
+QString OpenList::resolveDownloadRoot(const QString &applicationDirectory, const QString &localDataDirectory) {
+    if (!QDir::isAbsolutePath(applicationDirectory)) return {};
+    QDir dir(QDir::cleanPath(applicationDirectory));
     if (dir.dirName().compare("OrangeToolsApp", Qt::CaseInsensitive) == 0) return dir.filePath("download");
     do {
         if (QFileInfo::exists(dir.filePath("OrangeTools.pro"))) return dir.filePath("OrangeToolsApp/download");
     } while (dir.cdUp());
-    return {}; // Never silently write to another application or user directory.
+    // SFX extraction directories are temporary; failed installs must survive SFX cleanup.
+    // Resolve the location only. Creation and link/write checks still use safeDirectory.
+    if (!QDir::isAbsolutePath(localDataDirectory)) return {};
+    return QDir(QDir::cleanPath(localDataDirectory)).filePath("download");
+}
+QString OpenList::defaultDownloadRoot() {
+    return resolveDownloadRoot(QCoreApplication::applicationDirPath(),
+                               QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation));
 }
 OpenListService::OpenListService(QObject *parent, QNetworkAccessManager *network, const QString &root)
     : QObject(parent), m_root(root.isEmpty() ? OpenList::defaultDownloadRoot() : root),
