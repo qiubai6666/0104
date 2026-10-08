@@ -25,7 +25,7 @@
 
 OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenListInstaller *installer)
     : QWidget(nullptr), m_launcher(parent), m_service(service ? service : new OpenListService(this)),
-      m_installer(installer ? installer : new OpenListInstaller(this)) {
+      m_installer(installer ? installer : new OpenListInstaller(this)), m_mtService(new MtManagerService(this)) {
     if (parent) connect(parent, &QObject::destroyed, this, &QObject::deleteLater);
     setWindowTitle(QStringLiteral("Openlist"));
     setAttribute(Qt::WA_DeleteOnClose,false); setAttribute(Qt::WA_QuitOnClose,false);
@@ -35,10 +35,20 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         if (!m_busy || m_installingBatch) return;
         m_cancelled = true;
         if (m_downloading) m_service->cancel();
+        else if (m_mtTask) m_mtService->cancel();
         else advanceBatch();
     });
     connect(m_installSelected,&QPushButton::clicked,this,[this] { startSelection(false); });
     connect(m_transferSelected,&QPushButton::clicked,this,[this] { startSelection(true); });
+    connect(m_installMt,&QPushButton::clicked,this,[this] {
+        if (m_busy) return; m_mtTask = true; m_mtFile.clear(); setBusy(true); m_progress->setRange(0,100); m_status->setText(QStringLiteral("正在获取 MT 管理器最新版本…")); m_mtService->start();
+    });
+    connect(m_mtService,&MtManagerService::progress,this,[this](qint64 received,qint64 total,double speed) {
+        if (!m_mtTask) return; m_progress->setRange(0,total > 0 ? 100 : 0); if (total > 0) m_progress->setValue(qMin(99,int(received*100/total))); m_status->setText(QStringLiteral("正在下载 MT 管理器 · %1 / %2 · %3/s").arg(QLocale().formattedDataSize(received),total>0?QLocale().formattedDataSize(total):QStringLiteral("未知"),QLocale().formattedDataSize(qint64(speed))));
+    });
+    connect(m_mtService,&MtManagerService::log,this,&OpenListWindow::log);
+    connect(m_mtService,&MtManagerService::failed,this,[this](const QString &message) { if (!m_mtTask) return; m_mtTask=false; finish(message); });
+    connect(m_mtService,&MtManagerService::ready,this,[this](const QString &version,const QString &file) { if (!m_mtTask) return; m_mtFile=file; log(QStringLiteral("正在安装 MT 管理器（版本 %1）…").arg(version)); m_installer->inspectDevices(); });
     connect(m_service,&OpenListService::listingReady,this,[this](bool module,const QList<OpenList::Entry> &entries,const QString &error) {
         m_entries[module] = entries; render(module);
         if (!error.isEmpty()) m_counts[module]->setText(error);
@@ -67,6 +77,11 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     });
     connect(m_installer,&OpenListInstaller::devicesReady,this,[this](const QStringList &serials) {
         if (!m_busy || serials.isEmpty()) return;
+        if (m_mtTask) {
+            bool accepted = true; m_serial = serials.size() == 1 ? serials.first() : QInputDialog::getItem(this,QStringLiteral("选择目标手机"),QStringLiteral("已连接多台设备，请选择目标手机："),serials,0,false,&accepted);
+            if (!accepted || m_serial.isEmpty()) { m_mtTask=false; finish(QStringLiteral("未选择手机，未开始安装。")); return; }
+            updateDevice(); m_installer->install(m_mtFile,false,m_serial); return;
+        }
         bool accepted = true;
         m_serial = serials.size() == 1 ? serials.first() : QInputDialog::getItem(this,QStringLiteral("选择目标手机"),QStringLiteral("已连接多台设备，请选择目标手机："),serials,0,false,&accepted);
         if (!accepted || m_serial.isEmpty()) { finish(QStringLiteral("未选择手机，未开始任务。")); return; }
@@ -80,6 +95,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     });
     connect(m_installer,&OpenListInstaller::completed,this,[this](bool ok,const QString &message) {
         if (!m_busy) return;
+        if (m_mtTask) { m_mtTask=false; m_mtFile.clear(); finish(message); return; }
         if (!m_installingBatch) { finish(message); return; }
         if (ok) ++m_succeeded; else ++m_failed;
         log(message);
@@ -106,6 +122,7 @@ void OpenListWindow::setupUi() {
     m_installSelected->setObjectName("openListInstallSelected"); top->addWidget(m_installSelected);
     m_transferSelected = new QPushButton(QStringLiteral("传输到手机"),this);
     m_transferSelected->setObjectName("openListTransferSelected"); top->addWidget(m_transferSelected);
+    m_installMt = new QPushButton(QStringLiteral("安装 MT 管理器"),this); m_installMt->setObjectName("openListInstallMt"); top->addWidget(m_installMt);
     layout->addLayout(top);
     auto *split = new QSplitter(Qt::Horizontal,this); split->setChildrenCollapsible(false); layout->addWidget(split,3);
     for (int i = 0; i < 2; ++i) {
@@ -276,7 +293,7 @@ void OpenListWindow::advanceBatch() {
     finish(summary,m_failed == 0);
 }
 void OpenListWindow::setBusy(bool busy) {
-    m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy); m_transferSelected->setEnabled(!busy);
+    m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy); m_transferSelected->setEnabled(!busy); m_installMt->setEnabled(!busy);
     for (int i=0;i<2;++i) { m_tables[i]->setEnabled(!busy); m_search[i]->setEnabled(!busy); m_up[i]->setEnabled(!busy && !m_currentDirectory[i].isEmpty()); }
     m_cancel->setEnabled(busy && m_downloading);
 }

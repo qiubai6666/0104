@@ -1,0 +1,91 @@
+#include "mtmanagerservice.h"
+#include "openlistservice.h"
+#include <QDir>
+#include <QFileInfo>
+#include <QNetworkReply>
+#include <QRegularExpression>
+#include <QSaveFile>
+#include <QStandardPaths>
+#include <QUrlQuery>
+#include <QDateTime>
+#include <QUuid>
+
+namespace {
+const QUrl kPage(QStringLiteral("https://mt.cc/download/"));
+const qint64 kMaxPage = 4 * 1024 * 1024;
+}
+
+MtManagerService::MtManagerService(QObject *parent) : QObject(parent) {}
+
+void MtManagerService::start() {
+    if (m_active) return;
+    m_active = true; m_received = 0; m_total = -1; m_version.clear();
+    emit log(QStringLiteral("正在获取 MT 管理器最新版本…"));
+    fetchPage();
+}
+void MtManagerService::fetchPage() {
+    QNetworkRequest req(kPage);
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("OrangeTools/1.0"));
+    m_reply = m_network.get(req);
+    connect(m_reply, &QNetworkReply::finished, this, [this] { if (m_reply) parsePage(m_reply); });
+}
+bool MtManagerService::validDownloadUrl(const QUrl &url) {
+    return url.isValid() && url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0 &&
+           url.host().compare(QStringLiteral("pan.mt2.cn"), Qt::CaseInsensitive) == 0 &&
+           QRegularExpression(QStringLiteral("^/apk/[0-9]{6,}/clone-target28/?$")).match(url.path()).hasMatch();
+}
+void MtManagerService::parsePage(QNetworkReply *reply) {
+    const auto guard = qScopeGuard([&] { reply->deleteLater(); m_reply = nullptr; });
+    if (reply->error() != QNetworkReply::NoError) { finishFailure(QStringLiteral("获取 MT 管理器版本失败。")); return; }
+    const QByteArray body = reply->read(kMaxPage + 1);
+    if (body.size() > kMaxPage) { finishFailure(QStringLiteral("版本页面过大，已停止处理。")); return; }
+    const QString html = QString::fromUtf8(body);
+    QRegularExpression re(QStringLiteral(R"((?:https://pan\.mt2\.cn)?/apk/([0-9]{6,})/clone-target28/?(?:[^"'<>\s]*)?)"), QRegularExpression::CaseInsensitiveOption);
+    auto match = re.match(html);
+    if (!match.hasMatch()) { finishFailure(QStringLiteral("未找到“本地下载（共存版 TargetSdk28）”的最新版本。")); return; }
+    const QString version = match.captured(1);
+    const QUrl url(match.captured(0).startsWith(QStringLiteral("https://")) ? match.captured(0) : QStringLiteral("https://pan.mt2.cn") + match.captured(0));
+    if (!validDownloadUrl(url)) { finishFailure(QStringLiteral("MT 下载链接不符合安全要求。")); return; }
+    m_version = version; emit versionReady(version); emit log(QStringLiteral("已获取 MT 管理器版本：%1").arg(version));
+    startDownload(url, version);
+}
+QString MtManagerService::uniqueApkPath(const QString &version) {
+    const QString dir = QDir(OpenList::defaultDownloadRoot()).filePath(QStringLiteral("软件"));
+    if (!OpenList::safeDirectory(dir, true)) return {};
+    QString base = QDir(dir).filePath(QStringLiteral("MT管理器-%1.apk").arg(version));
+    if (!QFileInfo::exists(base)) return base;
+    for (int i = 1; i < 100000; ++i) {
+        const QString candidate = QDir(dir).filePath(QStringLiteral("MT管理器-%1 (%2).apk").arg(version).arg(i));
+        if (!QFileInfo::exists(candidate)) return candidate;
+    }
+    return {};
+}
+void MtManagerService::startDownload(const QUrl &url, const QString &version) {
+    m_path = uniqueApkPath(version);
+    if (m_path.isEmpty()) { finishFailure(QStringLiteral("下载目录不可写或无法生成唯一文件名。")); return; }
+    m_part = m_path + QStringLiteral(".") + QUuid::createUuid().toString(QUuid::Id128) + QStringLiteral(".part");
+    m_file.setFileName(m_part);
+    if (!m_file.open(QIODevice::WriteOnly)) { finishFailure(QStringLiteral("无法创建 MT 管理器下载文件。")); return; }
+    QNetworkRequest req(url); req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("OrangeTools/1.0"));
+    m_reply = m_network.get(req); m_clock.start();
+    connect(m_reply, &QNetworkReply::readyRead, this, [this] { if (m_reply) { const auto data = m_reply->readAll(); m_file.write(data); m_received += data.size(); emit progress(m_received,m_total,m_clock.elapsed()>0 ? m_received*1000.0/m_clock.elapsed() : 0); } });
+    connect(m_reply, &QNetworkReply::downloadProgress, this, [this](qint64 r,qint64 t) { m_total=t; emit progress(m_received,t,m_clock.elapsed()>0 ? m_received*1000.0/m_clock.elapsed() : 0); });
+    connect(m_reply, &QNetworkReply::finished, this, [this] {
+        if (!m_reply) return; const auto reply=m_reply; const bool ok=reply->error()==QNetworkReply::NoError; const auto tail=reply->readAll(); if (!tail.isEmpty()) { m_file.write(tail); m_received+=tail.size(); }
+        reply->deleteLater(); m_reply=nullptr; m_file.close();
+        if (!ok || (m_total > 0 && m_received != m_total) || m_received < 4 || !QFileInfo(m_part).isFile()) { finishFailure(QStringLiteral("MT 管理器下载失败或文件大小不完整。")); return; }
+        QFile f(m_part); if (!f.open(QIODevice::ReadOnly) || f.read(4) != QByteArray("PK\x03\x04",4)) { finishFailure(QStringLiteral("下载内容不是有效 APK。")); return; }
+        f.close(); if (QFileInfo::exists(m_path) || !QFile::rename(m_part,m_path)) { finishFailure(QStringLiteral("无法保存 MT 管理器安装包。")); return; }
+        m_active=false; emit log(QStringLiteral("MT 管理器下载完成。")); emit ready(m_version,m_path);
+    });
+}
+void MtManagerService::finishFailure(const QString &message) {
+    if (m_reply) { m_reply->abort(); m_reply->deleteLater(); m_reply=nullptr; }
+    if (m_file.isOpen()) m_file.close(); if (!m_part.isEmpty()) QFile::remove(m_part);
+    m_active=false; emit failed(message);
+}
+void MtManagerService::cancel() { if (m_active) finishFailure(QStringLiteral("MT 管理器下载已取消。")); }
+
+
+
+

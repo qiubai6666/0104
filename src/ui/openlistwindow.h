@@ -2,6 +2,7 @@
 #define OPENLISTWINDOW_H
 #include <QWidget>
 #include "openlistservice.h"
+#include "../services/mtmanagerservice.h"
 class OpenListInstaller;
 class QTableWidget; class QLineEdit; class QLabel; class QProgressBar;
 class QPushButton; class QPlainTextEdit;
@@ -19,13 +20,14 @@ private:
     QPointer<QWidget> m_launcher;
     OpenListService *m_service;
     OpenListInstaller *m_installer;
+    MtManagerService *m_mtService;
     QTableWidget *m_tables[2];
     QLineEdit *m_search[2];
     QPushButton *m_up[2];
     QLabel *m_directory[2];
     QString m_currentDirectory[2];
     QLabel *m_counts[2], *m_device, *m_status;
-    QPushButton *m_refresh, *m_cancel, *m_installSelected, *m_transferSelected;
+    QPushButton *m_refresh, *m_cancel, *m_installSelected, *m_transferSelected, *m_installMt;
     QProgressBar *m_progress;
     QPlainTextEdit *m_log;
     QList<OpenList::Entry> m_entries[2];
@@ -34,7 +36,8 @@ private:
     QList<OpenList::Entry> m_queue;
     QList<Downloaded> m_downloaded;
     QString m_serial;
-    bool m_busy = false, m_downloading = false;
+    bool m_busy = false, m_downloading = false, m_mtTask = false;
+    QString m_mtFile;
     int m_queueIndex = 0, m_installIndex = 0, m_pending = 0, m_succeeded = 0, m_failed = 0;
     bool m_transferOnly = false;
     bool m_installingBatch = false, m_cancelled = false;
