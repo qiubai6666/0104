@@ -352,7 +352,7 @@ void MenuWidget::onPullProcessFinished(int exitCode, QProcess::ExitStatus)
 
 void MenuWidget::closeEvent(QCloseEvent *event)
 {
-    if (DeviceOperationLease::owner() || (repairWindow && repairWindow->hasActiveOugaTask()) || (deviceCheckWindow && deviceCheckWindow->isOperationInProgress())) {
+    if (DeviceOperationLease::blocksApplicationExit() || (repairWindow && repairWindow->hasActiveOugaTask()) || (deviceCheckWindow && deviceCheckWindow->isOperationInProgress())) {
         event->ignore();
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中",
             "正在重启或刷写设备，请等待操作结束后再关闭主菜单。", this);
@@ -363,7 +363,7 @@ void MenuWidget::closeEvent(QCloseEvent *event)
 
 void MenuWidget::cleanupAndExit()
 {
-    if (DeviceOperationLease::owner() || (repairWindow && repairWindow->hasActiveOugaTask()) || (deviceCheckWindow && deviceCheckWindow->isOperationInProgress())) {
+    if (DeviceOperationLease::blocksApplicationExit() || (repairWindow && repairWindow->hasActiveOugaTask()) || (deviceCheckWindow && deviceCheckWindow->isOperationInProgress())) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "操作进行中",
             "正在重启或刷写设备，请等待操作结束后再退出。", this);
         return;

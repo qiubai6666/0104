@@ -52,6 +52,7 @@ OpenListInstaller::OpenListInstaller(QObject *parent,OugaCommandRunner *runner,c
     : QObject(parent), m_runner(runner ? runner : new OpenListProcessRunner(this)),
       m_adb(adbPath.isEmpty() ? ResourceExtractor::getAdbPath() : adbPath),
       m_sevenZip(sevenZip.isEmpty() ? QDir(ResourceExtractor::getResourcePath()).filePath("bin/7zip/7z.exe") : sevenZip) {
+    setProperty(DeviceOperationLease::ApplicationExitExemptProperty, true);
     connect(m_runner,&OugaCommandRunner::completed,this,&OpenListInstaller::onCompleted);
     connect(m_runner,&OugaCommandRunner::output,this,[this](const QString &text) { streamLog(text); });
     connect(m_runner,&OugaCommandRunner::stalled,this,[this] {

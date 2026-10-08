@@ -10,11 +10,14 @@ public:
   // Opt-in only for persistent submenus whose Close hides instead of deleting.
   // Flash windows and the main menu retain their close/exit protection.
   static constexpr const char *RetainedWindowProperty = "orangeRetainedSubmenu";
+  // Operations owned by Openlist may be abandoned when the user exits the app.
+  static constexpr const char *ApplicationExitExemptProperty = "orangeApplicationExitExempt";
   static DeviceOperationLease *instance();
   static bool acquire(QObject *owner, QString *error = nullptr);
   static void release(QObject *owner);
   static bool busyFor(QObject *owner = nullptr);
   static QObject *owner();
+  static bool blocksApplicationExit();
   static void setIdleCheck(std::function<bool()> check);
 signals:
   void changed(bool held);

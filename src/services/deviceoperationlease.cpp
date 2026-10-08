@@ -45,11 +45,15 @@ bool DeviceOperationLease::busyFor(QObject *owner) {
   return p && p != owner;
 }
 QObject *DeviceOperationLease::owner() { return instance()->m_owner; }
+bool DeviceOperationLease::blocksApplicationExit() {
+  auto p = owner();
+  return p && !p->property(ApplicationExitExemptProperty).toBool();
+}
 void DeviceOperationLease::setIdleCheck(std::function<bool()> check) {
   instance()->m_idle = std::move(check);
 }
 bool DeviceOperationLease::eventFilter(QObject *watched, QEvent *event) {
-  if (m_owner && event->type() == QEvent::Close &&
+  if (event->type() == QEvent::Close && blocksApplicationExit() &&
       !watched->property(RetainedWindowProperty).toBool()) {
     for (QObject *p = m_owner; p; p = p->parent())
       if (p == watched) {
@@ -57,7 +61,7 @@ bool DeviceOperationLease::eventFilter(QObject *watched, QEvent *event) {
         return true;
       }
   }
-  if (m_owner && event->type() == QEvent::Quit) {
+  if (event->type() == QEvent::Quit && blocksApplicationExit()) {
     event->ignore();
     return true;
   }

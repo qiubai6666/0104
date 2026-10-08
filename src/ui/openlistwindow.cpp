@@ -44,7 +44,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         if (m_busy) return; m_mtTask = true; m_mtFile.clear(); setBusy(true); m_progress->setRange(0,100); m_status->setText(QStringLiteral("正在获取 MT 管理器最新版本…")); m_mtService->start();
     });
     connect(m_mtService,&MtManagerService::progress,this,[this](qint64 received,qint64 total,double speed) {
-        if (!m_mtTask) return; m_progress->setRange(0,total > 0 ? 100 : 0); if (total > 0) m_progress->setValue(qMin(99,int(received*100/total))); m_status->setText(QStringLiteral("正在下载 MT 管理器 · %1 / %2 · %3/s").arg(QLocale().formattedDataSize(received),total>0?QLocale().formattedDataSize(total):QStringLiteral("未知"),QLocale().formattedDataSize(qint64(speed))));
+        if (!m_mtTask) return; m_progress->setRange(0,total > 0 ? 100 : 0); if (total > 0) m_progress->setValue(received >= total ? 100 : qMin(99, int(received * 100 / total))); m_status->setText(QStringLiteral("正在下载 MT 管理器 · %1 / %2 · %3/s").arg(QLocale().formattedDataSize(received),total>0?QLocale().formattedDataSize(total):QStringLiteral("未知"),QLocale().formattedDataSize(qint64(speed))));
     });
     connect(m_mtService,&MtManagerService::log,this,&OpenListWindow::log);
     connect(m_mtService,&MtManagerService::failed,this,[this](const QString &message) { if (!m_mtTask) return; m_mtTask=false; finish(message); });
@@ -57,7 +57,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     });
     connect(m_service,&OpenListService::progress,this,[this](qint64 received,qint64 total,double speed) {
         m_progress->setRange(0,total > 0 ? 100 : 0);
-        if (total > 0) m_progress->setValue(qMin(99,int(received * 100 / total)));
+        if (total > 0) m_progress->setValue(received >= total ? 100 : qMin(99, int(received * 100 / total)));
         m_status->setText(QStringLiteral("正在下载 %1 · %2 / %3 · %4/s（%5/%6）")
             .arg(m_selected.name,QLocale().formattedDataSize(received),total >= 0 ? QLocale().formattedDataSize(total) : QStringLiteral("未知"),QLocale().formattedDataSize(qint64(speed))).arg(m_queueIndex).arg(m_queue.size()));
     });

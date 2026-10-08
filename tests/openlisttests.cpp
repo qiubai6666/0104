@@ -80,6 +80,40 @@ class OpenListTests final : public QObject {
     Q_OBJECT
 private slots:
     void cleanup(){ QVERIFY(!DeviceOperationLease::owner()); }
+    void applicationExitPolicy() {
+        class ExitReceiver final : public QObject {
+        public:
+            bool quitReceived = false;
+            bool event(QEvent *event) override {
+                if (event->type() == QEvent::Quit) { quitReceived = true; return true; }
+                return QObject::event(event);
+            }
+        } receiver;
+        QWidget window;
+        QObject flashOwner(&window);
+        QVERIFY(DeviceOperationLease::acquire(&flashOwner));
+        QVERIFY(DeviceOperationLease::blocksApplicationExit());
+        window.show();
+        QVERIFY(!window.close());
+        QEvent blockedQuit(QEvent::Quit);
+        QCoreApplication::sendEvent(&receiver, &blockedQuit);
+        QVERIFY(!receiver.quitReceived);
+        DeviceOperationLease::release(&flashOwner);
+
+        Runner runner;
+        OpenListInstaller installer(&window, &runner, "fake-adb", "fake-7z");
+        QVERIFY(DeviceOperationLease::acquire(&installer));
+        QVERIFY(!DeviceOperationLease::blocksApplicationExit());
+        QVERIFY(window.close());
+        QEvent allowedQuit(QEvent::Quit);
+        QCoreApplication::sendEvent(&receiver, &allowedQuit);
+        QVERIFY(receiver.quitReceived);
+        // Exit exemption does not release the lock or permit concurrent flashing.
+        QVERIFY(!DeviceOperationLease::acquire(&flashOwner));
+        QCOMPARE(DeviceOperationLease::owner(), static_cast<QObject *>(&installer));
+        DeviceOperationLease::release(&installer);
+        QVERIFY(!DeviceOperationLease::blocksApplicationExit());
+    }
     void safety(){
         QVERIFY(OpenListService::https(QUrl("https://example.com/file"))); QVERIFY(!OpenListService::https(QUrl("http://example.com")));
         QVERIFY(!OpenListService::https(QUrl("https://user:secret@example.com")));
