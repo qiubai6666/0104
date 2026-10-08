@@ -60,21 +60,28 @@ void UIHelper::applyFloatingSurface(QWidget *window, bool capsule)
     window->installEventFilter(new FloatingSurfacePainter(window));
 }
 
-QIcon UIHelper::menuIcon(const QString &name, qreal /*ratio*/)
+QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
 {
     QFile file(":/menu-icons/" + name + ".svg");
     if (!file.open(QIODevice::ReadOnly)) return {};
     QByteArray svg = file.readAll();
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     svg.replace("currentColor", dark ? "#dce8ef" : "#385565");
-    // Let Qt's SVG icon engine rasterize at the requested icon size. Avoid
-    // pre-rasterizing to a tiny pixmap, which can make fine strokes appear
-    // clipped or incomplete on high-DPI displays.
-    QIcon icon;
-    icon.addFile(QStringLiteral(":/menu-icons/") + name + QStringLiteral(".svg"));
-    return icon;
-}
 
+    // Render the SVG into a DPI-aware pixmap so the icon engine is not
+    // required to load the SVG plugin at runtime.
+    QSvgRenderer renderer(svg);
+    const qreal scale = qMax<qreal>(1.0, ratio);
+    const int pixels = qMax(24, qRound(24 * scale));
+    QPixmap pixmap(pixels, pixels);
+    pixmap.setDevicePixelRatio(scale);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    renderer.render(&painter, QRectF(0, 0, pixels, pixels));
+    return QIcon(pixmap);
+}
 QString UIHelper::textButtonStyle()
 {
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
@@ -267,6 +274,7 @@ QMessageBox::StandardButton UIHelper::showCenteredQuestion(const QString &title,
 
     return static_cast<QMessageBox::StandardButton>(msgBox.exec());
 }
+
 
 
 
