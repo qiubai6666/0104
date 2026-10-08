@@ -16,6 +16,9 @@ class UIHelper
 public:
     // 统一菜单密度，不改变文字样式和横向布局。
     enum { MenuButtonHeight = 40 };
+    // Shared logical-pixel dimensions for the capsule and its first-level drawers.
+    enum { MainMenuWidth = 48, MainMenuButtonSize = 38, MainMenuIconSize = 24,
+           DrawerWidth = 318, DrawerHeight = 380 };
 
     // 为纵向菜单创建统一样式的按钮；各窗口自己连接业务信号。
     static QVector<QPushButton *> createMenuButtons(QWidget *parent,

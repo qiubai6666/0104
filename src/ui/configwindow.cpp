@@ -118,7 +118,7 @@ void ConfigWindow::setupUI()
 
 void ConfigWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight)
 {
-    UIHelper::positionDrawer(this, QRect(mainMenuX, mainMenuY, 58, mainMenuHeight));
+    UIHelper::positionDrawer(this, QRect(mainMenuX, mainMenuY, UIHelper::MainMenuWidth, mainMenuHeight));
 }
 
 void ConfigWindow::onButtonClicked()

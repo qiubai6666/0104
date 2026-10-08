@@ -13,6 +13,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include "menuwidget.h"
+#include "repairwindow.h"
+#include "payloadwindow.h"
+#include "configwindow.h"
+#include "uihelper.h"
+#include <QLayout>
+#include <QLabel>
+#include <QPainter>
 #include "devicecheckwindow.h"
 #include "screencastcontroller.h"
 #include "devicemanager.h"
@@ -69,6 +76,71 @@ private slots:
         QCOMPARE(DeviceManager::instance()->m_fullModeRefCount, 0);
         fixture.reset();
     }
+    void compactMenuAndUniformDrawers() {
+        // A local empty config prevents the constructor from downloading anything.
+        QVERIFY(writeFile(fixturePath + "/download_config.txt", ""));
+        MenuWidget menu;
+        menu.setAttribute(Qt::WA_DontShowOnScreen);
+        menu.show();
+        menu.layout()->activate();
+        QCOMPARE(menu.width(), int(UIHelper::MainMenuWidth));
+        QVERIFY(menu.height() < 390);
+        for (auto *button : menu.buttons) {
+            QCOMPARE(button->size(), QSize(38, 38));
+            QCOMPARE(button->iconSize(), QSize(24, 24));
+            QVERIFY(!button->icon().isNull());
+            QVERIFY(button->text().isEmpty());
+            const QString bounds = QString("menu=%1x%2 button=%3,%4 %5x%6")
+                .arg(menu.width()).arg(menu.height()).arg(button->x()).arg(button->y())
+                .arg(button->width()).arg(button->height());
+            QVERIFY2(menu.rect().contains(button->geometry()), qPrintable(bounds));
+        }
+        RepairWindow repair;
+        PayloadWindow payload;
+        DeviceCheckWindow device;
+        ConfigWindow config;
+        const QList<QWidget *> drawers = { &repair, &payload, &device, &config };
+        for (auto *drawer : drawers) {
+            drawer->setAttribute(Qt::WA_DontShowOnScreen);
+            drawer->show();
+            drawer->layout()->activate();
+            UIHelper::positionDrawer(drawer, menu.geometry());
+            QCOMPARE(drawer->size(), QSize(318, 380));
+            QVERIFY2(drawer->layout()->minimumSize().height() <= drawer->height(),
+                     qPrintable(drawer->windowTitle() + " layout overflows"));
+            QCOMPARE(drawer->property("surfaceRadius").toInt(), 28);
+            for (auto *button : drawer->findChildren<QPushButton *>()) {
+                const QRect bounds(button->mapTo(drawer, QPoint()), button->size());
+                QVERIFY2(drawer->rect().contains(bounds), qPrintable(button->text()));
+            }
+        }
+        QVERIFY(QMetaObject::invokeMethod(&device, "onDeviceInfoUpdated", Qt::DirectConnection,
+            Q_ARG(QString, QStringLiteral("型号：测试设备\n系统：Android 16\n序列号：TEST1234\n状态：已连接"))));
+        device.layout()->activate();
+        QCOMPARE(device.size(), QSize(318, 380));
+        // Toggling a submenu reuses the same dimensions and still hides it.
+        menu.repairWindow = new RepairWindow;
+        menu.repairWindow->setAttribute(Qt::WA_DontShowOnScreen);
+        menu.buttons[MenuWidget::RepairTools]->click();
+        QVERIFY(menu.repairWindow->isVisible());
+        QCOMPARE(menu.repairWindow->size(), QSize(318, 380));
+        menu.buttons[MenuWidget::RepairTools]->click();
+        QVERIFY(!menu.repairWindow->isVisible());
+        const QString output = qEnvironmentVariable("COMPACT_MENU_PREVIEW");
+        if (!output.isEmpty()) {
+            QImage sheet(1450, 450, QImage::Format_ARGB32_Premultiplied);
+            sheet.fill(QColor("#dce8ed"));
+            QPainter painter(&sheet);
+            painter.setPen(QColor("#385565"));
+            painter.setFont(QFont("Microsoft YaHei", 10));
+            painter.drawText(16, 26, QStringLiteral("主菜单 48px / 次菜单统一 318 × 380px"));
+            menu.render(&painter, QPoint(16, 48));
+            for (int i = 0; i < drawers.size(); ++i)
+                drawers[i]->render(&painter, QPoint(86 + i * 336, 48));
+            painter.end();
+            QVERIFY(sheet.save(output));
+        }
+    }
     void waitingSpinnerAndCancel() {
         MenuWidget menu;
         const auto topLevels = QApplication::topLevelWidgets().size();
@@ -86,8 +158,8 @@ private slots:
         QVERIFY(scrcpyCommands().isEmpty());
         button->click();
         QCOMPARE(menu.screenCastController->state(), ScreenCastController::Idle);
-        QCOMPARE(button->text(), QStringLiteral("投屏"));
-        QVERIFY(button->icon().isNull());
+        QVERIFY(button->text().isEmpty());
+        QVERIFY(!button->icon().isNull());
         QVERIFY(!menu.screenCastSpinnerTimer->isActive());
         QCOMPARE(button->accessibleName(), QStringLiteral("投屏"));
     }
@@ -99,8 +171,8 @@ private slots:
         QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Streaming);
         QTRY_COMPARE(scrcpyCommands().size(), 1);
         QCOMPARE(scrcpyCommands().first(), QJsonArray({"scrcpy", "--max-size", "1024", "--video-bit-rate", "4M", "--serial", "PHONE_A"}));
-        QCOMPARE(button->text(), QStringLiteral("投屏"));
-        QVERIFY(button->icon().isNull());
+        QVERIFY(button->text().isEmpty());
+        QVERIFY(!button->icon().isNull());
         QVERIFY(!menu.screenCastSpinnerTimer->isActive());
         QVERIFY(!ProcessManager::hasActiveDeviceProcesses());
         button->click();

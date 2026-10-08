@@ -32,7 +32,7 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setBrush(fill);
         painter.setPen(QPen(dark ? QColor(255, 255, 255, 32) : QColor(255, 255, 255, 180), 1));
-        const qreal radius = capsule ? 29 : 28;
+        const qreal radius = capsule ? window->width() / 2.0 : 28;
         painter.drawRoundedRect(QRectF(window->rect()).adjusted(.5, .5, -.5, -.5), radius, radius);
         return true;
     }
@@ -56,7 +56,8 @@ void UIHelper::applyFloatingSurface(QWidget *window, bool capsule)
     window->setAttribute(Qt::WA_QuitOnClose, capsule);
     window->setProperty("floatingCapsule", capsule);
     window->setProperty("surfaceOpacity", capsule ? .4 : .72);
-    window->setProperty("surfaceRadius", capsule ? 29 : 28);
+    window->setProperty("surfaceRadius", capsule ? MainMenuWidth / 2 : 28);
+    if (!capsule) window->setFixedSize(DrawerWidth, DrawerHeight);
     window->installEventFilter(new FloatingSurfacePainter(window));
 }
 
@@ -105,8 +106,7 @@ QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayou
     int splitIndex, const QString &firstGroup, const QString &secondGroup)
 {
     applyFloatingSurface(parent);
-    parent->setFixedWidth(318);
-    layout->setContentsMargins(22, 20, 22, 18);
+    layout->setContentsMargins(22, 20, 22, 20);
     layout->setSpacing(4);
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     parent->setStyleSheet(QString("QLabel {background:transparent; color:%1; font-family:'Segoe UI','Microsoft YaHei';}")
@@ -153,6 +153,7 @@ QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayou
         }
         layout->addLayout(grid);
     }
+    layout->addStretch(1);
     parent->adjustSize();
     return result;
 }

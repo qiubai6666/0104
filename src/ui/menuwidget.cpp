@@ -78,16 +78,16 @@ MenuWidget::~MenuWidget()
 void MenuWidget::setupUI()
 {
     mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(2);
-    mainLayout->setContentsMargins(5, 9, 5, 9);
-    setFixedWidth(58);
+    mainLayout->setSpacing(1);
+    mainLayout->setContentsMargins(5, 7, 5, 7);
+    setFixedWidth(UIHelper::MainMenuWidth);
     UIHelper::applyFloatingSurface(this, true);
     const QStringList labels = {"投屏", "秋白工作室", "PAYLOAD", "提取IMG",
         "设备检测", "配置", "联系作者", "退出", "收起"};
     const QStringList icons = {"monitor-smartphone", "wrench", "package-open", "file-down",
         "smartphone", "sliders-horizontal", "message-circle", "power", "panel-right-close"};
     setStyleSheet(QStringLiteral(
-        "QPushButton {background:transparent; border:1px solid transparent; border-radius:18px; padding:0;}"
+        "QPushButton {background:transparent; border:1px solid transparent; border-radius:14px; padding:0;}"
         "QPushButton:hover {background:rgba(255,255,255,110);}"
         "QPushButton:pressed {background:rgba(212,230,237,180);}"
         "QPushButton[menuSelected=true] {background:rgba(255,255,255,210);}"
@@ -95,16 +95,16 @@ void MenuWidget::setupUI()
     for (int index = 0; index < labels.size(); ++index) {
         if (index == Exit) {
             auto *line = new QWidget(this);
-            line->setFixedSize(32, 1);
+            line->setFixedSize(20, 1);
             line->setStyleSheet("background:rgba(146,166,181,100);");
-            mainLayout->addSpacing(5);
+            mainLayout->addSpacing(3);
             mainLayout->addWidget(line, 0, Qt::AlignHCenter);
-            mainLayout->addSpacing(5);
+            mainLayout->addSpacing(3);
         }
         auto *button = new QPushButton(this);
-        button->setFixedSize(50, 50);
+        button->setFixedSize(UIHelper::MainMenuButtonSize, UIHelper::MainMenuButtonSize);
         button->setIcon(UIHelper::menuIcon(icons[index], devicePixelRatioF()));
-        button->setIconSize(QSize(26, 26));
+        button->setIconSize(QSize(UIHelper::MainMenuIconSize, UIHelper::MainMenuIconSize));
         button->setToolTip(labels[index]);
         button->setAccessibleName(labels[index]);
         button->setObjectName(QString("menuAction%1").arg(index));
@@ -130,7 +130,6 @@ void MenuWidget::setupScreenCastWindow()
     screenCastWindow = new QWidget;
     screenCastWindow->setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     screenCastWindow->setWindowTitle(QStringLiteral("手机投屏"));
-    screenCastWindow->setFixedWidth(318);
     UIHelper::applyFloatingSurface(screenCastWindow);
     screenCastWindow->installEventFilter(this);
     auto *layout = new QVBoxLayout(screenCastWindow);

@@ -388,7 +388,6 @@ void DeviceCheckWindow::finishFileTransfer(const QString &interruption)
 
 void DeviceCheckWindow::setupUI()
 {
-    setFixedWidth(318);
     UIHelper::applyFloatingSurface(this);
     QWidget *container = this;
     mainLayout = new QVBoxLayout(this);
@@ -629,7 +628,7 @@ void DeviceCheckWindow::setupUI()
 
 void DeviceCheckWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight)
 {
-    UIHelper::positionDrawer(this, QRect(mainMenuX, mainMenuY, 58, mainMenuHeight));
+    UIHelper::positionDrawer(this, QRect(mainMenuX, mainMenuY, UIHelper::MainMenuWidth, mainMenuHeight));
 }
 
 bool DeviceCheckWindow::eventFilter(QObject *watched, QEvent *event)

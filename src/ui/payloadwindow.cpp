@@ -62,7 +62,6 @@ PayloadWindow::PayloadWindow(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Payload 提取");
-    setFixedWidth(318);
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     UIHelper::applyFloatingSurface(this);
     setupUI();
