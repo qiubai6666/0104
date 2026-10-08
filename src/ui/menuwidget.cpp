@@ -266,7 +266,7 @@ void MenuWidget::onButtonClicked()
 
     switch (static_cast<MenuAction>(index)) {
     case ScreenCast:
-        toggleSubmenu(ScreenCast, screenCastWindow);
+        screenCastController->toggle();
         break;
     case RepairTools:
         if (!repairWindow) repairWindow = new RepairWindow();

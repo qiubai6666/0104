@@ -72,7 +72,7 @@ QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
     pixmap.setDevicePixelRatio(ratio);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
-    renderer.render(&painter, QRectF(1 * ratio, 1 * ratio, 22 * ratio, 22 * ratio));
+    renderer.render(&painter, QRectF(0, 0, 24 * ratio, 24 * ratio));
     return QIcon(pixmap);
 }
 
