@@ -55,7 +55,7 @@ OpenListInstaller::OpenListInstaller(QObject *parent,OugaCommandRunner *runner,c
     connect(m_runner,&OugaCommandRunner::completed,this,&OpenListInstaller::onCompleted);
     connect(m_runner,&OugaCommandRunner::output,this,[this](const QString &text) { streamLog(text); });
     connect(m_runner,&OugaCommandRunner::stalled,this,[this] {
-        emit log(QStringLiteral("安装器暂时没有新输出，请检查手机授权；不会强制停止安装。"));
+        emit log(m_transferOnly ? QStringLiteral("传输暂时没有新输出，请检查手机连接；不会强制停止传输。") : QStringLiteral("安装器暂时没有新输出，请检查手机授权；不会强制停止安装。"));
     });
 }
 void OpenListInstaller::streamLog(const QString &text,bool flush) {
@@ -132,6 +132,7 @@ bool OpenListInstaller::install(const QString &file,bool module,const QString &s
     if (serial.isEmpty() || serial.contains(QRegularExpression("\\s")) || !DeviceOperationLease::acquire(this)) {
         emit completed(false,QStringLiteral("目标设备无效或设备操作被占用，文件已保留：%1").arg(file)); return false;
     }
+    m_transferOnly = false;
     m_apkRootMode = ShellRoot;
     m_file = file; m_serial = serial; m_module = module; m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_managers.clear();
     const QFileInfo info(file);
@@ -146,6 +147,20 @@ bool OpenListInstaller::install(const QString &file,bool module,const QString &s
     }
     m_remote = "/data/local/tmp/orange-openlist-" + QUuid::createUuid().toString(QUuid::Id128) + (module ? ".zip" : ".apk");
     command(Verify,m_adb,{"devices"},5000); return true;
+}
+bool OpenListInstaller::transfer(const QString &file,const QString &serial) {
+    if (busy()) return false;
+    if (serial.isEmpty() || serial.contains(QRegularExpression("\\s")) || !DeviceOperationLease::acquire(this)) {
+        emit completed(false,QStringLiteral("目标设备无效或设备操作被占用，文件已保留：%1").arg(file)); return false;
+    }
+    m_transferOnly = true; m_file = file; m_serial = serial;
+    m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_result.clear();
+    const QFileInfo info(file);
+    if (!info.isFile() || info.isSymLink() || !OpenList::safeDirectory(info.absolutePath(),false)) {
+        finish(false,QStringLiteral("文件不可用或路径不安全，无法传输。")); return false;
+    }
+    emit log(QStringLiteral("正在传输到手机内部存储：%1").arg(info.fileName()));
+    command(TransferVerify,m_adb,{"devices"},5000); return true;
 }
 void OpenListInstaller::command(Stage stage,const QString &program,const QStringList &args,int timeout) {
     m_logPending.clear(); m_receivedOutput = false;
@@ -165,7 +180,7 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
         else emit devicesReady(serials);
         return;
     }
-    if (handleFailureTransfer(code,normal,out) || handleApkRoot(code,normal,out)) return;
+    if (handleTransfer(code,normal,out) || handleApkRoot(code,normal,out)) return;
     if (m_stage == RemoteCleanup) {
         if (code != 0 || !normal) emit log(QStringLiteral("手机临时文件清理失败，请检查连接；不会改变已确认的安装结果。"));
         end(m_installSuccess,m_result); return;
@@ -275,9 +290,9 @@ bool OpenListInstaller::handleApkRoot(int code,bool normal,const QString &out) {
     }
     return false;
 }
-bool OpenListInstaller::handleFailureTransfer(int code,bool normal,const QString &out) {
-    // Failure transfer is not installation success, and must never retry itself.
-    if (m_stage == FailureVerify) {
+bool OpenListInstaller::handleTransfer(int code,bool normal,const QString &out) {
+    // A successful fallback transfer is not installation success; neither transfer mode retries itself.
+    if (m_stage == TransferVerify) {
         if (!success(code,normal,out,false) || !authorizedDevices(out).contains(m_serial)) {
             finish(false,m_result + QStringLiteral(" 原目标手机已断开、未授权或检测失败，无法推送安装包；不会切换设备。"));
             return true;
@@ -288,25 +303,25 @@ bool OpenListInstaller::handleFailureTransfer(int code,bool normal,const QString
         m_fallbackRemote = QStringLiteral("/sdcard/") + name + '-' +
             QUuid::createUuid().toString(QUuid::Id128) + '.' + info.suffix();
         // Reserve a unique file with shell noclobber; never replace existing user files.
-        adb(FailureDestination,{"shell","set -C; : > " + ShellCommand::quote(m_fallbackRemote)});
+        adb(TransferDestination,{"shell","set -C; : > " + ShellCommand::quote(m_fallbackRemote)});
         return true;
     }
-    if (m_stage == FailureDestination) {
+    if (m_stage == TransferDestination) {
         if (!success(code,normal,out,false))
-            finish(false,m_result + QStringLiteral(" 无法写入手机内部存储根目录，安装包推送失败。"));
-        else adb(FailurePush,{"push",m_file,m_fallbackRemote});
+            finish(false,m_result + QStringLiteral(" 无法写入手机内部存储根目录，文件传输失败。"));
+        else adb(TransferPush,{"push",m_file,m_fallbackRemote});
         return true;
     }
-    if (m_stage == FailurePush) {
+    if (m_stage == TransferPush) {
         if (success(code,normal,out,false)) {
-            finish(false,m_result + QStringLiteral(" 安装包已推送到手机：%1，可手动安装。").arg(m_fallbackRemote));
+            finish(m_transferOnly,m_transferOnly ? QStringLiteral("传输完成：%1").arg(m_fallbackRemote) : m_result + QStringLiteral(" 安装包已推送到手机：%1，可手动安装。").arg(m_fallbackRemote));
         } else {
-            m_result += QStringLiteral(" 安装包推送失败，请检查手机连接和存储空间。");
-            adb(FailureCleanup,{"shell","rm -f " + ShellCommand::quote(m_fallbackRemote)});
+            m_result += QStringLiteral(" 文件传输失败，请检查手机连接和存储空间。");
+            adb(TransferCleanup,{"shell","rm -f " + ShellCommand::quote(m_fallbackRemote)});
         }
         return true;
     }
-    if (m_stage == FailureCleanup) {
+    if (m_stage == TransferCleanup) {
         if (!success(code,normal,out,false))
             m_result += QStringLiteral(" 手机端不完整文件清理失败：%1").arg(m_fallbackRemote);
         finish(false,m_result);
@@ -335,17 +350,17 @@ void OpenListInstaller::end(bool ok,const QString &message) {
         }
         m_result = message;
         emit log(QStringLiteral("安装未成功，正在尝试将安装包推送到原目标手机的内部存储根目录。"));
-        command(FailureVerify,m_adb,{"devices"},5000);
+        command(TransferVerify,m_adb,{"devices"},5000);
         return;
     }
     finish(ok,message);
 }
 void OpenListInstaller::finish(bool ok,const QString &message) {
     QString result = message;
-    if (ok) {
+    if (ok && !m_transferOnly) {
         if (!cleanupDownloadedFile(m_file))
             result += QStringLiteral(" 安装成功，但下载文件清理失败：%1").arg(m_file);
-    } else if (!m_file.isEmpty()) result += QStringLiteral(" 安装包保留在：%1").arg(m_file);
-    m_stage = Idle; DeviceOperationLease::release(this); m_file.clear(); m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear();
+    } else if (!m_file.isEmpty()) result += (m_transferOnly ? QStringLiteral(" 下载文件保留在：%1") : QStringLiteral(" 安装包保留在：%1")).arg(m_file);
+    m_stage = Idle; DeviceOperationLease::release(this); m_file.clear(); m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_transferOnly = false;
     emit completed(ok,result);
 }

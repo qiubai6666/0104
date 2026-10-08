@@ -37,24 +37,13 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         if (m_downloading) m_service->cancel();
         else advanceBatch();
     });
-    connect(m_installSelected,&QPushButton::clicked,this,[this] {
-        QList<OpenList::Entry> selected;
-        for (int category = 0; category < 2; ++category) {
-            for (int row = 0; row < m_tables[category]->rowCount(); ++row) {
-                if (!m_tables[category]->item(row,0)->isSelected()) continue;
-                const int index = m_tables[category]->item(row,0)->data(Qt::UserRole).toInt();
-                if (index >= 0 && index < m_entries[category].size())
-                    selected.append(m_entries[category][index]);
-            }
-        }
-        if (selected.isEmpty()) log(QStringLiteral("请先选择文件或文件夹；按 Ctrl / Shift 可多选。"));
-        else startBatch(selected);
-    });
+    connect(m_installSelected,&QPushButton::clicked,this,[this] { startSelection(false); });
+    connect(m_transferSelected,&QPushButton::clicked,this,[this] { startSelection(true); });
     connect(m_service,&OpenListService::listingReady,this,[this](bool module,const QList<OpenList::Entry> &entries,const QString &error) {
         m_entries[module] = entries; render(module);
         if (!error.isEmpty()) m_counts[module]->setText(error);
         if (!error.isEmpty()) log((module ? QStringLiteral("模块：") : QStringLiteral("软件：")) + error);
-        if (m_pending > 0 && --m_pending == 0 && !m_busy) { m_status->setText(QStringLiteral("资源读取完成；Ctrl / Shift 多选后点击“安装选中”，或双击单个文件")); m_refresh->setEnabled(true); }
+        if (m_pending > 0 && --m_pending == 0 && !m_busy) { m_status->setText(QStringLiteral("资源读取完成；可多选后安装或传输到手机，双击文件直接安装")); m_refresh->setEnabled(true); }
     });
     connect(m_service,&OpenListService::progress,this,[this](qint64 received,qint64 total,double speed) {
         m_progress->setRange(0,total > 0 ? 100 : 0);
@@ -79,8 +68,8 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     connect(m_installer,&OpenListInstaller::devicesReady,this,[this](const QStringList &serials) {
         if (!m_busy || serials.isEmpty()) return;
         bool accepted = true;
-        m_serial = serials.size() == 1 ? serials.first() : QInputDialog::getItem(this,QStringLiteral("选择目标手机"),QStringLiteral("已连接多台设备，请选择安装目标："),serials,0,false,&accepted);
-        if (!accepted || m_serial.isEmpty()) { finish(QStringLiteral("未选择手机，未下载或安装。")); return; }
+        m_serial = serials.size() == 1 ? serials.first() : QInputDialog::getItem(this,QStringLiteral("选择目标手机"),QStringLiteral("已连接多台设备，请选择目标手机："),serials,0,false,&accepted);
+        if (!accepted || m_serial.isEmpty()) { finish(QStringLiteral("未选择手机，未开始任务。")); return; }
         updateDevice();
         QTimer::singleShot(0,this,&OpenListWindow::advanceBatch);
     });
@@ -115,6 +104,8 @@ void OpenListWindow::setupUi() {
     m_refresh = new QPushButton(QStringLiteral("刷新资源"),this); m_refresh->setObjectName("openListRefresh"); top->addWidget(m_refresh);
     m_installSelected = new QPushButton(QStringLiteral("安装选中"),this);
     m_installSelected->setObjectName("openListInstallSelected"); top->addWidget(m_installSelected);
+    m_transferSelected = new QPushButton(QStringLiteral("传输到手机"),this);
+    m_transferSelected->setObjectName("openListTransferSelected"); top->addWidget(m_transferSelected);
     layout->addLayout(top);
     auto *split = new QSplitter(Qt::Horizontal,this); split->setChildrenCollapsible(false); layout->addWidget(split,3);
     for (int i = 0; i < 2; ++i) {
@@ -145,7 +136,7 @@ void OpenListWindow::setupUi() {
         connect(m_search[i],&QLineEdit::textChanged,this,[this,i] { render(i); });
         connect(table,&QTableWidget::cellDoubleClicked,this,[this,i](int row,int) { activate(i,row); });
     }
-    m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选后安装选中：先全部下载再逐个安装；选中文件夹可安装其中全部文件"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
+    m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选文件或文件夹后安装或传输；传输至内部存储根目录，不安装"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
     auto *progress = new QHBoxLayout; m_progress = new QProgressBar(this); m_progress->setValue(0); progress->addWidget(m_progress,1);
     m_cancel = new QPushButton(QStringLiteral("取消下载"),this); m_cancel->setEnabled(false); progress->addWidget(m_cancel); layout->addLayout(progress);
     auto *logs = new QGroupBox(QStringLiteral("操作日志"),this); auto *logsLayout = new QVBoxLayout(logs);
@@ -222,7 +213,21 @@ void OpenListWindow::appendSelection(const OpenList::Entry &selection, QList<Ope
     const QString key = QString::number(selection.module) + selection.remotePath;
     if (!paths.contains(key)) { paths.insert(key); expanded.append(selection); }
 }
-void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries) {
+void OpenListWindow::startSelection(bool transferOnly) {
+    if (m_busy) return;
+    QList<OpenList::Entry> selected;
+    for (int category = 0; category < 2; ++category) {
+        for (int row = 0; row < m_tables[category]->rowCount(); ++row) {
+            if (!m_tables[category]->item(row,0)->isSelected()) continue;
+            const int index = m_tables[category]->item(row,0)->data(Qt::UserRole).toInt();
+            if (index >= 0 && index < m_entries[category].size())
+                selected.append(m_entries[category][index]);
+        }
+    }
+    if (selected.isEmpty()) log(QStringLiteral("请先选择文件或文件夹；按 Ctrl / Shift 可多选。"));
+    else startBatch(selected,transferOnly);
+}
+void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries,bool transferOnly) {
     if (m_busy || entries.isEmpty()) return;
     m_queue.clear();
     QSet<QString> paths;
@@ -235,6 +240,7 @@ void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries) {
         if (folderSelected) log(QStringLiteral("所选文件夹内没有可安装的 APK 或模块文件。"));
         return;
     }
+    m_transferOnly = transferOnly;
     m_downloaded.clear(); m_serial.clear(); m_queueIndex = 0; m_installIndex = 0;
     m_succeeded = 0; m_failed = 0; m_installingBatch = false; m_cancelled = false;
     setBusy(true);
@@ -246,7 +252,7 @@ void OpenListWindow::advanceBatch() {
     if (m_cancelled) {
         for (const auto &download : m_downloaded)
             log(QStringLiteral("已取消，下载文件保留在：%1").arg(download.file));
-        finish(QStringLiteral("批量任务已取消，未开始手机安装；已完成的下载保留。")); return;
+        finish(QStringLiteral("批量任务已取消，未开始手机操作；已完成的下载保留。")); return;
     }
     if (!m_installingBatch && m_queueIndex < m_queue.size()) {
         m_selected = m_queue[m_queueIndex++]; m_downloading = true; m_cancel->setEnabled(true);
@@ -257,18 +263,20 @@ void OpenListWindow::advanceBatch() {
     if (m_installIndex < m_downloaded.size()) {
         const auto download = m_downloaded[m_installIndex++];
         m_progress->setRange(0,0);
-        m_status->setText(QStringLiteral("正在安装（%1/%2）：%3；目标手机：%4")
+        m_status->setText((m_transferOnly ? QStringLiteral("正在传输（%1/%2）：%3；目标手机：%4") : QStringLiteral("正在安装（%1/%2）：%3；目标手机：%4"))
             .arg(m_installIndex).arg(m_downloaded.size()).arg(download.entry.name,m_serial));
-        m_installer->install(download.file,download.entry.module,m_serial); return;
+        if (m_transferOnly) m_installer->transfer(download.file,m_serial);
+        else m_installer->install(download.file,download.entry.module,m_serial);
+        return;
     }
     QString summary = QStringLiteral("批量任务完成：成功 %1，失败 %2，共 %3 个文件。")
         .arg(m_succeeded).arg(m_failed).arg(m_queue.size());
-    if (std::any_of(m_downloaded.cbegin(),m_downloaded.cend(),[](const Downloaded &item) { return item.entry.module; }))
+    if (!m_transferOnly && std::any_of(m_downloaded.cbegin(),m_downloaded.cend(),[](const Downloaded &item) { return item.entry.module; }))
         summary += QStringLiteral("模块可能需要手动重启后生效。");
     finish(summary,m_failed == 0);
 }
 void OpenListWindow::setBusy(bool busy) {
-    m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy);
+    m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy); m_transferSelected->setEnabled(!busy);
     for (int i=0;i<2;++i) { m_tables[i]->setEnabled(!busy); m_search[i]->setEnabled(!busy); m_up[i]->setEnabled(!busy && !m_currentDirectory[i].isEmpty()); }
     m_cancel->setEnabled(busy && m_downloading);
 }
@@ -286,7 +294,7 @@ void OpenListWindow::updateDevice() {
         devices->currentMode() == DeviceManager::ADB ? QStringLiteral("ADB 已连接：%1").arg(devices->deviceSerial()) : QStringLiteral("未检测到已授权 ADB 手机"));
 }
 void OpenListWindow::closeEvent(QCloseEvent *event) {
-    if (m_busy) { event->ignore(); log(QStringLiteral("任务进行中；下载可取消，手机安装请等待结束。")); return; }
+    if (m_busy) { event->ignore(); log(QStringLiteral("任务进行中；下载可取消，手机安装或传输请等待结束。")); return; }
     // Keep the idle window reusable without vetoing application shutdown.
     QWidget::closeEvent(event);
 }

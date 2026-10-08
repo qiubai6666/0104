@@ -25,7 +25,7 @@ private:
     QLabel *m_directory[2];
     QString m_currentDirectory[2];
     QLabel *m_counts[2], *m_device, *m_status;
-    QPushButton *m_refresh, *m_cancel, *m_installSelected;
+    QPushButton *m_refresh, *m_cancel, *m_installSelected, *m_transferSelected;
     QProgressBar *m_progress;
     QPlainTextEdit *m_log;
     QList<OpenList::Entry> m_entries[2];
@@ -36,12 +36,14 @@ private:
     QString m_serial;
     bool m_busy = false, m_downloading = false;
     int m_queueIndex = 0, m_installIndex = 0, m_pending = 0, m_succeeded = 0, m_failed = 0;
+    bool m_transferOnly = false;
     bool m_installingBatch = false, m_cancelled = false;
     void setupUi();
     void refresh();
     void render(bool module);
     void activate(bool module, int row);
-    void startBatch(const QList<OpenList::Entry> &entries);
+    void startSelection(bool transferOnly);
+    void startBatch(const QList<OpenList::Entry> &entries, bool transferOnly = false);
     void appendSelection(const OpenList::Entry &selection, QList<OpenList::Entry> &expanded, QSet<QString> &paths) const;
     void advanceBatch();
     void setBusy(bool busy);

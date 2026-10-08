@@ -31,6 +31,7 @@ public:
                                const QString &adb = QString(), const QString &sevenZip = QString());
     bool inspectDevices();
     bool install(const QString &file, bool module, const QString &serial);
+    bool transfer(const QString &file, const QString &serial);
     void chooseRoot(const QString &manager);
     bool busy() const { return m_stage != Idle; }
     static QStringList authorizedDevices(const QString &output);
@@ -46,12 +47,13 @@ signals:
 private:
     enum Stage { Idle, Discover, Verify, ZipList, ZipTest, ZipProperties, RootAccess,
                  Managers, RootChoice, Push, ModuleInstall, RemoteCleanup, ApkInstall,
-                 FailureVerify, FailureDestination, FailurePush, FailureCleanup,
+                 TransferVerify, TransferDestination, TransferPush, TransferCleanup,
                  ApkRootProbe, ApkRootPush, ApkRootInstall };
     Stage m_stage = Idle;
     OugaCommandRunner *m_runner;
     QString m_adb, m_sevenZip, m_file, m_serial, m_remote, m_selectedManager;
     QMap<QString,QString> m_managers;
+    bool m_transferOnly = false;
     bool m_module = false, m_installSuccess = false, m_remoteTouched = false;
     QString m_result, m_fallbackRemote, m_logPending;
     void streamLog(const QString &, bool flush = false);
@@ -65,7 +67,7 @@ private:
     void end(bool, const QString &);
     void cleanRemote(bool, const QString &);
     void finish(bool, const QString &);
-    bool handleFailureTransfer(int, bool, const QString &);
+    bool handleTransfer(int, bool, const QString &);
     bool handleApkRoot(int, bool, const QString &);
     void probeApkRoot();
     QString apkRootCommand(const QString &) const;
