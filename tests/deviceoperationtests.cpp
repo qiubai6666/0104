@@ -20,6 +20,7 @@
 #include "ougaflashwindow.h"
 #include "xiaomiflashwindow.h"
 #include "openlistwindow.h"
+#include "openlistinstaller.h"
 #include "deviceoperationlease.h"
 #include <QSettings>
 #include <QUuid>
@@ -203,7 +204,7 @@ void DeviceOperationTests::openListMenuAndSingleWindow()
     QVERIFY(first->close()); QVERIFY(!first->isVisible());
     repair.buttons[RepairWindow::OpenList]->click(); QCOMPARE(repair.openListWindow,first); QVERIFY(first->isVisible());
     QObject operation(first); QVERIFY(DeviceOperationLease::acquire(&operation));
-    QVERIFY(repair.hasActiveOugaTask());
+    QVERIFY(!repair.hasActiveOugaTask());
     QVERIFY(!first->close());
     QVERIFY(DeviceOperationLease::busyFor(&repair));
     DeviceOperationLease::release(&operation);
@@ -213,7 +214,7 @@ void DeviceOperationTests::openListMenuAndSingleWindow()
 void DeviceOperationTests::openListApplicationExit_data()
 {
     QTest::addColumn<QString>("state");
-    for (const QString &state : {QString("visible"), QString("minimized"), QString("hidden"), QString("busy")})
+    for (const QString &state : {QString("visible"), QString("minimized"), QString("hidden"), QString("busy"), QString("download"), QString("install"), QString("transfer")})
         QTest::newRow(qPrintable(state)) << state;
 }
 
@@ -261,7 +262,18 @@ int DeviceOperationTests::exitHelper(QApplication &application, const QStringLis
             putFile(evidence + "/exit-result.txt", "all windows closed");
     });
     QTimer::singleShot(50, &menu, [&] {
-        menu.buttons[MenuWidget::Exit]->click(); // Exactly one click when idle.
+        if (state == "download" || state == "install" || state == "transfer") {
+            auto *button = openlist->findChild<QPushButton *>("openListInstallMt");
+            if (!button) { application.exit(93); return; }
+            button->click(); // Active download, before the proxy failure is delivered.
+            if (!openlist->isBusy() || repair->hasActiveOugaTask()) { application.exit(94); return; }
+            if (state != "download") {
+                auto *installer = openlist->findChild<OpenListInstaller *>();
+                if (!installer || !DeviceOperationLease::acquire(installer)) { application.exit(95); return; }
+                if (DeviceOperationLease::blocksApplicationExit()) { application.exit(96); return; }
+            }
+        }
+        menu.buttons[MenuWidget::Exit]->click(); // Exactly one click for Openlist, including active tasks.
         if (state != "busy") return;
         if (!menu.isVisible() || !repair->isVisible() || !openlist->isVisible() ||
             DeviceOperationLease::owner() != &operation) { application.exit(92); return; }

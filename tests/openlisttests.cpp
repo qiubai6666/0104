@@ -114,6 +114,75 @@ private slots:
         DeviceOperationLease::release(&installer);
         QVERIFY(!DeviceOperationLease::blocksApplicationExit());
     }
+    void mtDownloadCompletion() {
+        QTemporaryDir dir;
+        Network network;
+        const QByteArray apk = QByteArray("PK\x03\x04", 4) + QByteArray(1024, 'a');
+        network.handler = [&](const QNetworkRequest &req, const QJsonObject &) {
+            auto *reply = new Reply(req, req.url().host() == "mt.cc"
+                ? QByteArray("<a href=\"https://pan.mt2.cn/apk/26091198/clone-target28\">download</a>") : apk, 200);
+            if (req.url().host() != "mt.cc") reply->setHeader("Content-Length", QByteArray::number(apk.size()));
+            return reply;
+        };
+        MtManagerService service(nullptr, &network, dir.path());
+        QSignalSpy ready(&service, &MtManagerService::ready), failed(&service, &MtManagerService::failed);
+        service.start();
+        service.start(); // Duplicate trigger must not create another request.
+        QTRY_COMPARE(ready.size(), 1);
+        QVERIFY(failed.isEmpty()); QVERIFY(!service.active());
+        QCOMPARE(network.requests.size(), 2);
+        QFile file(ready.first()[1].toString()); QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), apk); file.close();
+        service.start(); // Repeat download must not overwrite the first file.
+        QTRY_COMPARE(ready.size(), 2);
+        QVERIFY(ready[0][1].toString() != ready[1][1].toString());
+        QVERIFY(QFileInfo::exists(ready[0][1].toString()));
+        QCOMPARE(QDir(dir.filePath(QStringLiteral("软件"))).entryList({"*.part"}, QDir::Files).size(), 0);
+    }
+    void mtDownloadCancel() {
+        QTemporaryDir dir;
+        Network network;
+        QPointer<Reply> download;
+        network.handler = [&](const QNetworkRequest &req, const QJsonObject &) {
+            if (req.url().host() == "mt.cc") return new Reply(req,
+                "<a href=\"https://pan.mt2.cn/apk/26091198/clone-target28\">download</a>", 200);
+            download = new Reply(req, {}, 200, {}, true);
+            return download.data();
+        };
+        MtManagerService service(nullptr, &network, dir.path());
+        QSignalSpy ready(&service, &MtManagerService::ready), failed(&service, &MtManagerService::failed);
+        service.start(); QTRY_VERIFY(download);
+        service.cancel(); service.cancel();
+        QCOMPARE(failed.size(), 1); QVERIFY(ready.isEmpty()); QVERIFY(!service.active());
+        QCOMPARE(QDir(dir.filePath(QStringLiteral("软件"))).entryList(QDir::Files).size(), 0);
+    }
+    void mtDownloadFailure_data() {
+        QTest::addColumn<QByteArray>("body");
+        QTest::addColumn<int>("size");
+        QTest::newRow("invalid-apk") << QByteArray("not an apk") << 10;
+        QTest::newRow("incomplete") << (QByteArray("PK\x03\x04",4) + "apk") << 100;
+    }
+    void mtDownloadFailure() {
+        QFETCH(QByteArray, body); QFETCH(int, size);
+        QTemporaryDir dir;
+        Network network;
+        network.handler = [&](const QNetworkRequest &req, const QJsonObject &) {
+            if (req.url().host() == "mt.cc") return new Reply(req,
+                "<a href=\"https://pan.mt2.cn/apk/26091198/clone-target28\">download</a>", 200);
+            auto *reply = new Reply(req, body, 200, {}, true);
+            reply->setHeader("Content-Length", QByteArray::number(size));
+            QTimer::singleShot(0, reply, [reply, size] {
+                emit reply->readyRead(); emit reply->downloadProgress(reply->bytes.size(), size);
+                reply->done = true; emit reply->finished();
+            });
+            return reply;
+        };
+        MtManagerService service(nullptr, &network, dir.path());
+        QSignalSpy ready(&service, &MtManagerService::ready), failed(&service, &MtManagerService::failed);
+        service.start(); QTRY_COMPARE(failed.size(), 1);
+        QVERIFY(!service.active()); QVERIFY(ready.isEmpty());
+        QCOMPARE(QDir(dir.filePath(QStringLiteral("软件"))).entryList(QDir::Files).size(), 0);
+    }
     void safety(){
         QVERIFY(OpenListService::https(QUrl("https://example.com/file"))); QVERIFY(!OpenListService::https(QUrl("http://example.com")));
         QVERIFY(!OpenListService::https(QUrl("https://user:secret@example.com")));

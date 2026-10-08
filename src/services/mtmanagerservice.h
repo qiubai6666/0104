@@ -9,7 +9,9 @@
 class MtManagerService final : public QObject {
     Q_OBJECT
 public:
-    explicit MtManagerService(QObject *parent = nullptr);
+    explicit MtManagerService(QObject *parent = nullptr, QNetworkAccessManager *network = nullptr,
+                              const QString &downloadRoot = QString());
+    ~MtManagerService() override;
     bool active() const { return m_active; }
     void start();
     void cancel();
@@ -25,8 +27,9 @@ private:
     void startDownload(const QUrl &url, const QString &version);
     void finishFailure(const QString &message);
     static bool validDownloadUrl(const QUrl &url);
-    static QString uniqueApkPath(const QString &version);
-    QNetworkAccessManager m_network;
+    QString uniqueApkPath(const QString &version) const;
+    QNetworkAccessManager *m_network;
+    QString m_root;
     QPointer<QNetworkReply> m_reply;
     QFile m_file;
     QString m_part, m_path, m_version;
@@ -35,5 +38,3 @@ private:
     QElapsedTimer m_clock;
 };
 #endif
-
-

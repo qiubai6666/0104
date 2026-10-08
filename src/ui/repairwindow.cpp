@@ -914,12 +914,11 @@ module_finished:
 }
 
 bool RepairWindow::hasActiveOugaTask() const {
-    if (openListWindow && openListWindow->isBusy()) return true;
     if ((xiaomiWindow && xiaomiWindow->isBusy()) || (ougaWindow && ougaWindow->isBusy())) return true;
     // Taskbar flash windows have no QObject parent: protect both launchers
     // explicitly, including read-only discovery and modal operations.
     for (QObject *owner = DeviceOperationLease::owner(); owner; owner = owner->parent())
-        if (owner == ougaWindow || owner == xiaomiWindow || owner == openListWindow) return true;
+        if (owner == ougaWindow || owner == xiaomiWindow) return true;
     return false;
 }
 void RepairWindow::closeEvent(QCloseEvent *event) {
