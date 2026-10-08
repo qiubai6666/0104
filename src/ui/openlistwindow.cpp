@@ -48,7 +48,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     });
     connect(m_mtService,&MtManagerService::log,this,&OpenListWindow::log);
     connect(m_mtService,&MtManagerService::failed,this,[this](const QString &message) { if (!m_mtTask) return; m_mtTask=false; finish(message); });
-    connect(m_mtService,&MtManagerService::ready,this,[this](const QString &version,const QString &file) { if (!m_mtTask) return; m_mtFile=file; log(QStringLiteral("正在安装 MT 管理器（版本 %1）…").arg(version)); m_installer->inspectDevices(); });
+    connect(m_mtService,&MtManagerService::ready,this,[this](const QString &version,const QString &file) { if (!m_mtTask) return; m_progress->setRange(0,100); m_progress->setValue(100); m_mtFile=file; log(QStringLiteral("正在安装 MT 管理器（版本 %1）…").arg(version)); m_installer->inspectDevices(); });
     connect(m_service,&OpenListService::listingReady,this,[this](bool module,const QList<OpenList::Entry> &entries,const QString &error) {
         m_entries[module] = entries; render(module);
         if (!error.isEmpty()) m_counts[module]->setText(error);
@@ -311,8 +311,8 @@ void OpenListWindow::updateDevice() {
         devices->currentMode() == DeviceManager::ADB ? QStringLiteral("ADB 已连接：%1").arg(devices->deviceSerial()) : QStringLiteral("未检测到已授权 ADB 手机"));
 }
 void OpenListWindow::closeEvent(QCloseEvent *event) {
-    if (m_busy) { event->ignore(); log(QStringLiteral("任务进行中；下载可取消，手机安装或传输请等待结束。")); return; }
-    // Keep the idle window reusable without vetoing application shutdown.
+    // Openlist is a child tool window; closing it must not veto application shutdown.
+    // Any active request keeps its own QObject alive until the application exits.
     QWidget::closeEvent(event);
 }
 
@@ -327,3 +327,4 @@ void OpenListWindow::showEvent(QShowEvent *event) {
         move(frame.topLeft());
     });
 }
+
