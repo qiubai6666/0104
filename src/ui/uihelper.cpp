@@ -68,11 +68,11 @@ QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     svg.replace("currentColor", dark ? "#c8d6df" : "#526d7b");
     QSvgRenderer renderer(svg);
-    QPixmap pixmap(qRound(22 * ratio), qRound(22 * ratio));
+    QPixmap pixmap(qRound(24 * ratio), qRound(24 * ratio));
     pixmap.setDevicePixelRatio(ratio);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
-    renderer.render(&painter);
+    renderer.render(&painter, QRectF(1 * ratio, 1 * ratio, 22 * ratio, 22 * ratio));
     return QIcon(pixmap);
 }
 

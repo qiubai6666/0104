@@ -78,8 +78,8 @@ MenuWidget::~MenuWidget()
 void MenuWidget::setupUI()
 {
     mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(3);
-    mainLayout->setContentsMargins(5, 12, 5, 12);
+    mainLayout->setSpacing(2);
+    mainLayout->setContentsMargins(5, 9, 5, 9);
     setFixedWidth(58);
     UIHelper::applyFloatingSurface(this, true);
     const QStringList labels = {"投屏", "秋白工作室", "PAYLOAD", "提取IMG",
@@ -102,9 +102,9 @@ void MenuWidget::setupUI()
             mainLayout->addSpacing(5);
         }
         auto *button = new QPushButton(this);
-        button->setFixedSize(46, 39);
+        button->setFixedSize(46, 46);
         button->setIcon(UIHelper::menuIcon(icons[index], devicePixelRatioF()));
-        button->setIconSize(QSize(22, 22));
+        button->setIconSize(QSize(24, 24));
         button->setToolTip(labels[index]);
         button->setAccessibleName(labels[index]);
         button->setObjectName(QString("menuAction%1").arg(index));
