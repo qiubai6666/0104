@@ -21,6 +21,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QTimer>
+#include <algorithm>
 
 OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenListInstaller *installer)
     : QWidget(nullptr), m_launcher(parent), m_service(service ? service : new OpenListService(this)),
@@ -260,8 +261,11 @@ void OpenListWindow::advanceBatch() {
             .arg(m_installIndex).arg(m_downloaded.size()).arg(download.entry.name,m_serial));
         m_installer->install(download.file,download.entry.module,m_serial); return;
     }
-    finish(QStringLiteral("批量任务完成：安装成功 %1，失败 %2，共 %3 个文件。模块可能需要手动重启后生效。")
-        .arg(m_succeeded).arg(m_failed).arg(m_queue.size()),m_failed == 0);
+    QString summary = QStringLiteral("批量任务完成：成功 %1，失败 %2，共 %3 个文件。")
+        .arg(m_succeeded).arg(m_failed).arg(m_queue.size());
+    if (std::any_of(m_downloaded.cbegin(),m_downloaded.cend(),[](const Downloaded &item) { return item.entry.module; }))
+        summary += QStringLiteral("模块可能需要手动重启后生效。");
+    finish(summary,m_failed == 0);
 }
 void OpenListWindow::setBusy(bool busy) {
     m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy);

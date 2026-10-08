@@ -5,6 +5,7 @@
 #include <QMap>
 #include <QStringList>
 #include <QTimer>
+#include <QStringDecoder>
 
 // Managed process adapter; deadlines apply only to preflight/read-only commands.
 class OpenListProcessRunner final : public OugaCommandRunner {
@@ -17,6 +18,8 @@ private:
     QProcess *m_process;
     QTimer m_deadline, m_watchdog;
     QString m_output;
+    QStringDecoder m_decoder{QStringDecoder::Utf8};
+    void readOutput();
     bool m_running = false, m_truncated = false;
     void finish(int, bool);
 };
@@ -50,7 +53,9 @@ private:
     QString m_adb, m_sevenZip, m_file, m_serial, m_remote, m_selectedManager;
     QMap<QString,QString> m_managers;
     bool m_module = false, m_installSuccess = false, m_remoteTouched = false;
-    QString m_result, m_fallbackRemote;
+    QString m_result, m_fallbackRemote, m_logPending;
+    void streamLog(const QString &, bool flush = false);
+    bool m_receivedOutput = false;
     bool m_canTransferFailure = false;
     enum ApkRootMode { ShellRoot, SuC, SuS };
     ApkRootMode m_apkRootMode = ShellRoot;

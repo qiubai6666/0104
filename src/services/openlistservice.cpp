@@ -225,7 +225,7 @@ bool OpenListService::download(const OpenList::Entry &entry) {
             fail(QStringLiteral("下载目录所在磁盘空间不足。")); return;
         }
         m_expectedHash = sha256(data).toLatin1();
-        emit log(m_expectedHash.isEmpty() ? QStringLiteral("未提供发布方 SHA-256，仅验证传输大小及安装包格式。") : QStringLiteral("下载后将校验发布方 SHA-256。"));
+        if (!m_expectedHash.isEmpty()) emit log(QStringLiteral("下载后将校验发布方 SHA-256。"));
         m_clock.start(); getFile(url,0,generation);
     });
     return true;

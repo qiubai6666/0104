@@ -15,8 +15,12 @@
 #include <QLineEdit>
 #include <QScreen>
 #include <QProcess>
+#include <QThread>
+#include <cstdio>
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 #endif
 #include "openlistservice.h"
 #include "openlistinstaller.h"
@@ -107,7 +111,7 @@ private slots:
             return new Reply(r,mode==4?"ab":"abc",200,{},mode==5);
         };
         OpenListService s(nullptr,&network,dir.path());OpenList::Entry e;e.name="ok.apk";e.relativePath="sub/ok.apk";e.remotePath=QStringLiteral("/APK/sub/ok.apk");e.size=3;
-        QSignalSpy ready(&s,&OpenListService::ready),failed(&s,&OpenListService::failed);QVERIFY(s.download(e));QVERIFY(!s.download(e));
+        QSignalSpy ready(&s,&OpenListService::ready),failed(&s,&OpenListService::failed),logs(&s,&OpenListService::log);QVERIFY(s.download(e));QVERIFY(!s.download(e));
         if(mode==5){QTRY_COMPARE(network.requests.size(),2);s.cancel();}
         if(mode==0){QTRY_COMPARE(ready.size(),1);auto file=ready[0][1].toString();QVERIFY(QFileInfo::exists(file));QVERIFY(writeFile(file,"old"));QVERIFY(s.download(e));QTRY_COMPARE(ready.size(),2);QVERIFY(ready[1][1].toString()!=file);QFile original(file);QVERIFY(original.open(QIODevice::ReadOnly));QCOMPARE(original.readAll(),QByteArray("old"));}
         else{QTRY_COMPARE(failed.size(),1);QVERIFY(ready.isEmpty());}
@@ -136,16 +140,57 @@ private slots:
         OpenList::Entry entry; entry.name = "large.apk"; entry.relativePath = entry.name;
         entry.remotePath = "/APK/large.apk";
         QSignalSpy ready(&service, &OpenListService::ready);
-        QSignalSpy failed(&service, &OpenListService::failed);
+        QSignalSpy failed(&service, &OpenListService::failed), logs(&service, &OpenListService::log);
         QVERIFY(service.download(entry));
         QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 5000);
         QCOMPARE(failed.size(), 0);
+        for(const auto &line:logs) QVERIFY(!line[0].toString().contains(QStringLiteral("未提供发布方 SHA-256")));
         int ranged = 0;
         for (const auto &request : network.requests) if (!request.rawHeader("Range").isEmpty()) ++ranged;
         QCOMPARE(ranged, 4);
         QFile file(ready.first()[1].toString());
         QVERIFY(file.open(QIODevice::ReadOnly));
         QCOMPARE(file.readAll(), payload);
+    }
+    void utf8ProcessOutput() {
+        OpenListProcessRunner runner;
+        QSignalSpy done(&runner,&OugaCommandRunner::completed), output(&runner,&OugaCommandRunner::output);
+        const QString expected=QStringLiteral("中文路径/软件/春秋.apk\n📌 模块安装完成\nOL_INSTALL_SUCCESS\n");
+        for(int attempt=0;attempt<2;++attempt) {
+            done.clear(); output.clear();
+            runner.run(QCoreApplication::applicationFilePath(),{"--utf8-fixture"});
+            QTRY_COMPARE_WITH_TIMEOUT(done.size(),1,10000);
+            QCOMPARE(done[0][0].toInt(),0); QVERIFY(done[0][1].toBool());
+            QCOMPARE(done[0][2].toString(),expected);
+            QString combined; for(const auto &chunk:output) combined+=chunk[0].toString();
+            QCOMPARE(combined,expected); QVERIFY(output.size()>1);
+        }
+    }
+    void conciseInstallerLog() {
+        QTemporaryDir dir; const QString file=dir.filePath(QStringLiteral("中文模块.zip"));
+        QVERIFY(writeFile(file,QByteArray("PK\x03\x04",4)));
+        Runner r; OpenListInstaller s(nullptr,&r,"adb","7z");
+        QSignalSpy logs(&s,&OpenListInstaller::log),done(&s,&OpenListInstaller::completed);
+        QVERIFY(s.install(file,true,"phone")); r.respond("phone\tdevice");
+        r.respond("Path = module.prop"); r.respond("Everything is Ok");
+        r.respond("id=test\nname=Test"); r.respond("0"); r.respond("OL_KERNELSU=/data/adb/ksu/bin/ksud");
+        emit r.output(file.left(4)); emit r.output(file.mid(4)+": 1 file pushed\n");
+        r.respond("1 file pushed"); logs.clear();
+        emit r.output(QStringLiteral("📌 中文模"));
+        QCOMPARE(logs.size(),0);
+        emit r.output(QStringLiteral("块安装完成\nArchive: /tmp/file\n  inflating: module.prop\nSuccess\nO"));
+        emit r.output("L_INSTALL_SUCC"); emit r.output("ESS\n");
+        emit r.output("ERROR: https://server.test/file?sign=secret\n");
+        emit r.output(QStringLiteral("尾行没有换行"));
+        r.respond("ERROR: test",1); r.respond("");
+        QCOMPARE(logs[0][0].toString(),QStringLiteral("📌 中文模块安装完成"));
+        QCOMPARE(logs[2][0].toString(),QStringLiteral("尾行没有换行"));
+        QString all; for(const auto &line:logs) all+=line[0].toString();
+        QVERIFY(all.contains("ERROR:")); QVERIFY(!all.contains("server.test")); QVERIFY(!all.contains("sign="));
+        QVERIFY(!all.contains("OL_INSTALL")); QVERIFY(!all.contains("inflating:")); QVERIFY(!all.contains("Archive:"));
+        QVERIFY(!all.contains("1 file pushed")); QVERIFY(!all.contains(QStringLiteral("已获得 Shell Root")));
+        r.respond("phone\tdevice"); r.respond(""); r.respond("1 file pushed");
+        QCOMPARE(done.size(),1); QVERIFY(!done[0][0].toBool());
     }
     void resultsAndModuleFormat(){
         QVERIFY(OpenListInstaller::success(0,true,"Success\n",true));QVERIFY(!OpenListInstaller::success(0,true,"Success\nFailure [bad]",true));QVERIFY(!OpenListInstaller::success(0,false,"Success",true));QVERIFY(!OpenListInstaller::success(0,true,"",true));
@@ -177,7 +222,7 @@ private slots:
         QTemporaryDir dir; const QString file=dir.filePath(QStringLiteral("中文应用's.apk"));
         QVERIFY(writeFile(file,"apk"));
         Runner r; OpenListInstaller s(nullptr,&r,"adb","7z");
-        QSignalSpy done(&s,&OpenListInstaller::completed);
+        QSignalSpy done(&s,&OpenListInstaller::completed),logs(&s,&OpenListInstaller::log);
         QVERIFY(s.install(file,false,"original")); r.respond("original\tdevice");
         QCOMPARE(r.calls.last().args,QStringList({"-s","original","shell","id -u"}));
         if (mode==1 || mode==2 || mode==3 || mode==9 || mode==10) {
@@ -214,6 +259,7 @@ private slots:
             QVERIFY(r.calls.last().args.last().startsWith("/sdcard/"));
             r.respond("1 file pushed");
         }
+        for(const auto &line:logs) QVERIFY(!line[0].toString().contains(QStringLiteral("已获得 Shell Root 权限")));
         QCOMPARE(done.size(),1); QCOMPARE(done[0][0].toBool(),ok);
         QCOMPARE(QFileInfo::exists(file),!ok);
         QVERIFY(!s.busy()); QVERIFY(!DeviceOperationLease::owner());
@@ -536,5 +582,15 @@ private slots:
         emit service->listingReady(false,{e},{}); emit service->listingReady(true,{},{});
         QTest::qWait(20); auto img=w.grab();if (!qEnvironmentVariable("OPENLIST_SCREENSHOT").isEmpty()) QVERIFY(img.save(qEnvironmentVariable("OPENLIST_SCREENSHOT")));w.close();}
 };
-QTEST_MAIN(OpenListTests)
+int main(int argc,char **argv) {
+    if(argc==2 && QByteArray(argv[1])=="--utf8-fixture") {
+#ifdef Q_OS_WIN
+        _setmode(_fileno(stdout),_O_BINARY);
+#endif
+        const QByteArray bytes=QStringLiteral("中文路径/软件/春秋.apk\n📌 模块安装完成\nOL_INSTALL_SUCCESS\n").toUtf8();
+        for(char byte:bytes) { std::fwrite(&byte,1,1,stdout); std::fflush(stdout); QThread::msleep(3); }
+        return 0;
+    }
+    QApplication app(argc,argv); OpenListTests tests; return QTest::qExec(&tests,argc,argv);
+}
 #include "openlisttests.moc"

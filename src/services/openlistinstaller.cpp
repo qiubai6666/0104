@@ -18,12 +18,7 @@ OpenListProcessRunner::OpenListProcessRunner(QObject *parent)
         m_output += QStringLiteral("\nERROR: 只读检测超时\n"); m_process->kill();
     });
     connect(&m_watchdog,&QTimer::timeout,this,[this] { emit stalled(); });
-    connect(m_process,&QProcess::readyReadStandardOutput,this,[this] {
-        QString text = QString::fromLocal8Bit(m_process->readAllStandardOutput());
-        if (m_output.size() + text.size() <= 2 * 1024 * 1024) m_output += text;
-        else m_truncated = true;
-        emit output(text.left(4000)); m_watchdog.start();
-    });
+    connect(m_process,&QProcess::readyReadStandardOutput,this,&OpenListProcessRunner::readOutput);
     connect(m_process,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,
             [this](int code,QProcess::ExitStatus status) { finish(code,status == QProcess::NormalExit); });
     connect(m_process,&QProcess::errorOccurred,this,[this](QProcess::ProcessError error) {
@@ -32,16 +27,23 @@ OpenListProcessRunner::OpenListProcessRunner(QObject *parent)
 }
 void OpenListProcessRunner::run(const QString &program,const QStringList &args,int timeout) {
     if (m_running) return;
-    m_running = true; m_truncated = false; m_output.clear();
+    m_running = true; m_truncated = false; m_output.clear(); m_decoder.resetState();
     m_process->setWorkingDirectory(QFileInfo(program).absolutePath());
     if (timeout > 0) m_deadline.start(timeout);
     m_watchdog.start(); m_process->start(program,args);
 }
+void OpenListProcessRunner::readOutput() {
+    // adb and Android shell output UTF-8; retain decoder state across byte boundaries.
+    const QString text = m_decoder(m_process->readAllStandardOutput());
+    if (m_output.size() + text.size() <= 2 * 1024 * 1024) {
+        m_output += text;
+        if (!text.isEmpty()) emit output(text);
+    } else m_truncated = true;
+    m_watchdog.start();
+}
 void OpenListProcessRunner::finish(int code,bool normal) {
     if (!m_running) return;
-    const auto tail = QString::fromLocal8Bit(m_process->readAllStandardOutput());
-    if (m_output.size() + tail.size() <= 2 * 1024 * 1024) m_output += tail;
-    else m_truncated = true;
+    readOutput();
     m_running = false; m_deadline.stop(); m_watchdog.stop();
     if (m_truncated) { normal = false; m_output += QStringLiteral("\nERROR: 输出过长，结果无法确认\n"); }
     emit completed(code,normal,m_output);
@@ -51,17 +53,33 @@ OpenListInstaller::OpenListInstaller(QObject *parent,OugaCommandRunner *runner,c
       m_adb(adbPath.isEmpty() ? ResourceExtractor::getAdbPath() : adbPath),
       m_sevenZip(sevenZip.isEmpty() ? QDir(ResourceExtractor::getResourcePath()).filePath("bin/7zip/7z.exe") : sevenZip) {
     connect(m_runner,&OugaCommandRunner::completed,this,&OpenListInstaller::onCompleted);
-    connect(m_runner,&OugaCommandRunner::output,this,[this](QString text) {
-        // ZIP listing and root probes contain implementation paths, not user logs.
-        if (m_stage == ApkInstall || m_stage == Push || m_stage == ModuleInstall || m_stage == ApkRootPush || m_stage == ApkRootInstall) {
-            text.replace(m_file,QStringLiteral("[本次安装包]"));
-            if (!m_remote.isEmpty()) text.replace(m_remote,QStringLiteral("[手机临时文件]"));
-            emit log(OpenList::redact(text));
-        }
-    });
+    connect(m_runner,&OugaCommandRunner::output,this,[this](const QString &text) { streamLog(text); });
     connect(m_runner,&OugaCommandRunner::stalled,this,[this] {
         emit log(QStringLiteral("安装器暂时没有新输出，请检查手机授权；不会强制停止安装。"));
     });
+}
+void OpenListInstaller::streamLog(const QString &text,bool flush) {
+    // Buffer complete lines: process chunks can split UTF-8 text, paths and internal markers.
+    if (m_stage != ApkInstall && m_stage != ModuleInstall && m_stage != ApkRootInstall) return;
+    if (!text.isEmpty()) m_receivedOutput = true;
+    m_logPending += text;
+    QStringList lines;
+    int newline;
+    while ((newline = m_logPending.indexOf('\n')) >= 0) {
+        lines.append(m_logPending.left(newline)); m_logPending.remove(0,newline+1);
+    }
+    if (flush && !m_logPending.isEmpty()) { lines.append(m_logPending); m_logPending.clear(); }
+    for (QString line : lines) {
+        line = line.trimmed();
+        if (line.isEmpty() || line == "Success" || line == "OL_INSTALL_SUCCESS") continue;
+        const bool extraction = line.startsWith("Archive:") || line.startsWith("inflating:") || line.startsWith("creating:");
+        if (extraction && success(0,true,line,false)) continue;
+        line.replace(m_file,QStringLiteral("[本次安装包]"));
+        if (!m_remote.isEmpty()) line.replace(m_remote,QStringLiteral("[手机临时文件]"));
+        emit log(OpenList::redact(line));
+    }
+    // Bound a misbehaving installer's line without exposing a partial path or marker.
+    if (m_logPending.size() > 65536) m_logPending.clear();
 }
 QStringList OpenListInstaller::authorizedDevices(const QString &output) {
     QStringList result;
@@ -130,12 +148,14 @@ bool OpenListInstaller::install(const QString &file,bool module,const QString &s
     command(Verify,m_adb,{"devices"},5000); return true;
 }
 void OpenListInstaller::command(Stage stage,const QString &program,const QStringList &args,int timeout) {
+    m_logPending.clear(); m_receivedOutput = false;
     m_stage = stage; m_runner->run(program,args,timeout);
 }
 void OpenListInstaller::adb(Stage stage,const QStringList &args,int timeout) {
     command(stage,m_adb,QStringList{"-s",m_serial} + args,timeout);
 }
 void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
+    streamLog(m_receivedOutput ? QString() : out,true);
     if (m_stage == Idle || m_stage == RootChoice) return;
     if (m_stage == Discover) {
         const auto serials = authorizedDevices(out);
@@ -156,8 +176,6 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
         else if (m_stage == ZipList || m_stage == ZipTest || m_stage == ZipProperties) reason = QStringLiteral("模块 ZIP 无效、损坏或无法检查。");
         else if (m_stage == Verify) reason = QStringLiteral("安装前设备重新检测失败。");
         else reason = QStringLiteral("安装器执行失败或结果无法确认。");
-        const QString detail = OpenList::redact(out);
-        if (m_stage == ApkInstall || m_stage == ModuleInstall) emit log(detail);
         if (m_remoteTouched) cleanRemote(false,reason); else end(false,reason);
         return;
     }
@@ -168,13 +186,13 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
     case Verify:
         if (!authorizedDevices(out).contains(m_serial)) { end(false,QStringLiteral("原目标手机已断开或未授权，不会切换设备。")); break; }
         if (!m_module) probeApkRoot();
-        else command(ZipList,m_sevenZip,{"l","-slt","-ba","-pOrangeOpenListNoPassword","--",m_file},60000);
+        else command(ZipList,m_sevenZip,{"l","-sccUTF-8","-slt","-ba","-pOrangeOpenListNoPassword","--",m_file},60000);
         break;
     case ZipList:
         if (!validModuleListing(out)) { end(false,QStringLiteral("不是有效 Root 模块：需要唯一的根目录 module.prop，且不能加密。")); break; }
-        command(ZipTest,m_sevenZip,{"t","-bd","-pOrangeOpenListNoPassword","--",m_file},60000); break;
+        command(ZipTest,m_sevenZip,{"t","-sccUTF-8","-bd","-pOrangeOpenListNoPassword","--",m_file},60000); break;
     case ZipTest:
-        command(ZipProperties,m_sevenZip,{"e","-so","-pOrangeOpenListNoPassword","--",m_file,"module.prop"},60000); break;
+        command(ZipProperties,m_sevenZip,{"e","-sccUTF-8","-so","-pOrangeOpenListNoPassword","--",m_file,"module.prop"},60000); break;
     case ZipProperties:
         if (!validModuleProperties(out)) { end(false,QStringLiteral("模块描述缺少有效 id 或 name，拒绝安装。")); break; }
         m_canTransferFailure = true;
@@ -221,7 +239,6 @@ bool OpenListInstaller::handleApkRoot(int code,bool normal,const QString &out) {
         if (success(code,normal,out,false) && out.split(QRegularExpression("[\\r\\n]+"),Qt::SkipEmptyParts).contains("0")) {
             m_canTransferFailure = true;
             m_remoteTouched = true;
-            emit log(QStringLiteral("已获得 Shell Root 权限，使用“APK安装”方式：推送后执行 pm install -r。"));
             adb(ApkRootPush,{"push",m_file,m_remote});
         } else if (m_apkRootMode != SuS) {
             m_apkRootMode = m_apkRootMode == ShellRoot ? SuC : SuS;
@@ -252,7 +269,6 @@ bool OpenListInstaller::handleApkRoot(int code,bool normal,const QString &out) {
             emit log(QStringLiteral("su -c 安装失败，尝试“APK安装”按钮的 su -s 兼容方式。"));
             adb(ApkRootInstall,{"shell",apkRootCommand("pm install -r " + ShellCommand::quote(m_remote))});
         } else {
-            emit log(OpenList::redact(out));
             cleanRemote(false,QStringLiteral("Root APK 安装失败或结果无法确认。"));
         }
         return true;
