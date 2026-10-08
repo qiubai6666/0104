@@ -9,3 +9,5 @@ HEADERS += $$PWD/../src/services/deviceoperationlease.h
 # No embedded platform-tools, no production ResourceExtractor. The tests supply isolated paths.
 
 include($$PWD/../protected-release.pri)
+
+include($$PWD/../src/ui/floatingmenu.pri)

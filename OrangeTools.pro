@@ -56,3 +56,5 @@ include($$PWD/protected-release.pri)
 HEADERS += $$PWD/src/app/encodedstring.h $$PWD/src/app/sensitivestrings.h
 
 include($$PWD/openlist.pri)
+
+include($$PWD/src/ui/floatingmenu.pri)

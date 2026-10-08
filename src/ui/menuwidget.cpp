@@ -27,24 +27,10 @@
 #include <QCloseEvent>
 #include <QPainter>
 #include <QIcon>
+#include <QLabel>
+#include <QEvent>
+#include <QStyle>
 
-namespace {
-// 子菜单关闭仅隐藏；再次点击时复用原窗口，保留进程、任务和界面状态。
-// prepare 在显示前定位窗口。
-template <typename Window, typename Prepare>
-void toggleWindow(Window *&window, Prepare prepare)
-{
-    if (window && window->isVisible()) {
-        window->hide();
-        return;
-    }
-    if (!window) {
-        window = new Window();
-    }
-    prepare(window);
-    window->show();
-}
-}
 
 MenuWidget::MenuWidget(QWidget *parent)
     : QWidget(parent)
@@ -75,7 +61,7 @@ MenuWidget::~MenuWidget()
     delete screenCastController;
     DeviceManager::instance()->releaseAdbOnlyMonitoring();
     const QList<QWidget *> windows = {
-        repairWindow, payloadWindow, deviceCheckWindow, configWindow
+        screenCastWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow
     };
     for (QWidget *window : windows) {
         if (window) {
@@ -92,21 +78,43 @@ MenuWidget::~MenuWidget()
 void MenuWidget::setupUI()
 {
     mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(0);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
-
-    QStringList buttonTexts = {
-        "投屏", "秋白工作室", "PAYLOAD", "提取IMG",
-        "设备检测", "配置", "联系作者", "退出", "收起"
-    };
-
-    buttons = UIHelper::createMenuButtons(this, mainLayout, buttonTexts);
-    for (QPushButton *button : buttons) {
+    mainLayout->setSpacing(3);
+    mainLayout->setContentsMargins(5, 12, 5, 12);
+    setFixedWidth(58);
+    UIHelper::applyFloatingSurface(this, true);
+    const QStringList labels = {"投屏", "秋白工作室", "PAYLOAD", "提取IMG",
+        "设备检测", "配置", "联系作者", "退出", "收起"};
+    const QStringList icons = {"monitor-smartphone", "wrench", "package-open", "file-down",
+        "smartphone", "sliders-horizontal", "message-circle", "power", "panel-right-close"};
+    setStyleSheet(QStringLiteral(
+        "QPushButton {background:transparent; border:1px solid transparent; border-radius:18px; padding:0;}"
+        "QPushButton:hover {background:rgba(255,255,255,110);}"
+        "QPushButton:pressed {background:rgba(212,230,237,180);}"
+        "QPushButton[menuSelected=true] {background:rgba(255,255,255,210);}"
+        "QPushButton:focus {border:1px solid #83AECA;}"));
+    for (int index = 0; index < labels.size(); ++index) {
+        if (index == Exit) {
+            auto *line = new QWidget(this);
+            line->setFixedSize(32, 1);
+            line->setStyleSheet("background:rgba(146,166,181,100);");
+            mainLayout->addSpacing(5);
+            mainLayout->addWidget(line, 0, Qt::AlignHCenter);
+            mainLayout->addSpacing(5);
+        }
+        auto *button = new QPushButton(this);
+        button->setFixedSize(46, 39);
+        button->setIcon(UIHelper::menuIcon(icons[index], devicePixelRatioF()));
+        button->setIconSize(QSize(22, 22));
+        button->setToolTip(labels[index]);
+        button->setAccessibleName(labels[index]);
+        button->setObjectName(QString("menuAction%1").arg(index));
+        button->setCursor(Qt::PointingHandCursor);
+        mainLayout->addWidget(button, 0, Qt::AlignHCenter);
+        buttons.append(button);
         connect(button, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
     }
-
+    setupScreenCastWindow();
     buttons[ScreenCast]->setObjectName("screenCastButton");
-    buttons[ScreenCast]->setIconSize(QSize(24, 24));
     screenCastSpinnerTimer->setInterval(40);
     connect(screenCastSpinnerTimer, &QTimer::timeout, this, [this] {
         screenCastSpinnerAngle = (screenCastSpinnerAngle + 16) % 360;
@@ -115,13 +123,81 @@ void MenuWidget::setupUI()
     connect(screenCastController, &ScreenCastController::stateChanged,
             this, &MenuWidget::updateScreenCastButton);
     updateScreenCastButton();
+}
 
-    setStyleSheet(
-        "MenuWidget {"
-        "   background-color: rgba(195, 219, 228, 245);"
-        "   border-radius: 10px;"
-        "}"
-    );
+void MenuWidget::setupScreenCastWindow()
+{
+    screenCastWindow = new QWidget;
+    screenCastWindow->setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    screenCastWindow->setWindowTitle(QStringLiteral("手机投屏"));
+    screenCastWindow->setFixedWidth(318);
+    UIHelper::applyFloatingSurface(screenCastWindow);
+    screenCastWindow->installEventFilter(this);
+    auto *layout = new QVBoxLayout(screenCastWindow);
+    layout->setContentsMargins(22, 20, 22, 20);
+    layout->setSpacing(12);
+    auto *title = new QLabel(QStringLiteral("手机投屏"), screenCastWindow);
+    title->setStyleSheet("background:transparent; color:#2c3e50; font-size:17px;");
+    layout->addWidget(title);
+    screenCastStatusLabel = new QLabel(screenCastWindow);
+    screenCastStatusLabel->setWordWrap(true);
+    screenCastStatusLabel->setStyleSheet("background:transparent; color:#71808d; font-size:12px;");
+    layout->addWidget(screenCastStatusLabel);
+    screenCastActionButton = new QPushButton(screenCastWindow);
+    screenCastActionButton->setObjectName("screenCastActionButton");
+    screenCastActionButton->setStyleSheet(UIHelper::getStandardButtonStyle());
+    screenCastActionButton->setMinimumHeight(36);
+    screenCastActionButton->setCursor(Qt::PointingHandCursor);
+    layout->addWidget(screenCastActionButton, 0, Qt::AlignLeft);
+    connect(screenCastActionButton, &QPushButton::clicked, screenCastController, &ScreenCastController::toggle);
+    screenCastWindow->adjustSize();
+}
+
+void MenuWidget::toggleSubmenu(MenuAction action, QWidget *window)
+{
+    const bool wasVisible = window->isVisible() && !window->isMinimized();
+    const QList<QWidget *> windows = {screenCastWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow};
+    for (QWidget *other : windows) if (other && other != window) other->hide();
+    if (wasVisible) window->hide();
+    else {
+        window->installEventFilter(this);
+        UIHelper::positionDrawer(window, geometry());
+        window->showNormal();
+        window->raise();
+        window->activateWindow();
+    }
+    Q_UNUSED(action);
+    updateMenuSelection();
+}
+
+void MenuWidget::updateMenuSelection()
+{
+    const QList<QPair<MenuAction, QWidget *>> windows = {
+        {ScreenCast, screenCastWindow}, {RepairTools, repairWindow}, {Payload, payloadWindow},
+        {DeviceCheck, deviceCheckWindow}, {Configuration, configWindow}};
+    for (const auto &entry : windows) {
+        const bool selected = entry.second && entry.second->isVisible() && !entry.second->isMinimized();
+        auto *button = buttons[entry.first];
+        button->setProperty("menuSelected", selected);
+        button->style()->unpolish(button);
+        button->style()->polish(button);
+        button->update();
+    }
+}
+
+bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched != this && (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+                           event->type() == QEvent::WindowStateChange)) {
+        updateMenuSelection();
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void MenuWidget::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange && !isMinimized()) updateMenuSelection();
 }
 
 void MenuWidget::updateScreenCastButton()
@@ -136,14 +212,21 @@ void MenuWidget::updateScreenCastButton()
     button->setEnabled(true);
     button->setAccessibleName(QStringLiteral("投屏"));
     button->setAccessibleDescription(screenCastController->statusText());
+    screenCastStatusLabel->setText(screenCastController->statusText());
+    const QString action = state == ScreenCastController::WaitingForDevice ? QStringLiteral("取消等待")
+        : state == ScreenCastController::Starting ? QStringLiteral("取消启动")
+        : state == ScreenCastController::Streaming || state == ScreenCastController::Stopping ? QStringLiteral("停止投屏")
+        : QStringLiteral("开始投屏");
+    screenCastActionButton->setText(action);
+    if (screenCastWindow->isVisible()) UIHelper::positionDrawer(screenCastWindow, geometry());
     if (loading) {
         button->setText(QString());
         paintScreenCastSpinner();
         screenCastSpinnerTimer->start();
     } else {
         screenCastSpinnerTimer->stop();
-        button->setIcon(QIcon());
-        button->setText(QStringLiteral("投屏"));
+        button->setIcon(UIHelper::menuIcon(QStringLiteral("monitor-smartphone"), devicePixelRatioF()));
+        button->setText(QString());
     }
 }
 
@@ -166,18 +249,11 @@ void MenuWidget::paintScreenCastSpinner()
 
 void MenuWidget::updatePosition()
 {
-    // 获取屏幕尺寸
     QScreen *screen = QGuiApplication::primaryScreen();
-    QRect screenGeometry = screen->geometry();
-
-    // 调整窗口大小以适应内容
+    if (!screen) return;
     adjustSize();
-
-    // 计算位置：屏幕最右侧，垂直居中
-    int x = screenGeometry.width() - width(); // 紧贴右边缘
-    int y = (screenGeometry.height() - height()) / 2;
-
-    move(x, y);
+    const QRect area = screen->availableGeometry();
+    move(area.right() - width() - 15, area.center().y() - height() / 2);
 }
 
 void MenuWidget::onButtonClicked()
@@ -190,28 +266,26 @@ void MenuWidget::onButtonClicked()
 
     switch (static_cast<MenuAction>(index)) {
     case ScreenCast:
-        screenCastController->toggle();
+        toggleSubmenu(ScreenCast, screenCastWindow);
         break;
     case RepairTools:
-        toggleWindow(repairWindow, [this](RepairWindow *window) {
-            window->setPosition(x(), y(), height());
-        });
+        if (!repairWindow) repairWindow = new RepairWindow();
+        toggleSubmenu(RepairTools, repairWindow);
         break;
     case Payload:
-        toggleWindow(payloadWindow, [](PayloadWindow *) {});
+        if (!payloadWindow) payloadWindow = new PayloadWindow();
+        toggleSubmenu(Payload, payloadWindow);
         break;
     case ExtractImg:
         extractImg();
         break;
     case DeviceCheck:
-        toggleWindow(deviceCheckWindow, [this](DeviceCheckWindow *window) {
-            window->setPosition(x(), y(), height());
-        });
+        if (!deviceCheckWindow) deviceCheckWindow = new DeviceCheckWindow();
+        toggleSubmenu(DeviceCheck, deviceCheckWindow);
         break;
     case Configuration:
-        toggleWindow(configWindow, [this](ConfigWindow *window) {
-            window->setPosition(x(), y(), height());
-        });
+        if (!configWindow) configWindow = new ConfigWindow();
+        toggleSubmenu(Configuration, configWindow);
         break;
     case ContactAuthor:
         openAuthorImage();
@@ -254,7 +328,7 @@ void MenuWidget::openAuthorImage()
 void MenuWidget::minimizeWindows()
 {
     const QList<QWidget *> windows = {
-        repairWindow, payloadWindow, deviceCheckWindow, configWindow
+        screenCastWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow
     };
     for (QWidget *window : windows) {
         if (window && window->isVisible()) {
@@ -277,14 +351,14 @@ void MenuWidget::extractImg()
 
     // 禁用提取IMG按钮
     buttons[ExtractImg]->setEnabled(false);
-    buttons[ExtractImg]->setText("检索中...");
+    buttons[ExtractImg]->setToolTip("检索中...");
 
     // 创建进程对象
     if (imgProcess) {
         imgProcess->deleteLater();
     }
     imgProcess = ProcessManager::createProcess(this);
-    connect(imgProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) { DeviceOperationLease::release(this); buttons[ExtractImg]->setEnabled(true); buttons[ExtractImg]->setText("提取IMG"); } });
+    connect(imgProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) { DeviceOperationLease::release(this); buttons[ExtractImg]->setEnabled(true); buttons[ExtractImg]->setToolTip("提取IMG"); } });
     imgProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     QString adbPath = ResourceExtractor::getAdbPath();
@@ -307,7 +381,7 @@ void MenuWidget::onLsProcessFinished(int exitCode, QProcess::ExitStatus)
     if (files.isEmpty()) {
         DeviceOperationLease::release(this);
         buttons[ExtractImg]->setEnabled(true);
-        buttons[ExtractImg]->setText("提取IMG");
+        buttons[ExtractImg]->setToolTip("提取IMG");
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "手机 /sdcard/Download 目录下没有 .img 文件。");
         return;
     }
@@ -323,7 +397,7 @@ void MenuWidget::onLsProcessFinished(int exitCode, QProcess::ExitStatus)
         dir.mkpath(imgOutputPath);
     }
 
-    buttons[ExtractImg]->setText("提取中...");
+    buttons[ExtractImg]->setToolTip("提取中...");
 
     QString adbPath = ResourceExtractor::getAdbPath();
 
@@ -340,7 +414,7 @@ void MenuWidget::onPullProcessFinished(int exitCode, QProcess::ExitStatus)
     disconnect(imgProcess, nullptr, this, nullptr);
 
     buttons[ExtractImg]->setEnabled(true);
-    buttons[ExtractImg]->setText("提取IMG");
+    buttons[ExtractImg]->setToolTip("提取IMG");
 
     if (exitCode == 0) {
         // 提取成功，直接打开 IMG 文件夹

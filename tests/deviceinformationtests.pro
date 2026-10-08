@@ -19,3 +19,5 @@ HEADERS += $$PWD/../src/services/devicemanager.h \
     $$PWD/../src/ui/uihelper.h
 
 include($$PWD/../protected-release.pri)
+
+include($$PWD/../src/ui/floatingmenu.pri)

@@ -22,3 +22,5 @@ include($$PWD/../protected-release.pri)
 
 SOURCES += $$PWD/../src/services/resourceextractor.cpp $$PWD/../src/services/integritychecker.cpp
 INCLUDEPATH += $$PWD/../src/services
+
+include($$PWD/../src/ui/floatingmenu.pri)

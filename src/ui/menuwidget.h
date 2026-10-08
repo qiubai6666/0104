@@ -9,6 +9,7 @@ class QPushButton;
 class QVBoxLayout;
 class ScreenCastController;
 class QTimer;
+class QLabel;
 class RepairWindow;
 class PayloadWindow;
 class DeviceCheckWindow;
@@ -24,6 +25,8 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private slots:
     void onButtonClicked();
@@ -43,6 +46,9 @@ private:
     void updateScreenCastButton();
     void paintScreenCastSpinner();
     void setupUI();
+    void setupScreenCastWindow();
+    void toggleSubmenu(MenuAction action, QWidget *window);
+    void updateMenuSelection();
     void updatePosition();
     void extractImg();
     void cleanupAndExit();
@@ -54,6 +60,9 @@ private:
     ScreenCastController *screenCastController;
     QTimer *screenCastSpinnerTimer;
     int screenCastSpinnerAngle = 0;
+    QWidget *screenCastWindow = nullptr;
+    QPushButton *screenCastActionButton = nullptr;
+    QLabel *screenCastStatusLabel = nullptr;
     RepairWindow *repairWindow;
     PayloadWindow *payloadWindow;
     DeviceCheckWindow *deviceCheckWindow;

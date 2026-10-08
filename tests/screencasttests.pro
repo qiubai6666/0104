@@ -32,3 +32,5 @@ include($$PWD/../xiaomi.pri)
 include($$PWD/../protected-release.pri)
 
 include($$PWD/../openlist.pri)
+
+include($$PWD/../src/ui/floatingmenu.pri)

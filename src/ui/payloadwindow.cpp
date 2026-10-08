@@ -1,6 +1,7 @@
 #include "processmanager.h"
 #include "payloadwindow.h"
 #include "resourceextractor.h"
+#include "uihelper.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QScreen>
@@ -61,20 +62,11 @@ PayloadWindow::PayloadWindow(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Payload 提取");
-    setFixedSize(450, 252);
-    
-    // 无边框窗口，启用透明背景
-    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    setAttribute(Qt::WA_TranslucentBackground);
-    
+    setFixedWidth(318);
+    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    UIHelper::applyFloatingSurface(this);
     setupUI();
-    
-    // 窗口在屏幕中央显示
-    QScreen *screen = QGuiApplication::primaryScreen();
-    QRect screenGeometry = screen->geometry();
-    int x = (screenGeometry.width() - width()) / 2;
-    int y = (screenGeometry.height() - height()) / 2;
-    move(x, y);
+    adjustSize();
 }
 
 PayloadWindow::~PayloadWindow()
@@ -83,38 +75,14 @@ PayloadWindow::~PayloadWindow()
 
 void PayloadWindow::setupUI()
 {
-    // 创建主容器
-    QWidget *container = new QWidget(this);
-    container->setObjectName("payloadSurface");
-    container->setGeometry(rect());
-    container->setStyleSheet(R"(
-        QWidget#payloadSurface {
-            background-color: #FFFFFF;
-            border: 1px solid #D6E2EE;
-            border-radius: 12px;
-        }
-    )");
-    
-    QVBoxLayout *mainLayout = new QVBoxLayout(container);
-    mainLayout->setContentsMargins(20, 16, 20, 16);
+    QWidget *container = this;
+    QVBoxLayout *mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(22, 20, 22, 20);
     mainLayout->setSpacing(8);
-    
-    // 标题
     QLabel *titleLabel = new QLabel("Payload 分区提取", container);
-    titleLabel->setStyleSheet(R"(
-        QLabel {
-            font-size: 16px;
-            font-weight: bold;
-            color: #2c3e50;
-            background: #F3F7FC;
-            border: 1px solid #E7EEF6;
-            border-radius: 8px;
-            padding: 4px 0;
-        }
-    )");
-    titleLabel->setAlignment(Qt::AlignCenter);
+    titleLabel->setStyleSheet("color:#2c3e50; background:transparent; font-size:17px; font-weight:normal;");
     mainLayout->addWidget(titleLabel);
-    
+    mainLayout->addSpacing(5);
     // URL 输入
     QLabel *urlLabel = new QLabel("Payload 链接：", container);
     urlLabel->setStyleSheet("QLabel { color: #2c3e50; background: transparent; font-size: 13px; }");
@@ -196,13 +164,13 @@ void PayloadWindow::setupUI()
     cancelButton->setCursor(Qt::PointingHandCursor);
     cancelButton->setStyleSheet(R"(
         QPushButton {
-            padding: 6px 20px;
+            padding: 6px 12px;
             background-color: #F3F7FB;
             color: #2c3e50;
             border: 1px solid #D0DEEB;
             border-radius: 6px;
             font-size: 13px;
-            font-weight: bold;
+            font-weight: normal;
         }
         QPushButton:hover {
             background-color: #EAF2F9;
@@ -220,13 +188,13 @@ void PayloadWindow::setupUI()
     extractButton->setCursor(Qt::PointingHandCursor);
     extractButton->setStyleSheet(R"(
         QPushButton {
-            padding: 6px 20px;
+            padding: 6px 12px;
             background-color: #649EB3;
             color: white;
             border: 1px solid #D0DEEB;
             border-radius: 6px;
             font-size: 13px;
-            font-weight: bold;
+            font-weight: normal;
         }
         QPushButton:hover {
             background-color: #578FA6;

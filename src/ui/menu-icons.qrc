@@ -1,0 +1,13 @@
+<RCC>
+  <qresource prefix="/menu-icons">
+    <file alias="monitor-smartphone.svg">../../assets/menu/monitor-smartphone.svg</file>
+    <file alias="wrench.svg">../../assets/menu/wrench.svg</file>
+    <file alias="package-open.svg">../../assets/menu/package-open.svg</file>
+    <file alias="file-down.svg">../../assets/menu/file-down.svg</file>
+    <file alias="smartphone.svg">../../assets/menu/smartphone.svg</file>
+    <file alias="sliders-horizontal.svg">../../assets/menu/sliders-horizontal.svg</file>
+    <file alias="message-circle.svg">../../assets/menu/message-circle.svg</file>
+    <file alias="power.svg">../../assets/menu/power.svg</file>
+    <file alias="panel-right-close.svg">../../assets/menu/panel-right-close.svg</file>
+  </qresource>
+</RCC>

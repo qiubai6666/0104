@@ -107,31 +107,18 @@ void ConfigWindow::setupUI()
     buttonTexts.append("123网盘");
     buttonTexts.append("打开NDM");
 
-    buttons = UIHelper::createMenuButtons(this, mainLayout, buttonTexts);
+    buttons = UIHelper::createDrawerButtons(this, mainLayout,
+        QStringLiteral("配置与工具"), QStringLiteral(""), buttonTexts,
+        6, QStringLiteral("下载资源"), QStringLiteral("外部工具"));
     for (QPushButton *button : buttons) {
         connect(button, &QPushButton::clicked, this, &ConfigWindow::onButtonClicked);
     }
 
-    setStyleSheet(
-        "ConfigWindow {"
-        "   background-color: rgba(195, 219, 228, 245);"
-        "   border-radius: 10px;"
-        "}"
-    );
-
-    // 调整窗口大小
-    adjustSize();
 }
 
 void ConfigWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight)
 {
-    Q_UNUSED(mainMenuHeight);
-
-    // 计算位置：主菜单左侧，顶部对齐，无间隔
-    int x = mainMenuX - width();  // 紧贴主菜单左侧
-    int y = mainMenuY;  // 顶部对齐
-
-    move(x, y);
+    UIHelper::positionDrawer(this, QRect(mainMenuX, mainMenuY, 58, mainMenuHeight));
 }
 
 void ConfigWindow::onButtonClicked()

@@ -6,6 +6,7 @@
 #include <QVector>
 #include <QMessageBox>
 #include <QWidget>
+#include <QIcon>
 
 class QPushButton;
 class QVBoxLayout;
@@ -26,6 +27,15 @@ public:
 
     // 获取普通按钮样式
     static QString getStandardButtonStyle();
+
+    // Paint only the background alpha; text and controls remain fully readable.
+    static void applyFloatingSurface(QWidget *window, bool capsule = false);
+    static QIcon menuIcon(const QString &name, qreal devicePixelRatio = 1.0);
+    static QString textButtonStyle();
+    static QVector<QPushButton *> createDrawerButtons(QWidget *parent, QVBoxLayout *layout,
+        const QString &title, const QString &subtitle, const QStringList &texts,
+        int splitIndex, const QString &firstGroup, const QString &secondGroup);
+    static void positionDrawer(QWidget *window, const QRect &menuGeometry);
 
     // 显示居中的消息框
     static void showCenteredMessageBox(QMessageBox::Icon icon,

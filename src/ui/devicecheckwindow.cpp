@@ -388,36 +388,22 @@ void DeviceCheckWindow::finishFileTransfer(const QString &interruption)
 
 void DeviceCheckWindow::setupUI()
 {
-    setFixedSize(252, UIHelper::MenuButtonHeight * 9);  // 显示前再同步主菜单实际高度
-    
-    // 创建主容器
-    QWidget *container = new QWidget(this);
-    container->setObjectName("deviceCheckSurface");
-    QVBoxLayout *windowLayout = new QVBoxLayout(this);
-    windowLayout->setContentsMargins(0, 0, 0, 0);
-    windowLayout->setSpacing(0);
-    windowLayout->addWidget(container);
-    container->setStyleSheet(
-        "QWidget#deviceCheckSurface {"
-        "   background-color: #FFFFFF;"
-        "   border: 1px solid #D6E2EE;"
-        "   border-radius: 12px;"
-        "}"
-    );
-    
-    mainLayout = new QVBoxLayout(container);
-    mainLayout->setSpacing(0);
-    mainLayout->setContentsMargins(12, 12, 12, 12);
-    
+    setFixedWidth(318);
+    UIHelper::applyFloatingSurface(this);
+    QWidget *container = this;
+    mainLayout = new QVBoxLayout(this);
+    mainLayout->setSpacing(8);
+    mainLayout->setContentsMargins(22, 20, 22, 20);
+
     // 标题去掉独立边框，避免小窗口内重复套卡。
     QLabel *titleLabel = new QLabel("设备检测", container);
-    titleLabel->setAlignment(Qt::AlignCenter);
+    titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     titleLabel->setFixedHeight(28);
     titleLabel->setStyleSheet(
         "QLabel {"
         "   color: #2c3e50;"
-        "   font-size: 15px;"
-        "   font-weight: bold;"
+        "   font-size: 17px;"
+        "   font-weight: normal;"
         "   background: transparent;"
         "   border: none;"
         "}"
@@ -428,27 +414,27 @@ void DeviceCheckWindow::setupUI()
     // 单一浅蓝信息面板，细色带区分信息与操作，不使用图标或表情。
     QWidget *statusCard = new QWidget(container);
     statusCard->setObjectName("deviceStatusCard");
-    statusCard->setFixedHeight(120);  // 足够容纳五行信息，连接前后保持相同尺寸
+    statusCard->setMinimumHeight(106);  // 足够容纳五行信息，连接前后保持相同尺寸
     statusCard->setStyleSheet(
         "QWidget#deviceStatusCard {"
-        "   background-color: #F3F7FC;"
+        "   background-color: rgba(234,243,246,120);"
         "   border: none;"
-        "   border-left: 3px solid #83AECA;"
+        "   border-left: none;"
         "   border-radius: 8px;"
         "}"
     );
     QVBoxLayout *statusLayout = new QVBoxLayout(statusCard);
     statusLayout->setSpacing(4);
-    statusLayout->setContentsMargins(12, 7, 12, 7);
+    statusLayout->setContentsMargins(0, 5, 0, 5);
     
     statusLabel = new QLabel("检测中...", statusCard);
-    statusLabel->setAlignment(Qt::AlignCenter);
+    statusLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     statusLabel->setFixedHeight(25);  // 固定状态标签高度
     statusLabel->setStyleSheet(
         "QLabel {"
         "   color: #2c3e50;"
         "   font-size: 13px;"
-        "   font-weight: bold;"
+        "   font-weight: normal;"
         "   background: transparent;"
         "   border-bottom: 1px solid #E7EEF6;"
         "}"
@@ -460,12 +446,12 @@ void DeviceCheckWindow::setupUI()
     infoLabel->setWordWrap(true);
     infoLabel->setCursor(Qt::PointingHandCursor);
     infoLabel->installEventFilter(this);
-    infoLabel->setMinimumHeight(76);  // 容纳多行设备信息，不添加滚动区域
+    infoLabel->setMinimumHeight(66);  // 容纳多行设备信息，不添加滚动区域
     infoLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     infoLabel->setStyleSheet(
         "QLabel {"
         "   color: #555;"
-        "   font-size: 10px;"
+        "   font-size: 12px;"
         "   background: transparent;"
         "   padding: 3px;"
         "   line-height: 1.3;"
@@ -474,7 +460,7 @@ void DeviceCheckWindow::setupUI()
     statusLayout->addWidget(infoLabel);
     
     mainLayout->addWidget(statusCard);
-    mainLayout->addStretch(1);
+
     
     // 标签和下拉框作为一个整体参与均匀分布
     QVBoxLayout *rebootLayout = new QVBoxLayout();
@@ -486,7 +472,7 @@ void DeviceCheckWindow::setupUI()
         "QLabel {"
         "   color: #2c3e50;"
         "   font-size: 13px;"
-        "   font-weight: bold;"
+        "   font-weight: normal;"
         "   background: transparent;"
         "}"
     );
@@ -554,7 +540,7 @@ void DeviceCheckWindow::setupUI()
     );
     rebootLayout->addWidget(rebootComboBox);
     mainLayout->addLayout(rebootLayout);
-    mainLayout->addStretch(1);
+
     
     // 与 PAYLOAD「开始提取」采用同一套按钮色板，仅保留各按钮原文字颜色。
     const QString actionButtonStyle = QStringLiteral(
@@ -564,7 +550,7 @@ void DeviceCheckWindow::setupUI()
         "   border: 1px solid #649EB3;"
         "   border-radius: 8px;"
         "   font-size: 13px;"
-        "   font-weight: bold;"
+        "   font-weight: normal;"
         "   padding: 4px;"
         "}"
         "QPushButton:hover { background-color: #578FA6; }"
@@ -593,8 +579,10 @@ void DeviceCheckWindow::setupUI()
     executeButton->setStyleSheet(actionButtonStyle +
         "QPushButton:disabled { color: rgba(255, 255, 255, 150); }");
     connect(executeButton, &QPushButton::clicked, this, &DeviceCheckWindow::onRebootButtonClicked);
-    mainLayout->addWidget(executeButton);
-    mainLayout->addStretch(1);
+    QHBoxLayout *actionRow = new QHBoxLayout;
+    actionRow->setSpacing(8);
+    actionRow->addWidget(executeButton);
+
     
     // 打开CMD按钮
     cmdButton = new QPushButton("打开CMD", container);
@@ -602,8 +590,9 @@ void DeviceCheckWindow::setupUI()
     cmdButton->setCursor(Qt::PointingHandCursor);
     cmdButton->setStyleSheet(utilityButtonStyle);
     connect(cmdButton, &QPushButton::clicked, this, &DeviceCheckWindow::onOpenCmdClicked);
-    mainLayout->addWidget(cmdButton);
-    mainLayout->addStretch(1);
+    actionRow->addWidget(cmdButton);
+    mainLayout->addLayout(actionRow);
+
     
     // 底部刷入区用一条轻分隔线收尾，按钮仍与菜单底边保持固定距离。
     QWidget *footerDivider = new QWidget(container);
@@ -623,14 +612,14 @@ void DeviceCheckWindow::setupUI()
     bootButton = new QPushButton("刷入Boot", flashWidget);
     bootButton->setFixedHeight(34);
     bootButton->setCursor(Qt::PointingHandCursor);
-    bootButton->setStyleSheet(actionButtonStyle);
+    bootButton->setStyleSheet(UIHelper::textButtonStyle());
     connect(bootButton, &QPushButton::clicked, this, &DeviceCheckWindow::onFlashBootClicked);
     flashLayout->addWidget(bootButton);
     
     initBootButton = new QPushButton("刷入Init_Boot", flashWidget);
     initBootButton->setFixedHeight(34);
     initBootButton->setCursor(Qt::PointingHandCursor);
-    initBootButton->setStyleSheet(actionButtonStyle);
+    initBootButton->setStyleSheet(UIHelper::textButtonStyle());
     connect(initBootButton, &QPushButton::clicked, this, &DeviceCheckWindow::onFlashInitBootClicked);
     flashLayout->addWidget(initBootButton);
     
@@ -640,12 +629,7 @@ void DeviceCheckWindow::setupUI()
 
 void DeviceCheckWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight)
 {
-    // 按实际菜单高度同步，上下边缘始终对齐。
-    setFixedHeight(mainMenuHeight);
-    // 窗口紧靠主菜单左侧
-    int x = mainMenuX - width();
-    int y = mainMenuY;
-    move(x, y);
+    UIHelper::positionDrawer(this, QRect(mainMenuX, mainMenuY, 58, mainMenuHeight));
 }
 
 bool DeviceCheckWindow::eventFilter(QObject *watched, QEvent *event)

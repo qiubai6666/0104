@@ -75,31 +75,18 @@ void RepairWindow::setupUI()
         "Openlist"
     };
 
-    buttons = UIHelper::createMenuButtons(this, mainLayout, buttonTexts);
+    buttons = UIHelper::createDrawerButtons(this, mainLayout,
+        QStringLiteral("修复工具"), QStringLiteral("秋白工作室"), buttonTexts,
+        4, QStringLiteral("维护"), QStringLiteral("线刷与资源"));
     for (QPushButton *button : buttons) {
         connect(button, &QPushButton::clicked, this, &RepairWindow::onButtonClicked);
     }
 
-    setStyleSheet(
-        "RepairWindow {"
-        "   background-color: rgba(195, 219, 228, 245);"
-        "   border-radius: 10px;"
-        "}"
-    );
-
-    // 调整窗口大小
-    adjustSize();
 }
 
 void RepairWindow::setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight)
 {
-    Q_UNUSED(mainMenuHeight);
-
-    // 计算位置：主菜单左侧，顶部对齐，无间隔
-    int x = mainMenuX - width();  // 紧贴主菜单左侧
-    int y = mainMenuY;  // 顶部对齐
-
-    move(x, y);
+    UIHelper::positionDrawer(this, QRect(mainMenuX, mainMenuY, 58, mainMenuHeight));
 }
 
 void RepairWindow::onButtonClicked()
