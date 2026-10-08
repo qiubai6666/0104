@@ -68,8 +68,27 @@ void MtManagerService::startDownload(const QUrl &url, const QString &version) {
     if (!m_file.open(QIODevice::WriteOnly)) { finishFailure(QStringLiteral("无法创建 MT 管理器下载文件。")); return; }
     QNetworkRequest req(url); req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("OrangeTools/1.0"));
     m_reply = m_network.get(req); m_clock.start();
-    connect(m_reply, &QNetworkReply::readyRead, this, [this] { if (m_reply) { const auto data = m_reply->readAll(); m_file.write(data); m_received += data.size(); emit progress(m_received,m_total,m_clock.elapsed()>0 ? m_received*1000.0/m_clock.elapsed() : 0); } });
-    connect(m_reply, &QNetworkReply::downloadProgress, this, [this](qint64 r,qint64 t) { m_total=t; emit progress(m_received,t,m_clock.elapsed()>0 ? m_received*1000.0/m_clock.elapsed() : 0); });
+    connect(m_reply, &QNetworkReply::metaDataChanged, this, [this] {
+        if (!m_reply) return;
+        const QVariant length = m_reply->header(QNetworkRequest::ContentLengthHeader);
+        if (length.isValid() && length.toLongLong() > 0) {
+            m_total = length.toLongLong();
+            emit progress(m_received, m_total, m_clock.elapsed() > 0 ? m_received * 1000.0 / m_clock.elapsed() : 0);
+        }
+    });
+    connect(m_reply, &QNetworkReply::readyRead, this, [this] {
+        if (!m_reply) return;
+        const auto data = m_reply->readAll();
+        if (!data.isEmpty()) {
+            m_file.write(data); m_received += data.size();
+            emit progress(m_received, m_total, m_clock.elapsed() > 0 ? m_received * 1000.0 / m_clock.elapsed() : 0);
+        }
+    });
+    connect(m_reply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
+        if (total > 0) m_total = total;
+        const qint64 shown = qMax(m_received, received);
+        emit progress(shown, m_total, m_clock.elapsed() > 0 ? shown * 1000.0 / m_clock.elapsed() : 0);
+    });
     connect(m_reply, &QNetworkReply::finished, this, [this] {
         if (!m_reply) return; const auto reply=m_reply; const bool ok=reply->error()==QNetworkReply::NoError; const auto tail=reply->readAll(); if (!tail.isEmpty()) { m_file.write(tail); m_received+=tail.size(); }
         reply->deleteLater(); m_reply=nullptr; m_file.close();
@@ -85,6 +104,7 @@ void MtManagerService::finishFailure(const QString &message) {
     m_active=false; emit failed(message);
 }
 void MtManagerService::cancel() { if (m_active) finishFailure(QStringLiteral("MT 管理器下载已取消。")); }
+
 
 
 
