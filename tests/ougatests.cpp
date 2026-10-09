@@ -67,6 +67,28 @@ bool put(const QString &p, const QByteArray &b) {
   QFile f(p);
   return f.open(QIODevice::WriteOnly) && f.write(b) == b.size();
 }
+class AuxiliaryFixture {
+public:
+  bool install(const QStringList &names) {
+    const QString directory = QCoreApplication::applicationDirPath() + "/tmp";
+    if (!QDir().mkpath(directory)) return false;
+    for (const QString &name : names) {
+      const QString file = directory + '/' + name + ".img";
+      previous[file] = QFileInfo::exists(file) ? read(file) : QByteArray();
+      const QByteArray reference = read(QFINDTESTDATA(qPrintable("../qiubai/tmp/" + name + ".img")));
+      if (reference.isEmpty() || !put(file, reference)) return false;
+    }
+    return true;
+  }
+  ~AuxiliaryFixture() {
+    for (auto it = previous.cbegin(); it != previous.cend(); ++it) {
+      if (it.value().isNull()) QFile::remove(it.key());
+      else put(it.key(), it.value());
+    }
+  }
+private:
+  QMap<QString, QByteArray> previous;
+};
 void le16(QByteArray &b, int at, quint16 v) {
   qToLittleEndian(v, reinterpret_cast<uchar *>(b.data() + at));
 }
@@ -881,22 +903,8 @@ private slots:
   void referenceWidgetSlotRefresh() {
     QFETCH(QString, scenario);
     QFETCH(int, mode);
-    QMap<QString, QByteArray> previousAuxiliary;
-    const QString auxiliaryDirectory = QCoreApplication::applicationDirPath() + "/tmp";
-    QVERIFY(QDir().mkpath(auxiliaryDirectory));
-    const auto restoreAuxiliary = qScopeGuard([&] {
-      for (auto it = previousAuxiliary.cbegin(); it != previousAuxiliary.cend(); ++it) {
-        if (it.value().isNull()) QFile::remove(it.key());
-        else put(it.key(), it.value());
-      }
-    });
-    for (const QString name : {"my_company", "my_preload"}) {
-      const QString file = auxiliaryDirectory + '/' + name + ".img";
-      previousAuxiliary[file] = QFileInfo::exists(file) ? read(file) : QByteArray();
-      const QByteArray reference = read(QFINDTESTDATA(qPrintable("../qiubai/tmp/" + name + ".img")));
-      QVERIFY(!reference.isEmpty());
-      QVERIFY(put(file, reference));
-    }
+    AuxiliaryFixture auxiliary;
+    QVERIFY(auxiliary.install({"my_company", "my_preload"}));
     FakeRunner runner;
     runner.multipleDevices = false;
     runner.slotOutput = [&](int query) {
@@ -3925,7 +3933,7 @@ private slots:
     QFETCH(QString, scenario);
     FakeRunner runner;
     runner.multipleDevices = false;
-    runner.device.userspace = scenario != "full-switch";
+    runner.device.userspace = scenario != "full-switch" && scenario != "repair";
     if (scenario == "locked") runner.device.unlocked = false;
     if (scenario == "unknown-unlock") runner.unlockedOutput = [] { return QString("USB Error"); };
     if (scenario == "unknown-slot") runner.device.slot.clear();
@@ -3933,8 +3941,9 @@ private slots:
     QSignalSpy done(&service, &OugaFlashService::finished);
     QSignalSpy ready(&service, &OugaFlashService::deviceReady);
     const bool independent = scenario == "sale-fbd" || scenario == "repair";
-    const std::optional<bool> required = scenario == "only-fbd" ? std::optional<bool>(true) : std::nullopt;
-    service.probe(runner.device.serial, !independent, required, scenario == "sale-fbd");
+    const std::optional<bool> required = scenario == "only-fbd" ? std::optional<bool>(true)
+        : scenario == "repair" ? std::optional<bool>(false) : std::nullopt;
+    service.probe(runner.device.serial, !independent, required, scenario == "sale-fbd", scenario == "repair");
     QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 2000);
     QVERIFY(done[0][0].toBool());
     QStringList expected = {"devices", "devices", "devices"};
@@ -3945,7 +3954,7 @@ private slots:
         expected << "getvar current-slot";
         if (scenario != "unknown-slot") expected << "getvar is-userspace";
       }
-    } else {
+    } else if (scenario != "repair") {
       expected << "getvar is-userspace";
       if (scenario == "sale-fbd") expected << "getvar current-slot";
     }
@@ -7341,8 +7350,173 @@ private slots:
             << platform << QString("mixed") << int(mode);
     }
   }
+  void referenceEarlyAuxiliaryCheck_data() {
+    QTest::addColumn<int>("mode");
+    QTest::addColumn<bool>("singleMissing");
+    for (FlashMode mode : {FlashMode::BothSlots, FlashMode::Force, FlashMode::OnlyFastbootd})
+      for (bool single : {false, true})
+        QTest::newRow(qPrintable(QString::number(int(mode)) + (single ? "-single" : "-both")))
+            << int(mode) << single;
+  }
+  void referenceEarlyAuxiliaryCheck() {
+    QFETCH(int, mode); QFETCH(bool, singleMissing);
+    AuxiliaryFixture auxiliary;
+    QVERIFY(auxiliary.install({"my_company", "my_preload"}));
+    const QString tmp = QCoreApplication::applicationDirPath() + "/tmp/";
+    QVERIFY(QFile::remove(tmp + "my_preload.img"));
+    if (!singleMissing) QVERIFY(QFile::remove(tmp + "my_company.img"));
+    FakeRunner runner;
+    QVERIFY(put(dir + "/boot.img", QByteArray(512, 'b')));
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(dir);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    const FlashMode fm = FlashMode(mode);
+    window.findChild<QCheckBox *>(fm == FlashMode::BothSlots ? "FlashABCheckBox"
+        : fm == FlashMode::Force ? "FixSuperCheckBox" : "PureFBDCheckBox")->setChecked(true);
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, &window, [&] {
+      if (auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+        QCOMPARE(dialog->objectName(), QString("OugaTargetSlotDialog"));
+        QVERIFY(runner.trace.isEmpty());
+        dialog->accept();
+      }
+    });
+    answer.start(5);
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    QTRY_VERIFY(!window.isBusy());
+    answer.stop();
+    QVERIFY(runner.trace.isEmpty());
+    const QString expected = (fm == FlashMode::BothSlots ? QString("AB通刷")
+        : fm == FlashMode::Force ? QString("强力线刷") : QString("仅FBD线刷")) +
+        "必须额外刷写 " + (singleMissing ? QString() : QString("tmp\\my_company.img、")) +
+        "tmp\\my_preload.img，文件缺失，已终止任务.";
+    auto log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox");
+    QVERIFY2(log->toPlainText().contains(expected), qPrintable(log->toPlainText()));
+    const auto block = log->document()->find(expected).block();
+    QTextCursor color(block);
+    color.setPosition(block.position() + block.text().indexOf("tmp\\"));
+    color.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor);
+    QCOMPARE(color.charFormat().foreground().color(), QColor("#FF0000"));
+    QCOMPARE(log->toPlainText().count("刷写任务总结："), 1);
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void referenceFlashProgressReset_data() {
+    QTest::addColumn<bool>("restart");
+    QTest::newRow("delayed-reset") << false;
+    QTest::newRow("stale-reset-new-task") << true;
+  }
+  void referenceFlashProgressReset() {
+    QFETCH(bool, restart);
+    FakeRunner runner; runner.multipleDevices = false;
+    QVERIFY(put(dir + "/boot.img", QByteArray(512, 'b')));
+    QVERIFY(put(dir + "/xbl.img", QByteArray(512, 'x')));
+    const QString fake = dir + "/fake-fastboot.exe";
+    QVERIFY(put(fake, "Injected runner only"));
+    QSettings().setValue("Ouga/fastboot", fake);
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    configure(*window.findChild<OugaFlashService *>());
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(dir);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    window.findChild<QCheckBox *>("ClearDataCheckBox")->setChecked(false);
+    window.findChild<QCheckBox *>("AutoRebootOugaCheckBox")->setChecked(false);
+    auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+    runner.unlockedOutput = [&] {
+      progress->setValue(42); progress->setProperty("rate", "test-terminal");
+      return QString("unlocked: no");
+    };
+    auto start = window.findChild<QPushButton *>("StartFlashButton");
+    start->click();
+    QTRY_VERIFY(!window.isBusy());
+    QVERIFY(start->isEnabled());
+    QCOMPARE(progress->value(), 42);
+    QCOMPARE(progress->property("rate").toString(), QString("test-terminal"));
+    if (restart) {
+      runner.unlockedOutput = {}; runner.holdFlash = true;
+      start->click();
+      QTRY_VERIFY(runner.active && runner.trace.last().startsWith("flash "));
+      progress->setValue(17); progress->setProperty("rate", "new-task");
+    }
+    QTest::qWait(3200);
+    QCOMPARE(progress->value(), restart ? 17 : 0);
+    QCOMPARE(progress->property("rate").toString(), restart ? QString("new-task") : QString("0MB/s"));
+    if (restart) {
+      window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+      runner.complete(0, true, "OKAY\nFinished.");
+      QTRY_VERIFY(!window.isBusy());
+    }
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void referenceRepairWidgetLogs_data() {
+    QTest::addColumn<int>("platform"); QTest::addColumn<QString>("scenario");
+    for (int platform : {1, 2})
+      for (const QString scenario : {"success", "all-failed", "no-critical", "no-directory"})
+        QTest::newRow(qPrintable(QString::number(platform) + '-' + scenario)) << platform << scenario;
+  }
+  void referenceRepairWidgetLogs() {
+    QFETCH(int, platform); QFETCH(QString, scenario);
+    FakeRunner runner; runner.multipleDevices = false;
+    runner.device = fixtureDevice(Platform(platform), "a", false);
+    if (scenario == "all-failed") runner.failAt = "flash ";
+    QVERIFY(put(dir + "/boot.img", QByteArray(512, 'b')));
+    if (platform == int(Platform::MediaTek)) QVERIFY(put(dir + "/lk.img", QByteArray(512, 'l')));
+    const QString fake = dir + "/fake-fastboot.exe";
+    QVERIFY(put(fake, "Injected runner only"));
+    QSettings().setValue("Ouga/fastboot", fake);
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    configure(*window.findChild<OugaFlashService *>());
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    if (scenario != "no-directory") {
+      folder->setText(dir);
+      QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+      QTRY_VERIFY(!window.isBusy());
+    }
+    if (scenario == "no-critical") {
+      QVERIFY(QFile::remove(dir + "/boot.img"));
+      if (platform == int(Platform::MediaTek)) QVERIFY(QFile::remove(dir + "/lk.img"));
+    }
+    auto service = window.findChild<OugaFlashService *>();
+    bool resetBeforeReboot = false;
+    connect(service, &OugaFlashService::stepStarted, &window, [&](const QString &title) {
+      if (title != "重启设备到FastbootD") return;
+      auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+      resetBeforeReboot = progress->value() == 0 && progress->property("rate").toString() == "0MB/s";
+    });
+    window.findChild<QPushButton *>("FixFastbootDButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 5000);
+    const QString text = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
+    QVERIFY(text.contains("开始修复FastbootD..."));
+    QVERIFY(text.contains("等待Fastboot设备...OK"));
+    QVERIFY(text.contains("等待设备稳定...OK"));
+    QVERIFY(!text.contains("等待设备连接稳定..."));
+    QVERIFY(!runner.trace.contains("getvar unlocked"));
+    QVERIFY(!runner.trace.contains("getvar current-slot"));
+    QVERIFY(!runner.trace.contains("getvar all"));
+    QCOMPARE(runner.trace.contains("reboot fastboot"), scenario == "success");
+    if (scenario == "success") {
+      QVERIFY(resetBeforeReboot);
+      QVERIFY(text.contains("找到 " + QString::number(platform == int(Platform::MediaTek) ? 2 : 1) + " 个关键分区..."));
+      QVERIFY(text.indexOf("boot_b.img") < text.indexOf("警告: 未找到 dtbo 镜像文件，跳过"));
+      QVERIFY(text.contains("重启设备到FastbootD ...OK"));
+    } else if (scenario == "no-directory") {
+      QVERIFY(text.contains("错误: 请先选择解包好的镜像文件夹..."));
+      QVERIFY(!std::any_of(runner.trace.cbegin(), runner.trace.cend(), [](const QString &cmd) { return cmd.startsWith("flash "); }));
+    } else {
+      QVERIFY(text.contains("错误: 没有任何分区刷入成功，修复失败"));
+      if (scenario == "no-critical") QVERIFY(text.contains("找到 0 个关键分区..."));
+    }
+    auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+    QCOMPARE(progress->value(), 0);
+    QCOMPARE(progress->property("rate").toString(), QString("0MB/s"));
+    QVERIFY(!DeviceOperationLease::owner());
+  }
   void referenceProcessorGate() {
     QFETCH(int, platform); QFETCH(QString, scenario); QFETCH(int, mode);
+    AuxiliaryFixture auxiliary;
+    QVERIFY(auxiliary.install({"my_company", "my_preload"}));
     const Platform pf = Platform(platform);
     FakeRunner runner;
     runner.device = fixtureDevice(pf);
@@ -7502,11 +7676,14 @@ private slots:
     auto log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox");
     int saved = 0, rejected = 0;
     bool continuousLease = true, stopIssued = false;
+    bool overlayClosedBeforeSummary = true;
     connect(service, &OugaFlashService::finished, &window, [&] {
       if (window.isBusy() && DeviceOperationLease::owner() != service) continuousLease = false;
     });
     connect(service, &OugaFlashService::log, &window, [&](const QString &line) {
       if (line.startsWith("刷机日志已自动保存在:")) ++saved;
+      if (line.startsWith("线刷流程结束："))
+        overlayClosedBeforeSummary &= !window.findChild<QWidget *>("OugaFlashOverlay")->isVisible();
     });
     QTimer answer;
     connect(&answer, &QTimer::timeout, &window, [&] {
@@ -7535,6 +7712,7 @@ private slots:
     QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 6000);
     answer.stop();
     QVERIFY(continuousLease);
+    QVERIFY(overlayClosedBeforeSummary);
     QCOMPARE(saved, scenario == "save-failure" ? 0 : 1);
     const QString text = log->toPlainText();
     const bool stopped = scenario.endsWith("-stop");
@@ -7551,6 +7729,11 @@ private slots:
     else if (!writes) QVERIFY(!text.contains("线刷流程结束："));
     QVERIFY(!text.contains("已停止/失败："));
     QVERIFY(!window.findChild<QWidget *>("OugaFlashOverlay")->isVisible());
+    if (scenario == "success" || scenario == "write-failure") {
+      auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
+      QCOMPARE(progress->value(), 0);
+      QCOMPARE(progress->property("rate").toString(), QString("0MB/s"));
+    }
     if (scenario == "success" && monitoring) QVERIFY(window.grab().save(dir + "/full-session-complete.png"));
     if (!writes) QVERIFY(text.contains("刷写任务总结：成功 0 个，失败 0 个."));
     if (scenario == "save-failure") QVERIFY(text.contains("生成日志文件失败:"));
@@ -7710,7 +7893,8 @@ private slots:
                     [](const QString &s) { return s.startsWith("flash "); });
     QCOMPARE(written, outcome != 0);
     auto progress = window.findChild<QProgressBar *>("FlashProgressBar");
-    QCOMPARE(progress->value() == 100, outcome == 1);
+    QCOMPARE(progress->value(), 0);
+    QCOMPARE(progress->property("rate").toString(), QString("0MB/s"));
     QCOMPARE(runner.trace.count("erase frp"), 1);
     for (const QString &command : runner.trace)
       QVERIFY((!command.startsWith("erase ") || command == "erase frp") &&

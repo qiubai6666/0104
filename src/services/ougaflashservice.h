@@ -19,9 +19,10 @@ public:
   void configure(const QString &fastboot, const QString &logDirectory);
   void setTiming(const Timing &timing) { m_timing = timing; }
   bool busy() const { return m_busy; }
-  void discover(const QString &preferredSerial = {}, std::optional<bool> userspace = {});
+  bool needsFlashCompletionDelay() const { return !m_workflowCompleted || m_stop; }
+  void discover(const QString &preferredSerial = {}, std::optional<bool> userspace = {}, bool repair = false);
   void probe(const QString &serial, bool fullPackage = true,
-             std::optional<bool> requiredMode = {}, bool readSlot = false);
+             std::optional<bool> requiredMode = {}, bool readSlot = false, bool repair = false);
   void readPartitionTable(const Ouga::Device &device);
   void resolveFullSlot(const Ouga::Device &device, bool queryAgain);
   void prepareMode(const QString &serial,
@@ -45,6 +46,8 @@ signals:
   void deviceWaitStarted(const QString &title, int remainingSeconds);
   void deviceWaitUpdated(const QString &result, int state);
   void nativeLog(const QString &text, bool error);
+  void executionFinishing();
+  void resetProgress();
   void finished(bool success, const QString &message);
   void busyChanged(bool busy);
 
@@ -65,6 +68,7 @@ private:
        m_clearDataStarted = false, m_connectionReady = false, m_fullPackage = true,
        m_summaryLogged = false, m_channelOutputRecorded = false,
        m_logSession = false, m_completionLogged = false;
+  bool m_workflowCompleted = false;
   bool m_eraseUserdata = true, m_eraseMetadata = true, m_wipe = true, m_misc = true;
   qint64 m_transferCommitted = 0, m_transferStepBytes = 0, m_transferImageBytes = 0;
   qint64 m_transferAccumulated = 0, m_chunkExpected = 0, m_chunkReported = 0,

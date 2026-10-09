@@ -86,6 +86,7 @@ private:
   Task m_task = Task::None;
   bool m_loading = false, m_stopRequested = false, m_session = false;
   bool m_fullSession = false, m_restoreMonitoring = false, m_flashCancelled = false;
+  bool m_flashTask = false;
   quint64 m_generation = 0;
   QString m_selectedTargetSlot;
   QWidget *m_canvas = nullptr, *m_validation = nullptr;
@@ -100,6 +101,7 @@ private:
   Ouga::FlashMode m_requestedMode = Ouga::FlashMode::Normal;
   Ouga::Device m_device;
   Ouga::Plan m_plan;
+  QVector<Ouga::Partition> m_fullImages;
   QTextBlock m_deviceWaitLogBlock;
   QStringList m_serials, m_extractNames;
   QString m_payloadSource, m_payloadOutput, m_archiveRoot, m_downloaded;
@@ -155,6 +157,8 @@ private:
   void discoverDevice();
   void serviceFinished(bool success, const QString &message);
   void buildAndExecute();
+  bool prepareFullImages();
+  void resetFlashProgress();
   bool validateProcessorFeatures();
   bool confirmIncompletePackage();
   QString selectTargetSlot();

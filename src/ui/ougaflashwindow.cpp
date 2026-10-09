@@ -786,6 +786,10 @@ void OugaFlashWindow::log(const QString &message) {
   if (text.startsWith("刷写任务总结：") || text.startsWith("线刷流程结束：") ||
       text.startsWith("刷机日志已自动保存在:"))
     color = QColor("#000000");
+  else if (text == "开始修复FastbootD...")
+    color = QColor("#0000FF");
+  else if (text.startsWith("此功能用于无法从Fastboot模式") || text.startsWith("警告: 未找到 "))
+    color = QColor("#FFA500");
   else if (text == "用户取消了操作" || text.endsWith("继续使用任务已确认槽位."))
     color = QColor("#FFA500");
   else if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
@@ -842,6 +846,9 @@ void OugaFlashWindow::log(const QString &message) {
     prefix = text.left(text.indexOf(QChar(0xff0c)) + 1);
     prefixColor = text.startsWith("分区表效验通过") ? "#008000" : "#FF0000";
     valueColor = "#000000";
+  } else if (text.contains("必须额外刷写 ") && text.endsWith("文件缺失，已终止任务.")) {
+    prefix = text.left(text.indexOf("必须额外刷写 ") + QString("必须额外刷写 ").size());
+    valueColor = "#FF0000";
   }
   if (!prefix.isEmpty()) {
     const int end = cursor.position();
@@ -866,6 +873,15 @@ void OugaFlashWindow::log(const QString &message) {
       content.setForeground(QColor(span == 1 ? "#008000" : summary.captured(2).toInt() > 0 ? "#FF0000" : "#000000"));
       cursor.mergeCharFormat(content);
     }
+    cursor.setPosition(end);
+  }
+  const auto criticalCount = QRegularExpression("^找到 (\\d+) 个关键分区\\.\\.\\.$").match(text);
+  if (criticalCount.hasMatch()) {
+    const int end = cursor.position();
+    cursor.setPosition(end - text.size() + criticalCount.capturedStart(1));
+    cursor.setPosition(end - text.size() + criticalCount.capturedEnd(1), QTextCursor::KeepAnchor);
+    content.setForeground(QColor("#800080"));
+    cursor.mergeCharFormat(content);
     cursor.setPosition(end);
   }
   m_log->setTextCursor(cursor);

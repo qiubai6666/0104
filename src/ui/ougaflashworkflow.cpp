@@ -28,6 +28,7 @@
 #include <QUuid>
 #include <QtConcurrent>
 #include <algorithm>
+#include <climits>
 using namespace Ouga;
 namespace {
 std::optional<bool> initialConnectionMode(FlashMode mode) {
@@ -111,6 +112,8 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
     if (!remaining) m_coolingLogBlock = QTextBlock();
   });
   connect(m_service, &OugaFlashService::nativeLog, this, &OugaFlashWindow::flashNativeLog);
+  connect(m_service, &OugaFlashService::executionFinishing, this, [this] { setExecutionOverlay(false); });
+  connect(m_service, &OugaFlashService::resetProgress, this, &OugaFlashWindow::resetFlashProgress);
   for (const Page &page : m_pages) {
     for (QCheckBox *box : {page.wipe, page.reboot})
       connect(box, &QCheckBox::toggled, this, [this] {
@@ -195,6 +198,10 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
 
 void OugaFlashWindow::endTask(bool success, const QString &message) {
   ++m_generation;
+  const bool flash = m_flashTask;
+  const bool delayedReset = m_fullSession &&
+      (m_stopRequested || m_flashCancelled || m_service->needsFlashCompletionDelay());
+  setExecutionOverlay(false);
   const bool scan = m_task == Task::Scan;
   if (success && m_task == Task::Scan) {
     log(QString(m_page ? "已加载 %1 个镜像文件" : "成功加载 %1 个镜像文件，已自动全选")
@@ -211,7 +218,8 @@ void OugaFlashWindow::endTask(bool success, const QString &message) {
       log(QString("已加载 %1 个镜像文件").arg(m_pages[m_page].images.size()));
     }
   } else if (m_task != Task::Execute && !message.isEmpty() && !m_fullSession) {
-    log((success ? "完成：" : "已停止/失败：") + message);
+    log(flash && m_requestedMode == FlashMode::RepairFastbootd
+            ? message : (success ? "完成：" : "已停止/失败：") + message);
   } else if (m_fullSession && m_task != Task::Execute && !message.isEmpty() && !m_stopRequested && !m_flashCancelled) {
     log(message);
   }
@@ -228,12 +236,25 @@ void OugaFlashWindow::endTask(bool success, const QString &message) {
   }
   const bool payloadComplete = success && m_task == Task::PayloadExtract;
   m_task = Task::None;
+  m_flashTask = false;
+  m_fullImages.clear();
   m_stopRequested = false;
-  setExecutionOverlay(false);
-  if (!scan)
+  if (flash) {
+    const quint64 generation = m_generation;
+    if (delayedReset) QTimer::singleShot(3000, this, [this, generation] {
+      if (generation == m_generation && !isBusy()) resetFlashProgress();
+    });
+    else resetFlashProgress();
+  } else if (!scan)
     m_progress->setProperty("rate", success ? (payloadComplete ? "完成" : "阶段完成") : "已停止");
   m_progress->update();
   updateBusy();
+}
+void OugaFlashWindow::resetFlashProgress() {
+  m_progress->setRange(0, 100);
+  m_progress->setValue(0);
+  m_progress->setProperty("rate", "0MB/s");
+  m_progress->update();
 }
 bool OugaFlashWindow::continueTask(quint64 generation) {
   if (generation != m_generation || m_task == Task::None)
@@ -757,11 +778,11 @@ void OugaFlashWindow::startFlash(bool repair) {
     }
     if (!error.isEmpty()) { log(error); return; }
   }
-  if ((!repair && page.images.isEmpty()) || page.directory.isEmpty()) {
+  if (!repair && (page.images.isEmpty() || page.directory.isEmpty())) {
     log("错误：请先选择并加载有效的刷写文件夹");
     return;
   }
-  if (QDir::cleanPath(page.folder->text().trimmed()) !=
+  if (!repair && QDir::cleanPath(page.folder->text().trimmed()) !=
       QDir::cleanPath(page.directory)) {
     log("错误：目录输入已改变，请先完成重新扫描，不使用旧分区表刷写");
     return;
@@ -787,6 +808,8 @@ void OugaFlashWindow::startFlash(bool repair) {
   m_device = Device();
   m_plan = Plan();
   m_fullSession = !m_page && !repair;
+  m_flashTask = true;
+  m_fullImages.clear();
   m_flashCancelled = false;
   m_restoreMonitoring = m_monitoringEnabled && m_monitoringEnabled();
   if (m_fullSession) {
@@ -794,8 +817,11 @@ void OugaFlashWindow::startFlash(bool repair) {
     m_service->beginFlashSession(m_requestedMode, page.directory);
     setExecutionOverlay(true);
   }
-  m_progress->setValue(0);
-  m_progress->setProperty("rate", "准备中...");
+  resetFlashProgress();
+  if (repair) {
+    log("开始修复FastbootD...");
+    log("此功能用于无法从Fastboot模式重启到FastbootD模式的情况，需要使用和变砖前系统版本一致的全量包进行修复，若不知道变砖前的系统版本，可使用快捷云提取功能.");
+  }
   updateBusy();
   prepareFlash();
 }
@@ -803,6 +829,7 @@ void OugaFlashWindow::prepareFlash() {
   const quint64 generation = m_generation;
   if (!continueTask(generation))
     return;
+  m_flashTask = true;
   QString error;
   if (m_fullSession) flashLogStart("委托主页停止异步设备检测");
   if (!DeviceOperationLease::acquire(m_service, &error)) {
@@ -823,12 +850,15 @@ void OugaFlashWindow::prepareFlash() {
     }
     log("用户选择的启动槽位：" + m_selectedTargetSlot.toUpper());
   }
-  QString fastboot = requireTool("fastboot", "fastboot.exe",
-                                 ResourceExtractor::getFastbootPath());
+  if (m_fullSession && !prepareFullImages()) return;
+  const bool repair = m_requestedMode == FlashMode::RepairFastbootd;
+  QString fastboot = repair ? toolPath("fastboot", ResourceExtractor::getFastbootPath())
+                           : requireTool("fastboot", "fastboot.exe", ResourceExtractor::getFastbootPath());
   if (!continueTask(generation))
     return;
-  if (fastboot.isEmpty()) {
-    endTask(false, "Fastboot工具不可用");
+  if (fastboot.isEmpty() || (repair && !QFileInfo(fastboot).isFile())) {
+    if (repair) log("错误: 未找到fastboot.exe文件");
+    endTask(false, repair ? QString() : QString("Fastboot工具不可用"));
     return;
   }
   configureService();
@@ -860,7 +890,8 @@ void OugaFlashWindow::discoverDevice() {
   m_task = Task::Discover;
   m_serials.clear();
   updateBusy();
-  m_service->discover(m_preferredSerial ? m_preferredSerial() : QString(), initialConnectionMode(m_requestedMode));
+  m_service->discover(m_preferredSerial ? m_preferredSerial() : QString(), initialConnectionMode(m_requestedMode),
+                      m_requestedMode == FlashMode::RepairFastbootd);
 }
 void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
   if (m_task == Task::None)
@@ -869,7 +900,7 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
     endTask(success && !m_stopRequested, message);
     return;
   }
-  if (!m_fullSession) log(message);
+  if (!m_fullSession && m_requestedMode != FlashMode::RepairFastbootd) log(message);
   if (!success || m_stopRequested) {
     endTask(false,
             m_stopRequested ? "已在命令边界停止；已写内容不会回滚" : message);
@@ -902,7 +933,8 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
       const QString serial = m_serials.first();
       m_task = Task::Probe;
       m_service->probe(serial, !m_page && m_requestedMode != FlashMode::RepairFastbootd,
-                       initialConnectionMode(m_requestedMode));
+                       initialConnectionMode(m_requestedMode), false,
+                       m_requestedMode == FlashMode::RepairFastbootd);
       return;
     }
     if (completed == Task::PartitionTable || completed == Task::Slot) {
@@ -970,7 +1002,7 @@ void OugaFlashWindow::buildAndExecute() {
     if (!validateProcessorFeatures()) return;
     if (m_validateOn->isChecked()) {
       QString error;
-      if (!OugaFlashPlanner::compatibleTable(page.images, m_device, &error)) {
+      if (!OugaFlashPlanner::compatibleTable(m_fullImages, m_device, &error)) {
         endTask(false, error);
         return;
       }
@@ -980,10 +1012,21 @@ void OugaFlashWindow::buildAndExecute() {
     m_service->resolveFullSlot(m_device, m_requestedMode == FlashMode::Normal);
     return;
   }
-  const bool additional = needsAdditionalImages(m_requestedMode);
-  QVector<Partition> planImages = page.images;
+  QVector<Partition> planImages = m_fullSession ? m_fullImages : page.images;
   if (m_requestedMode == FlashMode::RepairFastbootd) {
-    planImages = OugaPackage::repairSources(page.directory, page.images, m_page != 0);
+    const QString directory = page.folder->text().trimmed();
+    if (directory.isEmpty()) {
+      log(m_page ? "错误: 请先选择售后散包文件夹..." : "错误: 请先选择解包好的镜像文件夹...");
+      endTask(false, {});
+      return;
+    }
+    if (!QFileInfo(directory).isDir()) {
+      log("错误: 选择的文件夹路径不存在，请重新选择");
+      endTask(false, {});
+      return;
+    }
+    planImages = OugaPackage::repairSources(directory,
+        QDir::cleanPath(directory) == QDir::cleanPath(page.directory) ? page.images : QVector<Partition>(), m_page != 0);
     const bool lk = std::any_of(planImages.cbegin(), planImages.cend(),
         [](const Partition &image) { return image.name == "lk"; });
     m_device.platform = lk ? Platform::MediaTek : Platform::Qualcomm;
@@ -1007,24 +1050,6 @@ void OugaFlashWindow::buildAndExecute() {
       // The mandatory source is independent of table selections.
       for (auto &image : planImages)
         if (baseName(image.name) == "super") image.selected = true;
-    }
-  }
-  if (additional) {
-    for (int i = planImages.size() - 1; i >= 0; --i)
-      if (baseName(planImages[i].name) == "my_company" ||
-          baseName(planImages[i].name) == "my_preload")
-        planImages.removeAt(i);
-    for (const QString name : {"my_company", "my_preload"}) {
-      const QString file = auxiliaryImage(name);
-      Partition image;
-      if (!QFileInfo::exists(file)) {
-        endTask(false, "缺少必须刷写的双my镜像：tmp/" + name + ".img");
-        return;
-      }
-      image.name = name;
-      image.path = file;
-      image.bytes = image.expandedBytes = QFileInfo(file).size();
-      planImages << image;
     }
   }
   Options options;
@@ -1058,6 +1083,53 @@ void OugaFlashWindow::buildAndExecute() {
   updateBusy();
   m_service->setLogContext(page.directory, m_log->toPlainText());
   m_service->execute(m_plan);
+}
+
+bool OugaFlashWindow::prepareFullImages() {
+  for (Partition image : m_pages[m_page].images) {
+    const QFileInfo file(image.path.trimmed());
+    if (!image.selected || image.path.trimmed().isEmpty() ||
+        image.path.contains("(缺失)", Qt::CaseInsensitive) || !file.exists()) continue;
+    image.bytes = file.size();
+    m_fullImages << image;
+  }
+  if (m_fullImages.isEmpty()) {
+    endTask(false, "错误：分区表中没有已勾选且文件有效的镜像");
+    return false;
+  }
+  if (needsAdditionalImages(m_requestedMode)) {
+    QStringList missing;
+    QVector<Partition> additional;
+    for (const QString name : {"my_company", "my_preload"}) {
+      const QString file = auxiliaryImage(name);
+      if (!QFileInfo::exists(file)) {
+        missing << "tmp\\" + name + ".img";
+        continue;
+      }
+      Partition image;
+      image.name = name;
+      image.path = file;
+      image.bytes = image.expandedBytes = QFileInfo(file).size();
+      additional << image;
+    }
+    if (!missing.isEmpty()) {
+      const QString mode = m_requestedMode == FlashMode::BothSlots ? "AB通刷"
+          : m_requestedMode == FlashMode::Force ? "强力线刷" : "仅FBD线刷";
+      endTask(false, mode + "必须额外刷写 " + missing.join(QChar(0x3001)) + "，文件缺失，已终止任务.");
+      return false;
+    }
+    for (int i = m_fullImages.size() - 1; i >= 0; --i)
+      if (baseName(m_fullImages[i].name) == "my_company" || baseName(m_fullImages[i].name) == "my_preload")
+        m_fullImages.removeAt(i);
+    m_fullImages += additional;
+  }
+  qint64 total = 0;
+  for (const Partition &image : m_fullImages) {
+    if (image.bytes > LLONG_MAX - total) { endTask(false, "刷写总大小溢出"); return false; }
+    total += image.bytes;
+  }
+  if (total <= 0) { endTask(false, {}); return false; }
+  return true;
 }
 
 bool OugaFlashWindow::validateProcessorFeatures() {

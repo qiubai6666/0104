@@ -150,7 +150,16 @@ struct Builder {
             return (p.options.mode == FlashMode::AfterSalesBootloader
                 ? value.name.toLower() : baseName(value.name)) == name;
           });
-      if (image == images.cend()) continue;
+      if (image == images.cend()) {
+        if (p.options.mode == FlashMode::RepairFastbootd) {
+          Step message;
+          message.kind = Step::Message;
+          message.title = "警告: 未找到 " + name + " 镜像文件，跳过";
+          message.userspace = mode;
+          p.steps << message;
+        }
+        continue;
+      }
       found = true;
       // Repair and sale FB do not run inside a full-package session:
       // FlashPartitionToSlot constructs both explicit suffixed targets.
@@ -159,9 +168,8 @@ struct Builder {
         wait(500, {});
       if (!flashTarget(*image, name + "_b")) return false;
     }
-    if (!found && p.options.mode != FlashMode::AfterSalesBootloader)
-      error = "未找到可用于修复FastbootD的关键镜像";
-    return found || p.options.mode == FlashMode::AfterSalesBootloader;
+    return found || p.options.mode == FlashMode::AfterSalesBootloader ||
+           p.options.mode == FlashMode::RepairFastbootd;
   }
   void finish() {
     const bool afterSales = p.options.mode == FlashMode::AfterSalesBootloader ||
@@ -281,7 +289,7 @@ bool OugaFlashPlanner::build(const QVector<Partition> &sourceImages, const Devic
     names.insert(name);
     selected << image;
   }
-  if (selected.isEmpty() && !afterFb) return fail(error, "分区表中没有已勾选的镜像文件，请先勾选需要刷写的分区.");
+  if (selected.isEmpty() && !afterFb && !repair) return fail(error, "分区表中没有已勾选的镜像文件，请先勾选需要刷写的分区.");
   if (options.validateTable && !independent && !compatibleTable(selected, device, error)) return false;
   if (ab) {
     if (options.targetSlot != "a" && options.targetSlot != "b")
@@ -293,6 +301,7 @@ bool OugaFlashPlanner::build(const QVector<Partition> &sourceImages, const Devic
   if (repair) {
     if (!b.critical(selected)) return fail(error, b.error);
     b.switchMode(true);
+    b.p.steps.last().title = "重启设备到FastbootD";
     b.p.options.clearData = false;
     b.p.options.autoReboot = false;
   } else if (afterFb && !options.afterSuper) {

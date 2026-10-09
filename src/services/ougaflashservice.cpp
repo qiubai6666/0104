@@ -171,6 +171,8 @@ void OugaFlashService::beginFlashSession(FlashMode mode, const QString &source) 
   m_successful = m_completed = 0;
   m_failedTargets.clear();
   m_summaryLogged = m_completionLogged = false;
+  m_workflowCompleted = false;
+  m_phaseFailed = m_stop = false;
 }
 void OugaFlashService::completeFlashSession(bool stopped, bool cancelled) {
   if (!m_logSession || m_busy) return;
@@ -205,6 +207,7 @@ void OugaFlashService::finish(bool success, const QString &message) {
   m_connectionReady = false;
   QString result = message;
   if (m_executing) {
+    emit executionFinishing();
     if (m_stop) writeLog("已停止任务");
     if (m_fullPackage) {
       logPartitionSummary();
@@ -363,13 +366,13 @@ void OugaFlashService::command(
     m_runner->run(m_tool, a, timeout);
   }
 }
-void OugaFlashService::discover(const QString &preferredSerial, std::optional<bool> userspace) {
+void OugaFlashService::discover(const QString &preferredSerial, std::optional<bool> userspace, bool repair) {
   if (!acquire()) return;
   m_serial = preferredSerial;
   waitDevice(userspace, [this] {
     emit devicesFound({m_serial});
     finish(true, {});
-  }, {}, true);
+  }, {}, !repair, repair ? "等待Fastboot设备..." : QString());
 }
 void OugaFlashService::queryUnlock(std::function<void(std::optional<bool>)> ready) {
   command({"getvar", "unlocked"}, [this, ready](int, bool, const QString &out) {
@@ -412,19 +415,20 @@ void OugaFlashService::queryDevice(std::function<void(const Device &)> ready, bo
   });
 }
 void OugaFlashService::probe(const QString &serial, bool fullPackage,
-                             std::optional<bool> requiredMode, bool readSlot) {
+                             std::optional<bool> requiredMode, bool readSlot, bool repair) {
   if (!acquire())
     return;
   m_serial = serial;
   m_fullPackage = fullPackage;
   m_expected = Device();
   m_expected.serial = serial;
-  probeStable(requiredMode, [this, fullPackage, readSlot](const Device &) {
+  probeStable(requiredMode, [this, fullPackage, readSlot, repair](const Device &stable) {
     auto ready = [this](const Device &device) {
       m_expected = device;
       emit deviceReady(device);
       finish(true, {});
     };
+    if (repair) { ready(stable); return; }
     if (fullPackage) { queryDevice(ready, true); return; }
     queryMode([this, readSlot, ready](bool userspace) {
       Device device = m_expected;
@@ -436,7 +440,7 @@ void OugaFlashService::probe(const QString &serial, bool fullPackage,
         ready(device);
       });
     });
-  }, {}, false);
+  }, {}, false, repair ? "等待设备稳定..." : "等待设备连接稳定...");
 }
 void OugaFlashService::readPartitionTable(const Device &device) {
   if (!acquire()) return;
@@ -702,6 +706,7 @@ void OugaFlashService::execute(const Plan &plan) {
     m_completionLogged = false;
   }
   m_phaseFailed = false;
+  m_workflowCompleted = false;
   m_eraseUserdata = m_eraseMetadata = m_wipe = m_misc = true;
   m_clearData = plan.options.clearData;
   m_clearDataStarted = false;
@@ -711,6 +716,10 @@ void OugaFlashService::execute(const Plan &plan) {
   m_executing = true;
   if (m_fullPackage)
     writeLog("请将手机停留在选择语言界面，请勿触碰设备和数据线.");
+  if (plan.options.mode == FlashMode::RepairFastbootd) {
+    writeLog("设备处理器：" + QString(plan.device.platform == Platform::MediaTek ? "联发科" : "高通骁龙"));
+    writeLog(QString("找到 %1 个关键分区...").arg(plan.flashCount / 2));
+  }
   const quint64 generation = m_generation;
   QTimer::singleShot(0, this, [this, generation] {
     if (m_busy && generation == m_generation) next();
@@ -738,6 +747,7 @@ void OugaFlashService::next() {
     return;
   }
   if (m_index >= m_plan.steps.size()) {
+    m_workflowCompleted = true;
     finish(true, "线刷流程结束");
     return;
   }
@@ -771,6 +781,12 @@ void OugaFlashService::next() {
     return;
   }
   emit progress(m_completed, m_plan.flashCount, step.title);
+  if (step.kind == Step::Message) {
+    writeLog(step.title);
+    ++m_index;
+    next();
+    return;
+  }
   if (step.kind == Step::PreSwitchGuard) {
     if (!m_failedTargets.isEmpty()) {
       const QString message = m_plan.options.mode == FlashMode::BothSlots
@@ -865,9 +881,16 @@ void OugaFlashService::next() {
     clearData();
     return;
   }
-  if (step.kind == Step::ModeSwitch && m_plan.options.mode == FlashMode::RepairFastbootd && m_successful == 0) {
-    finish(false, "没有任何镜像刷写成功，不重启到FastbootD.");
-    return;
+  if (step.kind == Step::ModeSwitch && m_plan.options.mode == FlashMode::RepairFastbootd) {
+    if (m_successful == 0) {
+      disconnect(&m_wait, nullptr, this, nullptr);
+      connect(&m_wait, &QTimer::timeout, this, [this] {
+        finish(false, "错误: 没有任何分区刷入成功，修复失败");
+      });
+      m_wait.start(qMax(0, 3000 * m_timing.waitScale));
+      return;
+    }
+    emit resetProgress();
   }
   if (step.kind == Step::Wait) {
     if (sales && step.waitMs == 120000) {
@@ -1044,7 +1067,7 @@ void OugaFlashService::completeStep(const Step &step, bool success, const QStrin
       probeStable(step.userspace, ready,
           salePostActions ? std::function<void()>([this] { skipSalePostActions(); })
                           : saleModem ? std::function<void()>(skipModem) : std::function<void()>(),
-          true, m_plan.options.mode == FlashMode::RepairFastbootd ? "等待FastbootD设备稳定..." : "等待设备连接稳定...");
+          true, m_plan.options.mode == FlashMode::RepairFastbootd ? "等待设备稳定..." : "等待设备连接稳定...");
     }
     return;
   }
