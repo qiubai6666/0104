@@ -8,9 +8,9 @@ OugaProcessRunner::OugaProcessRunner(QObject *p) : OugaCommandRunner(p) {
   m_process.setProcessChannelMode(QProcess::SeparateChannels);
   m_readDeadline.setSingleShot(true);
   connect(&m_readDeadline, &QTimer::timeout, this, [this] {
-    m_output += "\nERROR: read-only query timed out\n";
-    m_process
-        .kill(); // Only armed for getvar/devices, never for a write or reboot.
+    m_timedOut = true;
+    if (!m_controlled) m_output += "\nERROR: read-only query timed out\n";
+    m_process.kill();
   });
   m_watchdog.setInterval(120000);
   m_watchdog.setSingleShot(true);
@@ -35,6 +35,14 @@ OugaProcessRunner::OugaProcessRunner(QObject *p) : OugaCommandRunner(p) {
 }
 void OugaProcessRunner::run(const QString &p, const QStringList &a,
                             int readTimeoutMs) {
+  start(p, a, readTimeoutMs, false, false);
+}
+void OugaProcessRunner::runWithPolicy(const QString &p, const QStringList &a,
+                                     int timeoutMs, bool acceptOkay) {
+  start(p, a, timeoutMs, true, acceptOkay);
+}
+void OugaProcessRunner::start(const QString &p, const QStringList &a, int timeoutMs,
+                             bool controlled, bool acceptOkay) {
   if (running()) {
     emit completed(-1, false, "执行器忙，拒绝并发命令");
     return;
@@ -43,11 +51,14 @@ void OugaProcessRunner::run(const QString &p, const QStringList &a,
   m_stdoutPending.clear();
   m_stderrPending.clear();
   m_done = false;
+  m_acceptOkay = acceptOkay;
+  m_controlled = controlled;
+  m_acknowledged = m_timedOut = false;
   m_process.setWorkingDirectory(QFileInfo(p).absolutePath());
   m_watchdog.start();
   const QString verb = a.value(0) == "-s" ? a.value(2) : a.value(0);
-  if (readTimeoutMs > 0 && (verb == "getvar" || verb == "devices"))
-    m_readDeadline.start(readTimeoutMs);
+  if (timeoutMs > 0 && (controlled || verb == "getvar" || verb == "devices" || verb == "oem"))
+    m_readDeadline.start(timeoutMs);
   m_process.start(p, a);
 }
 bool OugaProcessRunner::running() const { return !m_done; }
@@ -66,6 +77,11 @@ void OugaProcessRunner::captureOutput(bool standardError, bool flush) {
     const QString line = pending.left(end);
     pending.remove(0, end + 1);
     if (!line.trimmed().isEmpty()) emit nativeOutputLine(line, standardError);
+    if (!m_done && m_acceptOkay && line.contains("OKAY", Qt::CaseInsensitive)) {
+      m_acknowledged = true;
+      m_readDeadline.stop();
+      m_process.kill();
+    }
   }
   if (flush && !pending.trimmed().isEmpty()) emit nativeOutputLine(pending, standardError);
   if (flush) pending.clear();
@@ -78,6 +94,10 @@ void OugaProcessRunner::finish(int c, bool normal) {
   m_done = true;
   m_watchdog.stop();
   m_readDeadline.stop();
+  if (m_acknowledged && !m_timedOut) {
+    c = 0;
+    normal = true;
+  }
   emit completed(c, normal, m_output);
 }
 QString OugaProcessRunner::formatToolsError(const QString &fastbootPath) {

@@ -39,6 +39,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QRegularExpression>
+#include <QRadioButton>
 #include <QUuid>
 #include <QtEndian>
 #include <QtTest>
@@ -539,6 +540,7 @@ public:
   Device device = fixtureDevice();
   QStringList trace, boundTrace;
   QList<int> readTimeouts;
+  QList<QPair<int, bool>> controlledPolicies;
   QString failAt, failOutput = "FAILED (remote: test failure)";
   int failCode = 1;
   bool normal = true, holdFlash = false, stuckMode = false, failOnce = false,
@@ -553,6 +555,10 @@ public:
   int probes = 0, outputStyle = 0;
   bool markedOutput = false;
   bool active = false;
+  void runWithPolicy(const QString &program, const QStringList &args, int timeoutMs, bool acceptOkay) override {
+    controlledPolicies << qMakePair(timeoutMs, acceptOkay);
+    run(program, args, timeoutMs);
+  }
   void run(const QString &, const QStringList &args, int readTimeoutMs) override {
     Q_ASSERT(!active);
     active = true;
@@ -5794,6 +5800,63 @@ private slots:
     QVERIFY(!commandSucceeded(done[0][0].toInt(), done[0][1].toBool(),
                               done[0][2].toString()));
   }
+  void referenceRebootRunnerPolicy_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::addColumn<bool>("acceptOkay");
+    for (const QString scenario : {"okay-stdout", "okay-stderr", "no-okay", "failed-okay", "normal-exit"})
+      for (bool accept : {false, true})
+        QTest::newRow(qPrintable(scenario + (accept ? "-accept" : "-wait"))) << scenario << accept;
+  }
+  void referenceRebootRunnerPolicy() {
+    QFETCH(QString, scenario); QFETCH(bool, acceptOkay);
+    OugaProcessRunner runner;
+    QSignalSpy done(&runner, &OugaCommandRunner::completed);
+    QSignalSpy native(&runner, &OugaCommandRunner::nativeOutputLine);
+    runner.runWithPolicy(QCoreApplication::applicationFilePath(),
+        {"reboot", "orange-test-reboot", scenario}, 250, acceptOkay);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 2000);
+    const bool success = scenario == "normal-exit" || (acceptOkay && scenario.startsWith("okay"));
+    QCOMPARE(commandSucceeded(done[0][0].toInt(), done[0][1].toBool(), done[0][2].toString()), success);
+    if (scenario == "okay-stderr") {
+      QVERIFY(!native.isEmpty());
+      QVERIFY(native[0][1].toBool());
+    }
+    QVERIFY(!done[0][2].toString().contains("timed out"));
+    if (scenario == "failed-okay") QVERIFY(done[0][2].toString().contains("FAILED"));
+    if (acceptOkay && scenario.contains("okay") && scenario != "no-okay") {
+      QCOMPARE(done[0][0].toInt(), 0);
+      QVERIFY(done[0][1].toBool());
+    }
+    QVERIFY(!runner.running());
+    runner.runWithPolicy(QCoreApplication::applicationFilePath(),
+        {"reboot", "orange-test-reboot", "normal-exit"}, 500, false);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 2, 2000);
+    QVERIFY(commandSucceeded(done[1][0].toInt(), done[1][1].toBool(), done[1][2].toString()));
+  }
+  void referenceRebootServicePolicy_data() {
+    QTest::addColumn<bool>("repair");
+    QTest::newRow("full") << false;
+    QTest::newRow("repair") << true;
+  }
+  void referenceRebootServicePolicy() {
+    QFETCH(bool, repair);
+    FakeRunner runner;
+    runner.device = repair ? repairDevice(Platform::Qualcomm, "a", 0) : standardFbdDevice(Platform::Qualcomm, "a", 1);
+    auto opts = options(repair ? FlashMode::RepairFastbootd : FlashMode::Normal);
+    opts.autoReboot = !repair;
+    const auto ps = repair ? repairImages(Platform::Qualcomm) : standardFbdImages("a", 1);
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, runner.device, opts, &plan, &error), qPrintable(error));
+    OugaFlashService service(&runner); configure(service);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY(done[0][0].toBool());
+    QList<QPair<int, bool>> expected;
+    if (repair) expected << qMakePair(60000, true);
+    else expected << qMakePair(30000, false) << qMakePair(8000, true) << qMakePair(60000, false);
+    QCOMPARE(runner.controlledPolicies, expected);
+  }
   void noWipeAfterFailure() {
     FakeRunner runner;
     runner.device = fixtureDevice(Platform::MediaTek);
@@ -7096,6 +7159,12 @@ private slots:
     connect(&answer, &QTimer::timeout, &window, [&] {
       auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
       if (!dialog) return;
+      if (dialog->objectName() == "OugaTargetSlotDialog") {
+        QVERIFY(runner.trace.isEmpty());
+        QVERIFY(dialog->findChild<QRadioButton *>("OugaTargetSlotA")->isChecked());
+        dialog->accept();
+        return;
+      }
       if (dialog->objectName() != "OugaIncompletePackageDialog") {
         unexpected << dialog->windowTitle(); dialog->reject(); return;
       }
@@ -7171,6 +7240,132 @@ private slots:
     QTest::addColumn<QString>("scenario");
     for (const QString scenario : {"preferred", "multiple-wait", "late-single"})
       QTest::newRow(qPrintable(scenario)) << scenario;
+  }
+  void referenceFullSessionLifecycle_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::addColumn<bool>("monitoring");
+    for (const QString scenario : {"success", "locked", "unknown-unlock", "unknown-slot", "table-failure",
+                                   "processor-mismatch", "incomplete-cancel", "wait-stop", "write-stop",
+                                   "ab-cancel", "write-failure", "save-failure", "repeat"})
+      for (bool monitoring : {false, true})
+        QTest::newRow(qPrintable(scenario + (monitoring ? "-monitor-on" : "-monitor-off"))) << scenario << monitoring;
+  }
+  void referenceFullSessionLifecycle() {
+    QFETCH(QString, scenario); QFETCH(bool, monitoring);
+    FakeRunner runner;
+    runner.multipleDevices = scenario == "wait-stop";
+    runner.holdFlash = scenario == "write-stop";
+    if (scenario == "locked" || scenario == "repeat") runner.device.unlocked = false;
+    if (scenario == "unknown-unlock") runner.unlockedOutput = [] { return QString("USB Error"); };
+    if (scenario == "unknown-slot") runner.device.slot.clear();
+    if (scenario == "table-failure") runner.allOutput = [] { return QString("FAILED status read failed PREP-NATIVE"); };
+    if (scenario == "write-failure") runner.failAt = "flash boot_a";
+    QVERIFY(put(dir + "/boot.img", QByteArray(512, 'b')));
+    if (scenario != "incomplete-cancel")
+      QVERIFY(put(dir + (scenario == "processor-mismatch" ? "/lk.img" : "/xbl.img"), QByteArray(512, 'f')));
+    const QString tool = dir + "/fake-fastboot.exe";
+    QVERIFY(put(tool, "Injected runner only"));
+    QSettings().setValue("Ouga/fastboot", tool);
+    const QString logDirectory = dir + "/logs";
+    if (scenario == "save-failure") QVERIFY(put(logDirectory, "Block the log directory"));
+    OugaFlashWindow window(nullptr, &runner, logDirectory, {}, [monitoring] { return monitoring; });
+    window.show();
+    auto service = window.findChild<OugaFlashService *>(); configure(*service);
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(dir);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    window.findChild<QCheckBox *>("ClearDataCheckBox")->setChecked(false);
+    window.findChild<QCheckBox *>("AutoRebootOugaCheckBox")->setChecked(false);
+    window.findChild<QCheckBox *>("FlashABCheckBox")->setChecked(scenario == "ab-cancel");
+    auto log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox");
+    int saved = 0, rejected = 0;
+    bool continuousLease = true, stopIssued = false;
+    connect(service, &OugaFlashService::finished, &window, [&] {
+      if (window.isBusy() && DeviceOperationLease::owner() != service) continuousLease = false;
+    });
+    connect(service, &OugaFlashService::log, &window, [&](const QString &line) {
+      if (line.startsWith("刷机日志已自动保存在:")) ++saved;
+    });
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, &window, [&] {
+      if (auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+        if (scenario == "ab-cancel") {
+          QCOMPARE(dialog->objectName(), QString("OugaTargetSlotDialog"));
+          QVERIFY(runner.trace.isEmpty());
+          if (monitoring) QVERIFY(dialog->grab().save(dir + "/ab-slot-dialog.png"));
+        }
+        ++rejected; dialog->reject();
+      }
+      if (scenario == "wait-stop" && runner.deviceLists > 0 && !stopIssued) {
+        stopIssued = true;
+        window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+      }
+      if (scenario == "write-stop" && runner.active && runner.trace.last().startsWith("flash ") && !stopIssued) {
+        QVERIFY(window.findChild<QWidget *>("OugaFlashOverlay")->isVisible());
+        if (monitoring) QVERIFY(window.grab().save(dir + "/full-session-progress.png"));
+        stopIssued = true;
+        window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+        runner.complete(0, true, "OKAY\nFinished.");
+      }
+    });
+    answer.start(5);
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 6000);
+    answer.stop();
+    QVERIFY(continuousLease);
+    QCOMPARE(saved, scenario == "save-failure" ? 0 : 1);
+    const QString text = log->toPlainText();
+    const bool stopped = scenario.endsWith("-stop");
+    const bool writes = scenario == "success" || scenario == "save-failure" || scenario == "write-failure" || scenario == "write-stop";
+    QCOMPARE(std::any_of(runner.trace.cbegin(), runner.trace.cend(), [](const QString &command) {
+      return command.startsWith("flash ");
+    }), writes);
+    QCOMPARE(text.count("刷写任务总结："), 1);
+    QCOMPARE(text.count("委托主页停止异步设备检测 ...OK"), 1);
+    QCOMPARE(text.count("委托主页开始异步设备检测 ...OK"), int(monitoring));
+    QCOMPARE(rejected, scenario == "ab-cancel" || scenario == "incomplete-cancel" ? 1 : 0);
+    if (stopped) QCOMPARE(text.count("线刷流程结束：任务已按用户请求停止."), 1);
+    else if (scenario == "ab-cancel") QCOMPARE(text.count("线刷流程结束：任务已取消."), 1);
+    else if (!writes) QVERIFY(!text.contains("线刷流程结束："));
+    QVERIFY(!text.contains("已停止/失败："));
+    QVERIFY(!window.findChild<QWidget *>("OugaFlashOverlay")->isVisible());
+    if (scenario == "success" && monitoring) QVERIFY(window.grab().save(dir + "/full-session-complete.png"));
+    if (!writes) QVERIFY(text.contains("刷写任务总结：成功 0 个，失败 0 个."));
+    if (scenario == "save-failure") QVERIFY(text.contains("生成日志文件失败:"));
+    else {
+      const auto files = QDir(logDirectory).entryList({"*.txt"}, QDir::Files);
+      QCOMPARE(files.size(), 1);
+      const QString content = QString::fromUtf8(read(logDirectory + "/" + files.first()));
+      QCOMPARE(content.count("刷写任务总结："), 1);
+      QCOMPARE(content.count("委托主页停止异步设备检测 ...OK"), 1);
+      QCOMPARE(content.count("委托主页开始异步设备检测 ...OK"), int(monitoring));
+      QVERIFY(!content.contains("刷机日志已自动保存在:"));
+      if (monitoring) QVERIFY(content.indexOf("刷写任务总结：") < content.indexOf("委托主页开始异步设备检测"));
+      if (scenario != "ab-cancel" && !stopped && !writes) QVERIFY(!content.contains("[FLASH BEGIN]"));
+      QCOMPARE(content.contains("[FASTBOOT CMD] devices"), scenario != "ab-cancel");
+      if (scenario == "table-failure") QVERIFY(content.contains("[FASTBOOT OUTPUT] FAILED status read failed PREP-NATIVE"));
+      const int hashMarker = content.indexOf("\r\n=== 日志完整性信息 ===");
+      QVERIFY(hashMarker > 0);
+      const QByteArray hash = QCryptographicHash::hash(content.left(hashMarker).toUtf8(), QCryptographicHash::Sha256).toHex().toUpper();
+      QVERIFY(content.endsWith("SHA-256: " + QString::fromLatin1(hash) + "\r\n"));
+      if (scenario == "repeat") {
+        runner.device.unlocked = true;
+        runner.trace.clear();
+        QVERIFY(QFile::remove(logDirectory + "/" + files.first()));
+        window.findChild<QPushButton *>("StartFlashButton")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 6000);
+        QCOMPARE(saved, 2);
+        const auto second = QDir(logDirectory).entryList({"*.txt"}, QDir::Files);
+        QCOMPARE(second.size(), 1);
+        const QString repeated = QString::fromUtf8(read(logDirectory + "/" + second.first()));
+        const QString native = repeated.mid(repeated.indexOf("=== 完整Fastboot输出 ==="));
+        QCOMPARE(native.count("[FASTBOOT CMD] devices"), runner.trace.count("devices"));
+        QVERIFY(native.contains("[FLASH BEGIN] boot_a"));
+      }
+    }
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(window.close());
   }
   void referenceWidgetDeviceWait() {
     QFETCH(QString, scenario);
@@ -7659,6 +7854,21 @@ private slots:
   }
 };
 int main(int argc, char **argv) {
+  if (argc == 4 && std::strcmp(argv[2], "orange-test-reboot") == 0) {
+    const QByteArray scenario(argv[3]);
+    if (scenario == "normal-exit") {
+      std::printf("OKAY\nFinished.\n"); std::fflush(stdout);
+      return 0;
+    }
+    if (scenario == "failed-okay") {
+      std::printf("FAILED (remote: denied)\nOKAY\n"); std::fflush(stdout);
+    } else if (scenario.startsWith("okay")) {
+      FILE *stream = scenario == "okay-stderr" ? stderr : stdout;
+      std::fprintf(stream, "OKAY\n"); std::fflush(stream);
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    return 0;
+  }
   if (argc == 3 && std::strcmp(argv[2], "orange-test-helper") == 0) {
     // The real runner launches this test executable, never any device tool.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));

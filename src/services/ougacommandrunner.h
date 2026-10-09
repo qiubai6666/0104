@@ -10,6 +10,11 @@ public:
   virtual void run(const QString &program, const QStringList &arguments,
                    int readTimeoutMs = 0) = 0;
   virtual bool running() const = 0;
+  virtual void runWithPolicy(const QString &program, const QStringList &arguments,
+                            int timeoutMs, bool acceptOkay) {
+    Q_UNUSED(acceptOkay);
+    run(program, arguments, timeoutMs);
+  }
 signals:
   void output(const QString &text);
   void nativeOutputLine(const QString &text, bool standardError);
@@ -23,6 +28,8 @@ public:
   void run(const QString &program, const QStringList &arguments,
            int readTimeoutMs = 0) override;
   bool running() const override;
+  void runWithPolicy(const QString &program, const QStringList &arguments,
+                     int timeoutMs, bool acceptOkay) override;
   static QString formatToolsError(const QString &fastbootPath);
   static QString bundledToolPath(const QString &resourceDirectory,
                                  const QString &key,
@@ -40,6 +47,10 @@ private:
   QString m_output;
   QString m_stdoutPending, m_stderrPending;
   bool m_done = true;
+  bool m_acceptOkay = false, m_acknowledged = false, m_timedOut = false;
+  bool m_controlled = false;
+  void start(const QString &program, const QStringList &arguments, int timeoutMs,
+             bool controlled, bool acceptOkay);
   void finish(int code, bool normal);
   void captureOutput(bool standardError, bool flush = false);
 };

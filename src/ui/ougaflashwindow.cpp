@@ -303,8 +303,10 @@ private:
 };
 
 OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
-                                 const QString &logDirectory, std::function<QString()> preferredSerial)
-    : QWidget(nullptr), m_launcher(parent), m_preferredSerial(std::move(preferredSerial)), m_logDirectory(logDirectory) {
+                                 const QString &logDirectory, std::function<QString()> preferredSerial,
+                                 std::function<bool()> monitoringEnabled)
+    : QWidget(nullptr), m_launcher(parent), m_preferredSerial(std::move(preferredSerial)),
+      m_monitoringEnabled(std::move(monitoringEnabled)), m_logDirectory(logDirectory) {
   // Keep the always-on-top menu out of the native ownership/z-order chain.
   setWindowFlags(Qt::Window);
   if (parent)
@@ -781,7 +783,12 @@ void OugaFlashWindow::log(const QString &message) {
   cursor.insertText(QDateTime::currentDateTime().toString("[HH:mm:ss ] "),
                     timestamp);
   QColor color("#000000");
-  if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
+  if (text.startsWith("刷写任务总结：") || text.startsWith("线刷流程结束：") ||
+      text.startsWith("刷机日志已自动保存在:"))
+    color = QColor("#000000");
+  else if (text == "用户取消了操作")
+    color = QColor("#FFA500");
+  else if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
       text.contains("FAILED") || text.contains("失败") ||
       text.startsWith("分区表为空") || text.startsWith("分区表中没有") ||
       text.startsWith("检测到未解包") || text.startsWith("已安全终止") ||
@@ -818,14 +825,40 @@ void OugaFlashWindow::log(const QString &message) {
   } else if (text.startsWith("设备处理器：")) {
     prefix = "设备处理器：";
     valueColor = text.endsWith("联发科") ? "#800080" : "#0000FF";
+  } else if (text.startsWith("线刷流程结束：")) {
+    prefix = "线刷流程结束：";
+    valueColor = text.contains("失败") ? "#FF0000" : text.contains("停止") || text.contains("取消") ? "#FFA500" : "#008000";
+  } else if (text.startsWith("刷写失败分区：")) {
+    prefix = "刷写失败分区：";
+    valueColor = "#FF0000";
+  } else if (text.startsWith("用户选择的启动槽位：")) {
+    prefix = "用户选择的启动槽位：";
+    valueColor = "#008000";
   }
   if (!prefix.isEmpty()) {
     const int end = cursor.position();
+    cursor.setPosition(end - text.size());
+    cursor.setPosition(end - text.size() + prefix.size(), QTextCursor::KeepAnchor);
+    content.setForeground(QColor("#000000"));
+    cursor.mergeCharFormat(content);
     cursor.setPosition(end - text.size() + prefix.size());
     cursor.setPosition(end, QTextCursor::KeepAnchor);
     content.setForeground(QColor(valueColor));
     cursor.mergeCharFormat(content);
     cursor.clearSelection();
+  }
+  const auto summary = QRegularExpression("^刷写任务总结：成功 (\\d+) 个，失败 (\\d+) 个\\.$").match(text);
+  if (summary.hasMatch()) {
+    const int end = cursor.position();
+    for (int span : {1, 2}) {
+      const int start = span == 1 ? summary.capturedStart(span) : summary.capturedEnd(1);
+      const int length = span == 1 ? summary.capturedLength(span) : text.size() - start;
+      cursor.setPosition(end - text.size() + start);
+      cursor.setPosition(end - text.size() + start + length, QTextCursor::KeepAnchor);
+      content.setForeground(QColor(span == 1 ? "#008000" : summary.captured(2).toInt() > 0 ? "#FF0000" : "#000000"));
+      cursor.mergeCharFormat(content);
+    }
+    cursor.setPosition(end);
   }
   m_log->setTextCursor(cursor);
   m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());

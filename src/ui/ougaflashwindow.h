@@ -28,7 +28,8 @@ public:
   explicit OugaFlashWindow(QWidget *parent = nullptr,
                            OugaCommandRunner *runner = nullptr,
                            const QString &logDirectory = {},
-                           std::function<QString()> preferredSerial = {});
+                           std::function<QString()> preferredSerial = {},
+                           std::function<bool()> monitoringEnabled = {});
   bool isBusy() const;
 
 protected:
@@ -75,6 +76,7 @@ private:
   // Logical launcher only: a native owner suppresses the Windows taskbar button.
   QPointer<QWidget> m_launcher;
   std::function<QString()> m_preferredSerial;
+  std::function<bool()> m_monitoringEnabled;
   OugaFlashService *m_service = nullptr;
   OugaPreparation *m_prepare = nullptr;
   OugaRomService *m_rom = nullptr;
@@ -82,6 +84,7 @@ private:
   int m_page = 0;
   Task m_task = Task::None;
   bool m_loading = false, m_stopRequested = false, m_session = false;
+  bool m_fullSession = false, m_restoreMonitoring = false, m_flashCancelled = false;
   quint64 m_generation = 0;
   QString m_selectedTargetSlot;
   QWidget *m_canvas = nullptr, *m_validation = nullptr;
@@ -153,6 +156,7 @@ private:
   void buildAndExecute();
   bool validateProcessorFeatures();
   bool confirmIncompletePackage();
+  QString selectTargetSlot();
   void requestStop();
   void arbDialog();
   void rescueDialog();

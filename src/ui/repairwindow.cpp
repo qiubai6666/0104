@@ -125,6 +125,8 @@ void RepairWindow::onButtonClicked()
     case OugaFlash:
         if (!ougaWindow) ougaWindow = new OugaFlashWindow(this, nullptr, {}, [] {
             return DeviceManager::instance()->deviceSerial();
+        }, [] {
+            return DeviceManager::instance()->monitoringEnabled();
         });
         ougaWindow->showNormal();
         ougaWindow->raise();

@@ -27,6 +27,9 @@ public:
                    bool userspace); // explicit preparation, never flash
   void execute(const Ouga::Plan &plan);
   void setLogContext(const QString &source, const QString &interfaceLog);
+  void beginFlashSession(Ouga::FlashMode mode, const QString &source);
+  void completeFlashSession(bool stopped, bool cancelled);
+  void saveFlashSession(const QString &interfaceLog);
   void setPostActions(bool clearData, bool autoReboot);
   void requestStop();
 signals:
@@ -57,7 +60,8 @@ private:
   bool m_busy = false, m_stop = false, m_executing = false,
        m_phaseFailed = false, m_clearData = false, m_autoReboot = false,
        m_clearDataStarted = false, m_connectionReady = false, m_fullPackage = true,
-       m_summaryLogged = false, m_channelOutputRecorded = false;
+       m_summaryLogged = false, m_channelOutputRecorded = false,
+       m_logSession = false, m_completionLogged = false;
   bool m_eraseUserdata = true, m_eraseMetadata = true, m_wipe = true, m_misc = true;
   qint64 m_transferCommitted = 0, m_transferStepBytes = 0, m_transferImageBytes = 0;
   qint64 m_transferAccumulated = 0, m_chunkExpected = 0, m_chunkReported = 0,
@@ -104,7 +108,7 @@ private:
   void beginStep(const QString &title);
   void endStep(bool success);
   void appendNative(const QString &text, bool error);
-  bool saveLog();
+  bool saveLog(const QString &interfaceLog = {});
   void completeStep(const Ouga::Step &step, bool success, const QString &output);
 };
 #endif

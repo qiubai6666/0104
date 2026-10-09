@@ -32,6 +32,7 @@ public:
     QString getDeviceDetails() const { return m_deviceDetails; }
     QString getExtendedDeviceDetails() const { return m_extendedDeviceDetails; }
     QString deviceSerial() const { return m_deviceSerial; }
+    bool monitoringEnabled() const { return m_checkTimer->isActive(); }
 
     // 确保监控已启动（引用计数）
     // 启动全模式监控（ADB + Fastboot）- 调用时增加引用计数

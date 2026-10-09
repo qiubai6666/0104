@@ -76,6 +76,38 @@ QString selectItem(QWidget *parent, const QString &title, const QString &prompt,
 }
 } // namespace
 
+QString OugaFlashWindow::selectTargetSlot() {
+  QDialog dialog(this);
+  dialog.setObjectName("OugaTargetSlotDialog");
+  dialog.setWindowTitle("选择启动槽位");
+  dialog.setFixedSize(350, 220);
+  dialog.setStyleSheet("QDialog { background:white; }");
+  auto layout = new QVBoxLayout(&dialog);
+  layout->setContentsMargins(20, 20, 20, 20);
+  auto prompt = new QLabel("您当前选择的是AB通刷模式，请选择一个启动槽位", &dialog);
+  prompt->setWordWrap(true);
+  layout->addWidget(prompt);
+  auto slotChoices = new QHBoxLayout;
+  auto slotA = new QRadioButton("A 槽位", &dialog);
+  auto slotB = new QRadioButton("B 槽位", &dialog);
+  slotA->setObjectName("OugaTargetSlotA");
+  slotB->setObjectName("OugaTargetSlotB");
+  slotA->setChecked(true);
+  slotChoices->addWidget(slotA);
+  slotChoices->addWidget(slotB);
+  layout->addLayout(slotChoices);
+  layout->addStretch();
+  auto buttons = new QHBoxLayout;
+  buttons->addStretch();
+  auto confirm = new QPushButton("确定", &dialog);
+  confirm->setFixedSize(80, 30);
+  confirm->setDefault(true);
+  buttons->addWidget(confirm);
+  layout->addLayout(buttons);
+  connect(confirm, &QPushButton::clicked, &dialog, &QDialog::accept);
+  return dialog.exec() == QDialog::Accepted ? (slotB->isChecked() ? "b" : "a") : QString();
+}
+
 bool OugaFlashWindow::confirmIncompletePackage() {
   QDialog dialog(this);
   dialog.setObjectName("OugaIncompletePackageDialog");

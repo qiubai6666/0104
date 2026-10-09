@@ -210,12 +210,21 @@ void OugaFlashWindow::endTask(bool success, const QString &message) {
               ? "分区 " + m_extractNames.first() + " 提取完成！" : "镜像提取完成！");
       log(QString("已加载 %1 个镜像文件").arg(m_pages[m_page].images.size()));
     }
-  } else if (m_task != Task::Execute && !message.isEmpty()) {
+  } else if (m_task != Task::Execute && !message.isEmpty() && !m_fullSession) {
     log((success ? "完成：" : "已停止/失败：") + message);
+  } else if (m_fullSession && m_task != Task::Execute && !message.isEmpty() && !m_stopRequested && !m_flashCancelled) {
+    log(message);
   }
+  if (m_fullSession) m_service->completeFlashSession(m_stopRequested, m_flashCancelled);
   if (m_session && !m_service->busy()) {
+    if (m_fullSession && m_restoreMonitoring) flashLogStart("委托主页开始异步设备检测");
     DeviceOperationLease::release(m_service);
+    if (m_fullSession && m_restoreMonitoring) flashLogFinish(true);
     m_session = false;
+  }
+  if (m_fullSession) {
+    m_service->saveFlashSession(m_log->toPlainText());
+    m_fullSession = false;
   }
   const bool payloadComplete = success && m_task == Task::PayloadExtract;
   m_task = Task::None;
@@ -777,6 +786,14 @@ void OugaFlashWindow::startFlash(bool repair) {
   m_selectedTargetSlot.clear();
   m_device = Device();
   m_plan = Plan();
+  m_fullSession = !m_page && !repair;
+  m_flashCancelled = false;
+  m_restoreMonitoring = m_monitoringEnabled && m_monitoringEnabled();
+  if (m_fullSession) {
+    configureService();
+    m_service->beginFlashSession(m_requestedMode, page.directory);
+    setExecutionOverlay(true);
+  }
   m_progress->setValue(0);
   m_progress->setProperty("rate", "准备中...");
   updateBusy();
@@ -787,11 +804,25 @@ void OugaFlashWindow::prepareFlash() {
   if (!continueTask(generation))
     return;
   QString error;
+  if (m_fullSession) flashLogStart("委托主页停止异步设备检测");
   if (!DeviceOperationLease::acquire(m_service, &error)) {
+    if (m_fullSession) flashLogFinish(false);
     endTask(false, error);
     return;
   }
+  if (m_fullSession) flashLogFinish(true);
   m_session = true;
+  if (m_requestedMode == FlashMode::BothSlots) {
+    m_selectedTargetSlot = selectTargetSlot();
+    if (!continueTask(generation)) return;
+    if (m_selectedTargetSlot.isEmpty()) {
+      log("用户取消了操作");
+      m_flashCancelled = true;
+      endTask(false, {});
+      return;
+    }
+    log("用户选择的启动槽位：" + m_selectedTargetSlot.toUpper());
+  }
   QString fastboot = requireTool("fastboot", "fastboot.exe",
                                  ResourceExtractor::getFastbootPath());
   if (!continueTask(generation))
@@ -838,7 +869,7 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
     endTask(success && !m_stopRequested, message);
     return;
   }
-  log(message);
+  if (!m_fullSession) log(message);
   if (!success || m_stopRequested) {
     endTask(false,
             m_stopRequested ? "已在命令边界停止；已写内容不会回滚" : message);
@@ -981,21 +1012,6 @@ void OugaFlashWindow::buildAndExecute() {
       image.bytes = image.expandedBytes = QFileInfo(file).size();
       planImages << image;
     }
-  }
-  if (m_requestedMode == FlashMode::BothSlots &&
-      m_selectedTargetSlot.isEmpty()) {
-    bool accepted = false;
-    QString selected = QInputDialog::getItem(
-        this, "选择最终启动槽",
-        "当前槽：" + m_device.slot.toUpper() + "\nAB通刷后的启动槽：",
-        {"A", "B"}, m_device.slot == "b" ? 1 : 0, false, &accepted);
-    if (!continueTask(taskGeneration))
-      return;
-    if (!accepted) {
-      endTask(false, "用户取消目标槽选择");
-      return;
-    }
-    m_selectedTargetSlot = selected.toLower();
   }
   Options options;
   options.mode = m_requestedMode;

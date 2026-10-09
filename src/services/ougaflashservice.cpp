@@ -49,7 +49,7 @@ OugaFlashService::OugaFlashService(OugaCommandRunner *runner, QObject *parent)
   });
   connect(runner, &OugaCommandRunner::nativeOutputLine, this,
           [this](const QString &line, bool standardError) {
-    if (!m_executing) return;
+    if (!m_executing && !m_logSession) return;
     m_channelOutputRecorded = true;
     m_nativeOutput += QDateTime::currentDateTime().toString("[HH:mm:ss] ") +
         (standardError ? "[FASTBOOT ERROR] " : "[FASTBOOT OUTPUT] ") + line + '\n';
@@ -60,7 +60,7 @@ OugaFlashService::OugaFlashService(OugaCommandRunner *runner, QObject *parent)
                 ? output : m_streamedOutput + output;
             if (m_executing)
               updateTransferOutput(complete.mid(m_streamedOutput.size()) + '\n');
-            if (m_executing) {
+            if (m_executing || m_logSession) {
               if (!m_channelOutputRecorded)
                 for (const QString &line : complete.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts))
                   m_nativeOutput += QDateTime::currentDateTime().toString("[HH:mm:ss] ") + "[FASTBOOT OUTPUT] " + line + '\n';
@@ -157,6 +157,33 @@ void OugaFlashService::setPostActions(bool clearData, bool autoReboot) {
   m_clearData = clearData;
   m_autoReboot = autoReboot;
 }
+void OugaFlashService::beginFlashSession(FlashMode mode, const QString &source) {
+  if (m_busy || m_logSession) return;
+  m_logSession = true;
+  m_fullPackage = true;
+  m_plan = Plan();
+  m_plan.options.mode = mode;
+  m_source = source;
+  m_interfacePrefix.clear();
+  m_lines.clear();
+  m_nativeOutput.clear();
+  m_successful = m_completed = 0;
+  m_failedTargets.clear();
+  m_summaryLogged = m_completionLogged = false;
+}
+void OugaFlashService::completeFlashSession(bool stopped, bool cancelled) {
+  if (!m_logSession || m_busy) return;
+  logPartitionSummary();
+  if (!m_completionLogged && (stopped || cancelled)) {
+    writeLog("线刷流程结束：" + QString(stopped ? "任务已按用户请求停止." : "任务已取消."));
+    m_completionLogged = true;
+  }
+}
+void OugaFlashService::saveFlashSession(const QString &interfaceLog) {
+  if (!m_logSession || m_busy) return;
+  if (!saveLog(interfaceLog)) emit log("生成日志文件失败: 无法写入日志文件");
+  m_logSession = false;
+}
 void OugaFlashService::logPartitionSummary() {
   if (!m_fullPackage || m_summaryLogged) return;
   m_summaryLogged = true;
@@ -183,15 +210,18 @@ void OugaFlashService::finish(bool success, const QString &message) {
       if (m_stop) {
         result = "任务已按用户请求停止.";
         writeLog("线刷流程结束：" + result);
+        m_completionLogged = true;
       } else if (success && m_plan.options.mode == FlashMode::OnlyFastbootd &&
                  !m_failedTargets.isEmpty()) {
         const QString count = m_failedTargets.size() == 1 ? "有一个分区刷写失败"
             : QString("有%1个分区刷写失败").arg(m_failedTargets.size());
         result = "所有任务执行完成；" + count + "，为了防止变砖，已自动取消自动重启!";
         writeLog("线刷流程结束：" + result);
+        m_completionLogged = true;
       } else if (success && m_failedTargets.isEmpty() && !m_phaseFailed) {
         result = "所有任务执行成功！";
         writeLog("线刷流程结束：" + result);
+        m_completionLogged = true;
       } else if (!success) {
         writeLog(message);
       }
@@ -203,7 +233,7 @@ void OugaFlashService::finish(bool success, const QString &message) {
       emit transferProgress(m_plan.totalBytes, m_plan.totalBytes);
     success = success && !m_stop && m_failedTargets.isEmpty() && !m_phaseFailed;
     const bool save = m_fullPackage || m_plan.options.mode == FlashMode::AfterSalesFastbootd;
-    if (save && !saveLog()) {
+    if (save && !m_logSession && !saveLog()) {
       emit log("生成日志文件失败: 无法写入日志文件");
     }
     emit progress(m_completed, m_plan.flashCount, result);
@@ -211,20 +241,20 @@ void OugaFlashService::finish(bool success, const QString &message) {
   m_executing = false;
   m_busy = false;
   m_callback = {};
-  DeviceOperationLease::release(this);
+  if (!m_logSession) DeviceOperationLease::release(this);
   emit busyChanged(false);
   emit finished(success && !m_stop, result);
 }
 void OugaFlashService::writeLog(const QString &text) {
   if (text.isEmpty()) return;
-  if (m_executing)
+  if (m_executing || m_logSession)
     m_lines << QDateTime::currentDateTime().toString("[HH:mm:ss ] ") + text;
   emit log(text);
 }
 void OugaFlashService::beginStep(const QString &title) {
   m_stepLine = -1;
   m_transferStepBytes = m_transferImageBytes = 0;
-  if (m_executing) {
+  if (m_executing || m_logSession) {
     m_stepLine = m_lines.size();
     m_lines << QDateTime::currentDateTime().toString("[HH:mm:ss ] ") + title + " ...";
   }
@@ -250,11 +280,11 @@ void OugaFlashService::appendNative(const QString &text, bool error) {
   for (QString line : lines) {
     line = line.trimmed();
     if (line.isEmpty() || line == "ERROR_DETECTED") continue;
-    if (m_executing) m_lines << "    " + line;
+    if (m_executing || m_logSession) m_lines << "    " + line;
     emit nativeLog("    " + line, error);
   }
 }
-bool OugaFlashService::saveLog() {
+bool OugaFlashService::saveLog(const QString &interfaceLog) {
   const QString directory = m_logBase.isEmpty()
       ? QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) : m_logBase;
   if (!QDir().mkpath(directory)) return false;
@@ -267,8 +297,12 @@ bool OugaFlashService::saveLog() {
       "\n刷写模式: " + (sales ? "售后包模式" : "全量包模式") +
       "\n刷写文件路径: " + (m_source.isEmpty() ? "未记录" : m_source) +
       "\n==============================\n\n=== 界面显示日志 ===\n";
-  if (!m_interfacePrefix.isEmpty()) content += m_interfacePrefix + '\n';
-  content += m_lines.join('\n') + "\n\n=== 完整Fastboot输出 ===\n" +
+  if (!interfaceLog.isNull()) content += interfaceLog;
+  else {
+    if (!m_interfacePrefix.isEmpty()) content += m_interfacePrefix + '\n';
+    content += m_lines.join('\n');
+  }
+  content += "\n\n=== 完整Fastboot输出 ===\n" +
       (m_nativeOutput.isEmpty() ? "无fastboot输出记录" : m_nativeOutput.trimmed()) +
       "\n\n=== 日志结束 ===\n";
   content.replace("\r\n", "\n");
@@ -305,7 +339,7 @@ void OugaFlashService::command(
   m_channelOutputRecorded = false;
   m_callback = std::move(cb);
   m_commandFlashTarget = args.value(0) == "flash" ? args.value(1) : QString();
-  if (m_executing) {
+  if (m_executing || m_logSession) {
     const QString timestamp = QDateTime::currentDateTime().toString("[HH:mm:ss] ");
     if (!m_commandFlashTarget.isEmpty())
       m_nativeOutput += timestamp + "[FLASH BEGIN] " + m_commandFlashTarget + " <= \"" + args.value(2) + "\"\n";
@@ -318,7 +352,14 @@ void OugaFlashService::command(
     timeout = qMax(
         1, qMin(timeout, m_connectionReady ? m_timing.stableWindowMs - int(m_stableClock.elapsed())
                                           : m_timing.modeTimeoutMs - int(m_modeClock.elapsed())));
-  m_runner->run(m_tool, a, timeout);
+  if (args.value(0) == "reboot") {
+    const bool fastbootd = args.value(1) == "fastboot";
+    const int deadline = fastbootd ? (m_executing && m_plan.options.mode == FlashMode::RepairFastbootd ? 60000 : 8000)
+                                 : args.value(1) == "bootloader" ? 30000 : 60000;
+    m_runner->runWithPolicy(m_tool, a, deadline, fastbootd);
+  } else {
+    m_runner->run(m_tool, a, timeout);
+  }
 }
 void OugaFlashService::discover(const QString &preferredSerial, std::optional<bool> userspace) {
   if (!acquire()) return;
@@ -441,7 +482,7 @@ void OugaFlashService::startDeviceWaitLog(const QString &title, int timeoutMs) {
   m_deviceWaitTitle = title;
   m_deviceWaitLine = -1;
   const int seconds = (timeoutMs + 999) / 1000;
-  if (m_executing) {
+  if (m_executing || m_logSession) {
     m_deviceWaitLine = m_lines.size();
     m_lines << QDateTime::currentDateTime().toString("[HH:mm:ss ] ") + title + QString::number(seconds) + "s";
   }
@@ -603,8 +644,11 @@ void OugaFlashService::execute(const Plan &plan) {
   m_index = m_completed = m_successful = 0;
   m_failedTargets.clear();
   m_summaryLogged = false;
-  m_lines.clear();
-  m_nativeOutput.clear();
+  if (!m_logSession) {
+    m_lines.clear();
+    m_nativeOutput.clear();
+    m_completionLogged = false;
+  }
   m_phaseFailed = false;
   m_eraseUserdata = m_eraseMetadata = m_wipe = m_misc = true;
   m_clearData = plan.options.clearData;
