@@ -53,7 +53,7 @@ struct Device {
   bool sameSnapshot(const Device &other) const;
 };
 struct Step {
-  enum Kind { Command, ModeSwitch, Wait, Checkpoint, Reprobe, PreSwitchGuard, ClearData, PostActions, CowCleanup, SaleTable };
+  enum Kind { Command, ModeSwitch, Wait, Checkpoint, Reprobe, PreSwitchGuard, ClearData, PostActions, CowCleanup, SaleTable, SaleSlot };
   Kind kind = Command;
   QString title;
   QStringList arguments;

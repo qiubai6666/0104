@@ -786,16 +786,19 @@ void OugaFlashWindow::log(const QString &message) {
   if (text.startsWith("刷写任务总结：") || text.startsWith("线刷流程结束：") ||
       text.startsWith("刷机日志已自动保存在:"))
     color = QColor("#000000");
-  else if (text == "用户取消了操作")
+  else if (text == "用户取消了操作" || text.endsWith("继续使用任务已确认槽位."))
     color = QColor("#FFA500");
   else if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
       text.contains("FAILED") || text.contains("失败") ||
       text.startsWith("分区表为空") || text.startsWith("分区表中没有") ||
       text.startsWith("检测到未解包") || text.startsWith("已安全终止") ||
       text.startsWith("请将BL锁") || text.startsWith("为了本次的刷写安全") ||
-      text.startsWith("已请求停止，将在 ") || text == "已停止任务")
+      text.startsWith("已请求停止，将在 ") || text == "已停止任务" ||
+      text.startsWith("当前全量包线刷流程仅支持") || text.startsWith("无法可靠读取设备当前启动槽位") ||
+      text.startsWith("获取槽位信息") || text == "未找到槽位信息")
     color = QColor("#FF0000");
-  else if (text == "当前无可停止的任务" || text.startsWith("已收到停止请求"))
+  else if (text == "当前无可停止的任务" || text.startsWith("已收到停止请求") ||
+           text == "无法获取设备槽位，默认使用槽位a")
     color = QColor("#FFA500");
   else if (text.startsWith("警告") || text.contains("请求停止") ||
            text.startsWith("刷机包对应的机型为") || text.contains("未验证") || text.contains("取消") ||
@@ -813,12 +816,13 @@ void OugaFlashWindow::log(const QString &message) {
   content.setForeground(color);
   cursor.insertText(text, content);
   QString prefix, valueColor;
+  QString prefixColor = "#000000";
   if (text.startsWith("设备解锁状态...")) {
     prefix = "设备解锁状态...";
     valueColor = text.endsWith("已解锁") ? "#008000" : "#FF0000";
   } else if (text.startsWith("设备当前启动槽位：")) {
     prefix = "设备当前启动槽位：";
-    valueColor = text.endsWith("未知槽位") ? "#FF0000" : "#0000FF";
+    valueColor = text.endsWith("未知槽位") ? "#FF0000" : m_task == Task::Slot || m_page ? "#008000" : "#0000FF";
   } else if (text.startsWith("设备是否处于FastbootD模式...")) {
     prefix = "设备是否处于FastbootD模式...";
     valueColor = text.endsWith("是") ? "#008000" : "#0000FF";
@@ -834,12 +838,16 @@ void OugaFlashWindow::log(const QString &message) {
   } else if (text.startsWith("用户选择的启动槽位：")) {
     prefix = "用户选择的启动槽位：";
     valueColor = "#008000";
+  } else if (text.startsWith("分区表效验通过，") || text.startsWith("分区表效验失败，")) {
+    prefix = text.left(text.indexOf(QChar(0xff0c)) + 1);
+    prefixColor = text.startsWith("分区表效验通过") ? "#008000" : "#FF0000";
+    valueColor = "#000000";
   }
   if (!prefix.isEmpty()) {
     const int end = cursor.position();
     cursor.setPosition(end - text.size());
     cursor.setPosition(end - text.size() + prefix.size(), QTextCursor::KeepAnchor);
-    content.setForeground(QColor("#000000"));
+    content.setForeground(QColor(prefixColor));
     cursor.mergeCharFormat(content);
     cursor.setPosition(end - text.size() + prefix.size());
     cursor.setPosition(end, QTextCursor::KeepAnchor);

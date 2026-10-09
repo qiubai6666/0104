@@ -551,6 +551,10 @@ public:
   std::function<QString()> userspaceOutput;
   std::function<QString()> allOutput;
   std::function<QString()> unlockedOutput, oemOutput;
+  std::function<QString(int)> slotOutput;
+  std::function<QString()> hasSlotOutput;
+  int slotQueries = 0, slotExitCode = 0;
+  bool slotNormal = true, holdSlot = false;
   int deviceLists = 0;
   int probes = 0, outputStyle = 0;
   bool markedOutput = false;
@@ -572,6 +576,7 @@ public:
     }
     if (holdFlash && a.value(0) == "flash")
       return;
+    if (holdSlot && a == QStringList{"getvar", "current-slot"}) return;
     QTimer::singleShot(0, this, [this, a] {
       QString line = a.join(' ');
       if (!failAt.isEmpty() && line.startsWith(failAt)) {
@@ -583,6 +588,18 @@ public:
         ++probes;
         if (beforeProbe)
           beforeProbe(device, probes);
+        if (a.value(1) == "current-slot") {
+          ++slotQueries;
+          if (slotOutput) {
+            const QString result = slotOutput(slotQueries);
+            complete(slotExitCode, slotNormal, result);
+            return;
+          }
+        }
+        if (a.value(1) == "has-slot:boot" && hasSlotOutput) {
+          complete(0, true, hasSlotOutput());
+          return;
+        }
         if (a.value(1) == "is-userspace" && userspaceOutput) {
           complete(0, true, userspaceOutput());
           return;
@@ -778,6 +795,210 @@ class OugaTests : public QObject {
     s.configure(dir + "/fake-fastboot.exe", dir + "/logs");
   }
 private slots:
+  void referenceFullSlotResolution_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::addColumn<bool>("normalMode");
+    for (const QString scenario : {"a", "b", "underscores", "non-ab-no", "non-ab-false", "non-ab-zero",
+                                   "unknown-ab", "unknown-support", "unknown-timeout", "changed", "no-return", "timeout", "exception", "stop"})
+      for (bool normalMode : {false, true})
+        QTest::newRow(qPrintable(scenario + (normalMode ? "-normal" : "-single"))) << scenario << normalMode;
+  }
+  void referenceFullSlotResolution() {
+    QFETCH(QString, scenario); QFETCH(bool, normalMode);
+    FakeRunner runner;
+    runner.slotOutput = [&](int query) {
+      if (scenario == "unknown-timeout") return QString("current-slot: b\nERROR: read-only query timed out");
+      if (scenario.startsWith("non-ab") || scenario.startsWith("unknown")) return QString("no slot variable");
+      if (query == 2) {
+        if (scenario == "changed") return QString("(bootloader) current-slot: b");
+        if (scenario == "no-return") return QString("OKAY");
+        if (scenario == "timeout") return QString("ERROR: read-only query timed out");
+        if (scenario == "exception") { runner.slotNormal = false; runner.slotExitCode = -1; return QString("cannot start process"); }
+      }
+      return QString("(bootloader) current-slot: ") +
+          (scenario == "b" ? "b" : scenario == "underscores" ? "__B" : "a");
+    };
+    runner.hasSlotOutput = [&] {
+      return QString("has-slot:boot: ") + (scenario.startsWith("non-ab-") ?
+                                               (scenario == "non-ab-zero" ? "0" : scenario.mid(7))
+                                               : scenario == "unknown-ab" ? "yes" : "unknown");
+    };
+    runner.holdSlot = scenario == "stop";
+    OugaFlashService service(&runner); configure(service);
+    service.beginFlashSession(normalMode ? FlashMode::Normal : FlashMode::Force, dir);
+    QSignalSpy done(&service, &OugaFlashService::finished), ready(&service, &OugaFlashService::deviceReady);
+    QSignalSpy logs(&service, &OugaFlashService::log);
+    service.resolveFullSlot(runner.device, normalMode);
+    if (scenario == "stop") {
+      QVERIFY(runner.running());
+      service.requestStop();
+      runner.complete(0, true, "current-slot: a");
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 2000);
+    const bool success = !scenario.startsWith("non-ab") && !scenario.startsWith("unknown") && scenario != "stop";
+    QCOMPARE(done[0][0].toBool(), success);
+    QCOMPARE(ready.count(), int(success));
+    const bool unsupported = scenario.startsWith("non-ab") || scenario.startsWith("unknown");
+    const QStringList expected = unsupported ? QStringList{"getvar current-slot", "getvar has-slot:boot"}
+        : normalMode && scenario != "stop" ? QStringList{"getvar current-slot", "getvar current-slot"}
+                                           : QStringList{"getvar current-slot"};
+    QCOMPARE(runner.trace, expected);
+    QList<int> expectedTimeouts;
+    if (expected.size() == 1) expectedTimeouts = {15000};
+    else if (unsupported) expectedTimeouts = {15000, 15000};
+    else expectedTimeouts = {15000, 10000};
+    QCOMPARE(runner.readTimeouts, expectedTimeouts);
+    if (success) {
+      const QString expectedSlot = scenario == "b" || scenario == "underscores" ||
+          (normalMode && scenario == "changed") ? "b" : "a";
+      QCOMPARE(qvariant_cast<Device>(ready[0][0]).slot, expectedSlot);
+    }
+    QString text;
+    for (const auto &line : logs) text += line[0].toString() + '\n';
+    if (unsupported) QVERIFY(text.contains(scenario.startsWith("non-ab")
+        ? "当前全量包线刷流程仅支持A/B槽设备，已安全终止任务."
+        : "无法可靠读取设备当前启动槽位，已安全终止任务."));
+    if (normalMode && scenario == "no-return") QVERIFY(text.contains("本次槽位查询无返回，继续使用任务已确认槽位."));
+    if (normalMode && scenario == "timeout") QVERIFY(text.contains("获取槽位信息超时，继续使用任务已确认槽位."));
+    if (normalMode && scenario == "exception") QVERIFY(text.contains("槽位查询异常，继续使用任务已确认槽位."));
+    service.completeFlashSession(scenario == "stop", false);
+    DeviceOperationLease::release(&service);
+    service.saveFlashSession(text);
+    const auto files = QDir(dir + "/logs").entryList({"*.txt"}, QDir::Files);
+    QCOMPARE(files.size(), 1);
+    const QString content = QString::fromUtf8(read(dir + "/logs/" + files.first()));
+    QVERIFY(!content.contains("[FASTBOOT CMD] getvar current-slot"));
+    QVERIFY(!content.contains("[FASTBOOT CMD] -s TEST-SERIAL getvar current-slot"));
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void referenceWidgetSlotRefresh_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::addColumn<int>("mode");
+    for (FlashMode mode : {FlashMode::Normal, FlashMode::BothSlots, FlashMode::Force, FlashMode::OnlyFastbootd})
+      for (const QString scenario : {"changed", "fallback", "non-ab", "unknown", "incompatible"})
+        QTest::newRow(qPrintable(QString::number(int(mode)) + '-' + scenario)) << scenario << int(mode);
+  }
+  void referenceWidgetSlotRefresh() {
+    QFETCH(QString, scenario);
+    QFETCH(int, mode);
+    QMap<QString, QByteArray> previousAuxiliary;
+    const QString auxiliaryDirectory = QCoreApplication::applicationDirPath() + "/tmp";
+    QVERIFY(QDir().mkpath(auxiliaryDirectory));
+    const auto restoreAuxiliary = qScopeGuard([&] {
+      for (auto it = previousAuxiliary.cbegin(); it != previousAuxiliary.cend(); ++it) {
+        if (it.value().isNull()) QFile::remove(it.key());
+        else put(it.key(), it.value());
+      }
+    });
+    for (const QString name : {"my_company", "my_preload"}) {
+      const QString file = auxiliaryDirectory + '/' + name + ".img";
+      previousAuxiliary[file] = QFileInfo::exists(file) ? read(file) : QByteArray();
+      const QByteArray reference = read(QFINDTESTDATA(qPrintable("../qiubai/tmp/" + name + ".img")));
+      QVERIFY(!reference.isEmpty());
+      QVERIFY(put(file, reference));
+    }
+    FakeRunner runner;
+    runner.multipleDevices = false;
+    runner.slotOutput = [&](int query) {
+      if (query == 1) return QString("current-slot: a");
+      if (scenario == "non-ab" || scenario == "unknown") return QString("no slot");
+      if (scenario == "fallback" && query == 3) return QString("no slot");
+      return QString("current-slot: b");
+    };
+    runner.hasSlotOutput = [&] { return scenario == "non-ab" ? QString("has-slot:boot: no") : QString("has-slot:boot: yes"); };
+    QVERIFY(put(dir + "/boot.img", QByteArray(512, 'b')));
+    QVERIFY(put(dir + "/xbl.img", QByteArray(512, 'x')));
+    if (scenario == "incompatible") QVERIFY(put(dir + "/missing_physical.img", QByteArray(512, 'm')));
+    const QString tool = dir + "/fake-fastboot.exe";
+    QVERIFY(put(tool, "Injected runner only"));
+    QSettings().setValue("Ouga/fastboot", tool);
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show(); configure(*window.findChild<OugaFlashService *>());
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(dir);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    window.findChild<QCheckBox *>("ClearDataCheckBox")->setChecked(false);
+    window.findChild<QCheckBox *>("AutoRebootOugaCheckBox")->setChecked(false);
+    if (FlashMode(mode) == FlashMode::BothSlots) window.findChild<QCheckBox *>("FlashABCheckBox")->setChecked(true);
+    if (FlashMode(mode) == FlashMode::Force) window.findChild<QCheckBox *>("FixSuperCheckBox")->setChecked(true);
+    if (FlashMode(mode) == FlashMode::OnlyFastbootd) window.findChild<QCheckBox *>("PureFBDCheckBox")->setChecked(true);
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, &window, [&] {
+      if (auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+        QCOMPARE(dialog->objectName(), QString("OugaTargetSlotDialog"));
+        dialog->accept();
+      }
+    });
+    answer.start(5);
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 5000);
+    answer.stop();
+    const bool writes = scenario == "changed" || scenario == "fallback";
+    const bool normalMode = FlashMode(mode) == FlashMode::Normal;
+    QCOMPARE(runner.trace.filter("flash boot_b ").size(), int(writes && (normalMode || FlashMode(mode) == FlashMode::BothSlots)));
+    QCOMPARE(runner.trace.filter("flash boot_a ").size(), int(writes && !normalMode));
+    QCOMPARE(runner.slotQueries, scenario == "incompatible" ? 1 : writes && normalMode ? 3 : 2);
+    const int table = runner.trace.indexOf("getvar all");
+    QVERIFY(table >= 0);
+    if (scenario != "incompatible") QVERIFY(runner.trace.indexOf("getvar current-slot", table) > table);
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
+    QVERIFY(log.contains(scenario == "incompatible" ? "分区表效验失败，" : "分区表效验通过，"));
+    if (scenario == "fallback" && normalMode) QVERIFY(log.contains("本次槽位查询无返回，继续使用任务已确认槽位."));
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(window.close());
+  }
+  void referenceSaleSlotRefresh_data() {
+    QTest::addColumn<int>("mode"); QTest::addColumn<QString>("scenario");
+    for (FlashMode mode : {FlashMode::AfterSalesBootloader, FlashMode::AfterSalesFastbootd})
+      for (const QString scenario : {"changed", "missing", "timeout", "exception", "stop"})
+        QTest::newRow(qPrintable(QString::number(int(mode)) + '-' + scenario)) << int(mode) << scenario;
+  }
+  void referenceSaleSlotRefresh() {
+    QFETCH(int, mode); QFETCH(QString, scenario);
+    FakeRunner runner;
+    runner.device.partitions.insert("abl_b");
+    runner.device.sizes["abl_b"] = 4096;
+    runner.device.slot = "a";
+    runner.device.userspace = FlashMode(mode) == FlashMode::AfterSalesFastbootd;
+    runner.slotOutput = [&](int) {
+      if (scenario == "timeout") return QString("ERROR: read-only query timed out");
+      if (scenario == "exception") { runner.slotNormal = false; runner.slotExitCode = -1; return QString("cannot start process"); }
+      return scenario == "changed" ? QString("current-slot: __B") : QString("no slot");
+    };
+    auto opts = options(FlashMode(mode));
+    opts.afterSuper = FlashMode(mode) == FlashMode::AfterSalesBootloader;
+    opts.clearData = opts.autoReboot = false;
+    const QVector<Partition> images = {image("abl"), image("xbl")};
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(images, runner.device, opts, &plan, &error), qPrintable(error));
+    OugaFlashService service(&runner); configure(service);
+    QSignalSpy done(&service, &OugaFlashService::finished), logs(&service, &OugaFlashService::log);
+    runner.holdSlot = scenario == "stop";
+    service.execute(plan);
+    if (scenario == "stop") {
+      QTRY_VERIFY_WITH_TIMEOUT(runner.running() && runner.trace.last() == "getvar current-slot", 2000);
+      service.requestStop(); runner.complete(0, true, "current-slot: b");
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QCOMPARE(done[0][0].toBool(), scenario != "stop");
+    QCOMPARE(runner.trace.count("getvar current-slot"), 1);
+    const int query = runner.trace.indexOf("getvar current-slot");
+    QCOMPARE(runner.readTimeouts[query], 10000);
+    if (scenario != "stop") {
+      QVERIFY(runner.trace.indexOf("getvar all") > query);
+      if (FlashMode(mode) == FlashMode::AfterSalesBootloader)
+        QVERIFY(runner.trace.indexOf("reboot fastboot") < query);
+    }
+    const int writes = scenario == "changed" ? (FlashMode(mode) == FlashMode::AfterSalesBootloader ? 2 : 1) : 0;
+    QCOMPARE(runner.trace.filter("flash abl_").size(), writes);
+    QString text;
+    for (const auto &line : logs) text += line[0].toString() + '\n';
+    QVERIFY(text.contains("正在获取设备槽位信息..."));
+    if (scenario == "changed") QVERIFY(text.contains("设备当前启动槽位：B槽"));
+    else if (scenario != "stop") QVERIFY(text.contains("无法获取设备槽位，默认使用槽位a"));
+    QVERIFY(!DeviceOperationLease::owner());
+  }
   void referenceSparseTransfer() {
     FakeRunner runner;
     runner.holdFlash = true;

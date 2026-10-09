@@ -49,7 +49,7 @@ OugaFlashService::OugaFlashService(OugaCommandRunner *runner, QObject *parent)
   });
   connect(runner, &OugaCommandRunner::nativeOutputLine, this,
           [this](const QString &line, bool standardError) {
-    if (!m_executing && !m_logSession) return;
+    if ((!m_executing && !m_logSession) || !m_recordCommand) return;
     m_channelOutputRecorded = true;
     m_nativeOutput += QDateTime::currentDateTime().toString("[HH:mm:ss] ") +
         (standardError ? "[FASTBOOT ERROR] " : "[FASTBOOT OUTPUT] ") + line + '\n';
@@ -60,7 +60,7 @@ OugaFlashService::OugaFlashService(OugaCommandRunner *runner, QObject *parent)
                 ? output : m_streamedOutput + output;
             if (m_executing)
               updateTransferOutput(complete.mid(m_streamedOutput.size()) + '\n');
-            if (m_executing || m_logSession) {
+            if ((m_executing || m_logSession) && m_recordCommand) {
               if (!m_channelOutputRecorded)
                 for (const QString &line : complete.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts))
                   m_nativeOutput += QDateTime::currentDateTime().toString("[HH:mm:ss] ") + "[FASTBOOT OUTPUT] " + line + '\n';
@@ -167,6 +167,7 @@ void OugaFlashService::beginFlashSession(FlashMode mode, const QString &source) 
   m_interfacePrefix.clear();
   m_lines.clear();
   m_nativeOutput.clear();
+  m_confirmedSlot.clear();
   m_successful = m_completed = 0;
   m_failedTargets.clear();
   m_summaryLogged = m_completionLogged = false;
@@ -321,7 +322,7 @@ bool OugaFlashService::saveLog(const QString &interfaceLog) {
 }
 void OugaFlashService::command(
     const QStringList &args, std::function<void(int, bool, const QString &)> cb,
-    bool bound, int timeoutMs) {
+    bool bound, int timeoutMs, bool recordNative) {
   if (m_stop) {
     finish(false, "已请求停止；不会启动下一条命令，已写内容不会回滚");
     return;
@@ -337,9 +338,10 @@ void OugaFlashService::command(
   a += args;
   m_streamedOutput.clear();
   m_channelOutputRecorded = false;
+  m_recordCommand = recordNative;
   m_callback = std::move(cb);
   m_commandFlashTarget = args.value(0) == "flash" ? args.value(1) : QString();
-  if (m_executing || m_logSession) {
+  if ((m_executing || m_logSession) && m_recordCommand) {
     const QString timestamp = QDateTime::currentDateTime().toString("[HH:mm:ss] ");
     if (!m_commandFlashTarget.isEmpty())
       m_nativeOutput += timestamp + "[FLASH BEGIN] " + m_commandFlashTarget + " <= \"" + args.value(2) + "\"\n";
@@ -460,6 +462,56 @@ void OugaFlashService::readPartitionTable(const Device &device) {
     emit deviceReady(updated);
     finish(true, {});
   }, true, 30000);
+}
+void OugaFlashService::resolveFullSlot(const Device &device, bool queryAgain) {
+  if (!acquire()) return;
+  m_serial = device.serial;
+  auto ready = [this, device](const QString &slot) {
+    if (m_stop) { finish(false, {}); return; }
+    Ouga::Device resolved = device;
+    resolved.slot = slot;
+    m_expected = resolved;
+    emit deviceReady(resolved);
+    finish(true, {});
+  };
+  command({"getvar", "current-slot"}, [this, ready, queryAgain](int, bool, const QString &output) {
+    if (m_stop) { finish(false, {}); return; }
+    const QString slot = output.contains("read-only query timed out") ? QString() : parseDevice(m_serial, output).slot;
+    if (slot == "a" || slot == "b") {
+      m_confirmedSlot = slot;
+      if (queryAgain) queryCurrentSlot(ready, true);
+      else ready(slot);
+      return;
+    }
+    command({"getvar", "has-slot:boot"}, [this](int, bool, const QString &out) {
+      if (m_stop) { finish(false, {}); return; }
+      const QString value = parseDevice(m_serial, out).variables.value("has-slot:boot");
+      const bool nonAb = QRegularExpression("^(?:no|false|0)$", QRegularExpression::CaseInsensitiveOption).match(value).hasMatch();
+      writeLog(nonAb ? "当前全量包线刷流程仅支持A/B槽设备，已安全终止任务."
+                     : "无法可靠读取设备当前启动槽位，已安全终止任务.");
+      finish(false, {});
+    }, true, 15000, false);
+  }, true, 15000, false);
+}
+void OugaFlashService::queryCurrentSlot(std::function<void(const QString &)> ready, bool useConfirmedSlot) {
+  command({"getvar", "current-slot"}, [this, ready, useConfirmedSlot](int, bool normal, const QString &output) {
+    if (m_stop) { finish(false, {}); return; }
+    const bool timedOut = output.contains("read-only query timed out");
+    const QString slot = !timedOut ? parseDevice(m_serial, output).slot : QString();
+    if (normal && (slot == "a" || slot == "b")) {
+      if (useConfirmedSlot) m_confirmedSlot = slot;
+      ready(slot);
+      return;
+    }
+    const bool cached = useConfirmedSlot && (m_confirmedSlot == "a" || m_confirmedSlot == "b");
+    if (cached)
+      writeLog(timedOut ? "获取槽位信息超时，继续使用任务已确认槽位."
+          : normal ? "本次槽位查询无返回，继续使用任务已确认槽位."
+                   : "槽位查询异常，继续使用任务已确认槽位.");
+    else
+      writeLog(timedOut ? "获取槽位信息超时" : normal ? "未找到槽位信息" : "获取槽位信息出错：" + output);
+    ready(cached ? m_confirmedSlot : QString());
+  }, true, 10000, false);
 }
 void OugaFlashService::queryMode(std::function<void(bool)> ready) {
   const auto mode = [](const QString &output) -> std::optional<bool> {
@@ -729,6 +781,17 @@ void OugaFlashService::next() {
     }
     ++m_index;
     next();
+    return;
+  }
+  if (step.kind == Step::SaleSlot) {
+    writeLog("正在获取设备槽位信息...");
+    queryCurrentSlot([this](const QString &slot) {
+      m_expected.slot = slot.isEmpty() ? QString("a") : slot;
+      if (slot.isEmpty()) writeLog("无法获取设备槽位，默认使用槽位a");
+      else writeLog("设备当前启动槽位：" + slot.toUpper() + "槽");
+      ++m_index;
+      next();
+    }, false);
     return;
   }
   if (step.kind == Step::CowCleanup) {

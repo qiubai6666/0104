@@ -23,6 +23,7 @@ public:
   void probe(const QString &serial, bool fullPackage = true,
              std::optional<bool> requiredMode = {}, bool readSlot = false);
   void readPartitionTable(const Ouga::Device &device);
+  void resolveFullSlot(const Ouga::Device &device, bool queryAgain);
   void prepareMode(const QString &serial,
                    bool userspace); // explicit preparation, never flash
   void execute(const Ouga::Plan &plan);
@@ -52,6 +53,8 @@ private:
   Timing m_timing;
   QString m_tool, m_logBase, m_serial, m_streamedOutput, m_commandFlashTarget;
   QString m_source, m_interfacePrefix, m_nativeOutput;
+  QString m_confirmedSlot;
+  bool m_recordCommand = true;
   QStringList m_lines, m_failedTargets;
   Ouga::Plan m_plan;
   Ouga::Device m_expected;
@@ -81,7 +84,7 @@ private:
   void logPartitionSummary();
   void command(const QStringList &args,
                std::function<void(int, bool, const QString &)> callback,
-               bool bound = true, int timeoutMs = -1);
+               bool bound = true, int timeoutMs = -1, bool recordNative = true);
   void waitDevice(std::optional<bool> userspace, std::function<void()> ready,
                   std::function<void()> failed = {}, bool showSerial = false,
                   const QString &title = {});
@@ -94,6 +97,7 @@ private:
                   std::function<void()> failed);
   void queryDevice(std::function<void(const Ouga::Device &)> ready, bool includeMode);
   void queryUnlock(std::function<void(std::optional<bool>)> ready);
+  void queryCurrentSlot(std::function<void(const QString &)> ready, bool useConfirmedSlot);
   void queryMode(std::function<void(bool)> ready);
   void startDeviceWaitLog(const QString &title, int timeoutMs);
   void updateDeviceWaitLog(const QString &result, int state);

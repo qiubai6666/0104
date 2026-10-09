@@ -69,6 +69,7 @@ private:
     Probe,
     Switch,
     PartitionTable,
+    Slot,
     Execute,
     ArbDiscover,
     Arb

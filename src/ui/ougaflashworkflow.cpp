@@ -902,10 +902,12 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
       const QString serial = m_serials.first();
       m_task = Task::Probe;
       m_service->probe(serial, !m_page && m_requestedMode != FlashMode::RepairFastbootd,
-                       initialConnectionMode(m_requestedMode), m_requestedMode == FlashMode::AfterSalesFastbootd);
+                       initialConnectionMode(m_requestedMode));
       return;
     }
-    if (completed == Task::PartitionTable) {
+    if (completed == Task::PartitionTable || completed == Task::Slot) {
+      if (completed == Task::Slot && m_requestedMode == FlashMode::BothSlots)
+        log("设备当前启动槽位：" + m_device.slot.toUpper() + "槽");
       buildAndExecute();
       return;
     }
@@ -964,8 +966,20 @@ void OugaFlashWindow::buildAndExecute() {
   if (!continueTask(taskGeneration))
     return;
   Page &page = m_pages[m_page];
-  if (!m_page && m_requestedMode != FlashMode::RepairFastbootd &&
-      !validateProcessorFeatures()) return;
+  if (!m_page && m_requestedMode != FlashMode::RepairFastbootd && m_task != Task::Slot) {
+    if (!validateProcessorFeatures()) return;
+    if (m_validateOn->isChecked()) {
+      QString error;
+      if (!OugaFlashPlanner::compatibleTable(page.images, m_device, &error)) {
+        endTask(false, error);
+        return;
+      }
+      log("分区表效验通过，固件包与设备分区表匹配.");
+    }
+    m_task = Task::Slot;
+    m_service->resolveFullSlot(m_device, m_requestedMode == FlashMode::Normal);
+    return;
+  }
   const bool additional = needsAdditionalImages(m_requestedMode);
   QVector<Partition> planImages = page.images;
   if (m_requestedMode == FlashMode::RepairFastbootd) {

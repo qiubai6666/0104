@@ -194,6 +194,19 @@ bool extra(const Partition &image) {
   return name == "my_company" || name == "my_preload";
 }
 } // namespace
+bool OugaFlashPlanner::compatibleTable(const QVector<Partition> &images,
+                                        const Device &device, QString *error) {
+  for (const Partition &image : images) {
+    if (!image.selected || image.path.trimmed().isEmpty() ||
+        image.path.contains("(缺失)", Qt::CaseInsensitive) || !QFileInfo::exists(image.path)) continue;
+    const QString name = baseName(image.name);
+    if (logicalName(name) || name == "modem") continue;
+    if (!device.partitions.contains(name) && !device.partitions.contains(name + "_a") &&
+        !device.partitions.contains(name + "_b"))
+      return fail(error, "分区表效验失败，刷写固件包与设备分区表不匹配，请检查刷机包是否正确，若刷机包正确，可关闭分区表效验功能后，重新点击开始线刷按钮.");
+  }
+  return true;
+}
 QVector<Step> OugaFlashPlanner::postActions(const Device &device,
                                           const Options &options) {
   Builder b;
@@ -269,15 +282,7 @@ bool OugaFlashPlanner::build(const QVector<Partition> &sourceImages, const Devic
     selected << image;
   }
   if (selected.isEmpty() && !afterFb) return fail(error, "分区表中没有已勾选的镜像文件，请先勾选需要刷写的分区.");
-  if (options.validateTable && !repair && !afterFb && !afterFbd)
-    for (const Partition &image : selected) {
-      const QString name = baseName(image.name);
-      if (logicalName(name) || name == "modem" ||
-          (needsAdditionalImages(options.mode) && extra(image))) continue;
-      if (!device.partitions.contains(name) && !device.partitions.contains(name + "_a") &&
-          !device.partitions.contains(name + "_b"))
-        return fail(error, "分区表效验失败，刷写固件包与设备分区表不匹配，请检查刷机包是否正确，若刷机包正确，可关闭分区表效验功能后，重新点击开始线刷按钮.");
-    }
+  if (options.validateTable && !independent && !compatibleTable(selected, device, error)) return false;
   if (ab) {
     if (options.targetSlot != "a" && options.targetSlot != "b")
       return fail(error, "请选择启动槽位");
@@ -321,6 +326,9 @@ bool OugaFlashPlanner::build(const QVector<Partition> &sourceImages, const Devic
     if (afterFb) {
       if (!b.critical(images)) return fail(error, b.error);
       b.switchMode(true);
+      Step slot;
+      slot.kind = Step::SaleSlot;
+      b.p.steps << slot;
       b.cow();
       Step table;
       table.kind = Step::SaleTable;
@@ -383,6 +391,11 @@ bool OugaFlashPlanner::build(const QVector<Partition> &sourceImages, const Devic
         }
         if (!b.rebuild(rebuildImages)) return fail(error, b.error);
         if (!preSwitch && !ab) b.cow();
+      }
+      if (afterFbd) {
+        Step slot;
+        slot.kind = Step::SaleSlot;
+        b.p.steps << slot;
       }
       if (!preSwitch && !ab && !(force || only || (ab && b.slot != device.slot))) b.cow();
       if (afterFbd) {

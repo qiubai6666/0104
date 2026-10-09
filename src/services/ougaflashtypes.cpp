@@ -171,7 +171,7 @@ Device parseDevice(const QString &serial, const QString &out) {
   }
   d.product = d.variables.value("product");
   d.slot = d.variables.value("current-slot").trimmed().toLower();
-  if (d.slot.startsWith('_'))
+  while (d.slot.startsWith('_'))
     d.slot.remove(0, 1);
   QString mode = d.variables.value("is-userspace").toLower(),
           unlock = d.variables.value("unlocked").toLower();
