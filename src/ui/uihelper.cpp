@@ -31,9 +31,15 @@ protected:
         QPainter painter(window);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setBrush(fill);
-        painter.setPen(QPen(dark ? QColor(255, 255, 255, 32) : QColor(255, 255, 255, 180), 1));
+        const qreal borderWidth = capsule ? 1.0 : 1.5;
+        const QColor border = capsule
+            ? (dark ? QColor(255, 255, 255, 32) : QColor(255, 255, 255, 180))
+            : (dark ? QColor(156, 193, 214, 160) : QColor(105, 142, 162, 180));
+        painter.setPen(QPen(border, borderWidth));
         const qreal radius = capsule ? window->width() / 2.0 : 28;
-        painter.drawRoundedRect(QRectF(window->rect()).adjusted(.5, .5, -.5, -.5), radius, radius);
+        // Keep the full antialiased outline inside the translucent window.
+        const qreal inset = borderWidth / 2.0;
+        painter.drawRoundedRect(QRectF(window->rect()).adjusted(inset, inset, -inset, -inset), radius, radius);
         return true;
     }
 };

@@ -62,6 +62,69 @@ private slots:
                     ++mismatches;
         QCOMPARE(mismatches, 0);
     }
+    void floatingSurfaceOutline_data()
+    {
+        QTest::addColumn<bool>("dark");
+        QTest::addColumn<bool>("capsule");
+        QTest::addColumn<qreal>("ratio");
+        for (bool dark : {false, true})
+            for (bool capsule : {false, true})
+                for (qreal ratio : scales)
+                    QTest::newRow(qPrintable(QString("%1-%2@%3")
+                        .arg(dark ? "dark" : "light", capsule ? "capsule" : "drawer")
+                        .arg(ratio))) << dark << capsule << ratio;
+    }
+    void floatingSurfaceOutline()
+    {
+        QFETCH(bool, dark);
+        QFETCH(bool, capsule);
+        QFETCH(qreal, ratio);
+        const QPalette originalPalette = QApplication::palette();
+        QPalette palette = originalPalette;
+        palette.setColor(QPalette::Window, dark ? QColor(35, 42, 48) : QColor(240, 240, 240));
+        QApplication::setPalette(palette);
+        QWidget window;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        UIHelper::applyFloatingSurface(&window, capsule);
+        if (capsule) window.setFixedSize(48, 372);
+        const QSize pixelSize(qRound(window.width() * ratio), qRound(window.height() * ratio));
+        QImage actual(pixelSize, QImage::Format_ARGB32_Premultiplied);
+        actual.setDevicePixelRatio(ratio);
+        actual.fill(Qt::transparent);
+        {
+            QPainter painter(&actual);
+            window.render(&painter);
+        }
+        QApplication::setPalette(originalPalette);
+
+        // Independent raster reference: the capsule keeps its original outline;
+        // only the 28px drawers receive the clearer 1.5px blue-grey outline.
+        QImage expected(pixelSize, QImage::Format_ARGB32_Premultiplied);
+        expected.setDevicePixelRatio(ratio);
+        expected.fill(Qt::transparent);
+        QColor fill = capsule ? (dark ? QColor(39, 56, 64) : QColor(195, 219, 228))
+                              : (dark ? QColor(35, 42, 48) : QColor(255, 255, 255));
+        fill.setAlpha(capsule ? 102 : 184);
+        const QColor border = capsule
+            ? (dark ? QColor(255, 255, 255, 32) : QColor(255, 255, 255, 180))
+            : (dark ? QColor(156, 193, 214, 160) : QColor(105, 142, 162, 180));
+        const qreal inset = capsule ? .5 : .75;
+        const qreal radius = capsule ? 24 : 28;
+        {
+            QPainter painter(&expected);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setBrush(fill);
+            painter.setPen(QPen(border, capsule ? 1.0 : 1.5));
+            painter.drawRoundedRect(QRectF(QPointF(), QSizeF(window.size()))
+                .adjusted(inset, inset, -inset, -inset), radius, radius);
+        }
+        QCOMPARE(actual, expected);
+        QCOMPARE(actual.pixelColor(0, 0).alpha(), 0);
+        QCOMPARE(actual.pixelColor(actual.width() / 2, actual.height() / 2).alpha(), fill.alpha());
+        QCOMPARE(window.property("surfaceRadius").toInt(), capsule ? 24 : 28);
+        QCOMPARE(window.property("surfaceOpacity").toDouble(), capsule ? .4 : .72);
+        if (!capsule) QCOMPARE(window.size(), QSize(296, 336));
+    }
     void cleanupTestCase()
     {
         const QString output = qEnvironmentVariable("MENU_ICON_PREVIEW");
