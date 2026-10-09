@@ -11,7 +11,7 @@
 namespace {
 const QStringList names = {"monitor-smartphone", "wrench", "package-open", "file-down",
     "smartphone", "sliders-horizontal", "message-circle", "power", "panel-right-close"};
-const QList<qreal> scales = {1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0};
+const QList<qreal> scales = {1.0, 1.25, 1.5, 1.5625, 1.75, 2.0, 2.5, 3.0};
 QImage renderButton(MainMenuButton &button, qreal ratio = 1.0)
 {
     QImage image(QSize(qRound(button.width() * ratio), qRound(button.height() * ratio)),
@@ -33,6 +33,40 @@ void leaveButton(QWidget &button)
     QCoreApplication::sendEvent(&button, &event);
 }
 
+void prepareButton(MainMenuButton &button, bool dark = false)
+{
+    QPalette palette = button.palette();
+    palette.setColor(QPalette::Window, dark ? QColor(35, 42, 48) : QColor(240, 240, 240));
+    button.setPalette(palette);
+    button.setFixedSize(38, 38);
+    button.setIcon(UIHelper::menuIcon("power", button.devicePixelRatioF()));
+    button.setIconSize(QSize(24, 24));
+    button.setAttribute(Qt::WA_DontShowOnScreen);
+    button.show();
+    leaveButton(button);
+    auto *animation = button.findChild<QVariantAnimation *>();
+    animation->setCurrentTime(animation->duration());
+}
+QColor strokeColor(const QImage &image)
+{
+    QColor result(Qt::transparent);
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x) {
+            const QColor color = image.pixelColor(x, y);
+            if (color.alpha() > result.alpha()) result = color;
+        }
+    return result;
+}
+QImage alphaMask(const QImage &image)
+{
+    QImage result(image.size(), QImage::Format_ARGB32);
+    result.setDevicePixelRatio(image.devicePixelRatio());
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+            result.setPixel(x, y, qRgba(255, 255, 255, qAlpha(image.pixel(x, y))));
+    return result;
+}
+
 QImage reference(const QString &name, qreal ratio)
 {
     QFile file(":/menu-icons/" + name + ".svg");
@@ -42,14 +76,15 @@ QImage reference(const QString &name, qreal ratio)
     svg.replace("currentColor", dark ? "#dce8ef" : "#385565");
     QSvgRenderer renderer(svg);
     if (!renderer.isValid()) return {};
-    // Independent reference: paint physical pixels at DPR=1, then tag the image.
+    // Independent reference: paint at DPR=1, keeping the logical 24px bounds
+    // even when the physical storage size must round a fractional pixel.
     const int pixels = qRound(24 * ratio);
     QImage image(pixels, pixels, QImage::Format_ARGB32_Premultiplied);
     image.fill(Qt::transparent);
     {
         QPainter painter(&image);
         painter.setRenderHint(QPainter::Antialiasing);
-        renderer.render(&painter, QRectF(0, 0, pixels, pixels));
+        renderer.render(&painter, QRectF(0, 0, 24 * ratio, 24 * ratio));
     }
     image.setDevicePixelRatio(ratio);
     return image;
@@ -89,38 +124,33 @@ private slots:
     void hoverTransitionsRetargetWithoutJumping()
     {
         MainMenuButton button;
-        button.setFixedSize(38, 38);
-        button.setAttribute(Qt::WA_DontShowOnScreen);
-        button.show();
+        prepareButton(button);
         auto *animation = button.findChild<QVariantAnimation *>();
         QVERIFY(animation);
-        leaveButton(button);
-        animation->setCurrentTime(animation->duration());
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 0);
+        const QImage resting = renderButton(button);
+        QCOMPARE(strokeColor(resting), QColor("#68818e"));
         enterButton(button);
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 0);
-        animation->setCurrentTime(70);
+        QCOMPARE(renderButton(button), resting);
+        animation->setCurrentTime(animation->duration() / 2);
         const auto midpoint = renderButton(button);
-        const int alpha = midpoint.pixelColor(19, 19).alpha();
-        QVERIFY(alpha > 0 && alpha < 110);
+        const int lightness = strokeColor(midpoint).lightness();
+        QVERIFY(lightness < QColor("#68818e").lightness());
+        QVERIFY(lightness > QColor("#385565").lightness());
+        QCOMPARE(alphaMask(midpoint), alphaMask(resting));
         leaveButton(button);
         QCOMPARE(renderButton(button), midpoint);
-        animation->setCurrentTime(90);
-        QVERIFY(renderButton(button).pixelColor(19, 19).alpha() < alpha);
-        animation->setCurrentTime(180);
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 0);
+        animation->setCurrentTime(animation->duration() / 2);
+        QVERIFY(strokeColor(renderButton(button)).lightness() > lightness);
+        animation->setCurrentTime(animation->duration());
+        QCOMPARE(renderButton(button), resting);
         QCOMPARE(button.size(), QSize(38, 38));
     }
     void mouseFocusAndDeselectionLeaveNoOutline()
     {
         MainMenuButton button;
-        button.setFixedSize(38, 38);
-        button.setAttribute(Qt::WA_DontShowOnScreen);
-        button.show();
+        prepareButton(button);
         auto *animation = button.findChild<QVariantAnimation *>();
         QVERIFY(animation);
-        leaveButton(button);
-        animation->setCurrentTime(animation->duration());
         const QImage resting = renderButton(button);
         QFocusEvent mouseFocus(QEvent::FocusIn, Qt::MouseFocusReason);
         QCoreApplication::sendEvent(&button, &mouseFocus);
@@ -128,6 +158,7 @@ private slots:
         button.setProperty("menuSelected", true);
         animation->setCurrentTime(animation->duration());
         QVERIFY(renderButton(button) != resting);
+        QCOMPARE(alphaMask(renderButton(button)), alphaMask(resting));
         button.setProperty("menuSelected", false);
         animation->setCurrentTime(animation->duration());
         QCOMPARE(renderButton(button), resting);
@@ -140,23 +171,21 @@ private slots:
     void selectionAndHoverRemainIndependent()
     {
         MainMenuButton button;
-        button.setFixedSize(38, 38);
-        button.setAttribute(Qt::WA_DontShowOnScreen);
-        button.show();
+        prepareButton(button);
         auto *animation = button.findChild<QVariantAnimation *>();
         QVERIFY(animation);
         button.setProperty("menuSelected", true);
         animation->setCurrentTime(animation->duration());
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 210);
+        QCOMPARE(strokeColor(renderButton(button)), QColor("#193f55"));
         enterButton(button);
         leaveButton(button);
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 210);
+        QCOMPARE(strokeColor(renderButton(button)), QColor("#193f55"));
         enterButton(button);
         button.setProperty("menuSelected", false);
         animation->setCurrentTime(animation->duration());
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 110);
+        QCOMPARE(strokeColor(renderButton(button)), QColor("#385565"));
         button.hide();
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 0);
+        QCOMPARE(strokeColor(renderButton(button)), QColor("#68818e"));
     }
     void themedHoverClearsWhenDisabled_data()
     {
@@ -168,36 +197,98 @@ private slots:
     {
         QFETCH(bool, dark);
         MainMenuButton button;
-        QPalette palette = button.palette();
-        palette.setColor(QPalette::Window, dark ? QColor(35, 42, 48) : QColor(240, 240, 240));
-        button.setPalette(palette);
-        button.setFixedSize(38, 38);
-        button.setAttribute(Qt::WA_DontShowOnScreen);
-        button.show();
+        prepareButton(button, dark);
         auto *animation = button.findChild<QVariantAnimation *>();
         QVERIFY(animation);
+        const QImage resting = renderButton(button);
         enterButton(button);
         animation->setCurrentTime(animation->duration());
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), dark ? 85 : 110);
+        QCOMPARE(strokeColor(renderButton(button)), QColor(dark ? "#cedde6" : "#385565"));
+        button.setProperty("menuSelected", true);
+        animation->setCurrentTime(animation->duration());
+        QCOMPARE(strokeColor(renderButton(button)), QColor(dark ? "#f4faff" : "#193f55"));
         button.setEnabled(false);
-        QCOMPARE(renderButton(button).pixelColor(19, 19).alpha(), 0);
+        QCOMPARE(strokeColor(renderButton(button)), QColor(dark ? "#556772" : "#9baab2"));
+        QCOMPARE(alphaMask(renderButton(button)), alphaMask(resting));
         QCOMPARE(animation->state(), QAbstractAnimation::Stopped);
+    }
+    void pressAndDirectClickUseColorOnly()
+    {
+        MainMenuButton button;
+        prepareButton(button);
+        button.setProperty("menuDirectAction", true);
+        auto *animation = button.findChild<QVariantAnimation *>();
+        auto *feedback = button.findChild<QTimer *>();
+        QVERIFY(animation);
+        QVERIFY(feedback);
+        const QImage resting = renderButton(button);
+        QTest::mousePress(&button, Qt::LeftButton, Qt::NoModifier, QPoint(19, 19));
+        animation->setCurrentTime(animation->duration());
+        QCOMPARE(strokeColor(renderButton(button)), QColor("#0d2939"));
+        QCOMPARE(alphaMask(renderButton(button)), alphaMask(resting));
+        QTest::mouseRelease(&button, Qt::LeftButton, Qt::NoModifier, QPoint(19, 19));
+        QVERIFY(feedback->isActive());
+        animation->setCurrentTime(animation->duration());
+        QCOMPARE(strokeColor(renderButton(button)), QColor("#193f55"));
+        QVERIFY(!button.property("menuSelected").toBool());
+        // Simulate expiry deterministically, without depending on wall-clock timing.
+        feedback->stop();
+        QVERIFY(QMetaObject::invokeMethod(feedback, "timeout", Qt::DirectConnection));
+        animation->setCurrentTime(animation->duration());
+        leaveButton(button);
+        animation->setCurrentTime(animation->duration());
+        QCOMPARE(renderButton(button), resting);
+        button.click();
+        QVERIFY(feedback->isActive());
+        button.hide();
+        QVERIFY(!feedback->isActive());
+        QCOMPARE(renderButton(button), resting);
+    }
+    void spinnerTintPreservesPartialAlpha()
+    {
+        MainMenuButton button;
+        prepareButton(button);
+        QPixmap source(24, 24);
+        source.fill(Qt::transparent);
+        {
+            QPainter painter(&source);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(QPen(QColor(44, 62, 80, 45), 2.5));
+            painter.drawEllipse(QRectF(3, 3, 18, 18));
+            painter.setPen(QPen(QColor("#2c3e50"), 2.5));
+            painter.drawArc(QRectF(3, 3, 18, 18), 0, 260 * 16);
+        }
+        button.setIcon(QIcon(source));
+        const QImage resting = renderButton(button);
+        button.setProperty("menuSelected", true);
+        auto *animation = button.findChild<QVariantAnimation *>();
+        animation->setCurrentTime(animation->duration());
+        const QImage selected = renderButton(button);
+        QCOMPARE(alphaMask(selected), alphaMask(resting));
+        QCOMPARE(strokeColor(selected), QColor("#193f55"));
     }
     void buttonIconsCompleteAtCurrentDpi_data()
     {
         QTest::addColumn<QString>("name");
-        for (const auto &name : names) QTest::newRow(qPrintable(name)) << name;
+        QTest::addColumn<QString>("state");
+        for (const auto &name : names)
+            for (const auto &state : {"resting", "hovered", "selected", "pressed", "disabled"})
+                QTest::newRow(qPrintable(name + "-" + state)) << name << QString(state);
     }
     void buttonIconsCompleteAtCurrentDpi()
     {
         QFETCH(QString, name);
+        QFETCH(QString, state);
         MainMenuButton button;
-        button.setFixedSize(38, 38);
-        button.setAttribute(Qt::WA_DontShowOnScreen);
-        button.show();
+        prepareButton(button);
         const qreal ratio = button.devicePixelRatioF();
         button.setIcon(UIHelper::menuIcon(name, ratio));
-        button.setIconSize(QSize(24, 24));
+        if (state == "hovered") enterButton(button);
+        if (state == "selected") button.setProperty("menuSelected", true);
+        if (state == "pressed") QTest::mousePress(&button, Qt::LeftButton, Qt::NoModifier, QPoint(19, 19));
+        if (state == "disabled") button.setEnabled(false);
+        auto *animation = button.findChild<QVariantAnimation *>();
+        animation->setCurrentTime(animation->duration());
         const QImage actual = renderButton(button, ratio);
         QImage expected(actual.size(), QImage::Format_ARGB32_Premultiplied);
         expected.setDevicePixelRatio(ratio);
@@ -286,7 +377,7 @@ private slots:
         QPainter painter(&sheet);
         painter.setFont(QFont(QStringLiteral("Segoe UI"), 11));
         painter.setPen(QColor("#385565"));
-        painter.drawText(18, 24, "OrangeTools: actual menuIcon output / 9 icons / 7 DPI scales");
+        painter.drawText(18, 24, "OrangeTools: actual menuIcon output / 9 icons / 8 DPI scales");
         for (int row = 0; row < scales.size(); ++row) {
             const qreal ratio = scales[row];
             painter.drawText(18, 60 + row * 112, QString::number(ratio * 100) + "%");

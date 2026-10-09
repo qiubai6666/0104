@@ -3,6 +3,7 @@
 
 #include <QPushButton>
 #include <QColor>
+#include <QTimer>
 #include <QVariantAnimation>
 
 // Icon-only capsule actions; mouse hover and keyboard focus stay independent.
@@ -16,9 +17,10 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
-    void updateBackground(bool animate = true);
-    QVariantAnimation backgroundAnimation;
-    QColor backgroundColor = QColor(255, 255, 255, 0);
+    void updateIconColor(bool animate = true);
+    QVariantAnimation colorAnimation;
+    QTimer clickFeedbackTimer;
+    QColor iconColor;
     bool hovered = false;
     bool keyboardFocus = false;
 };

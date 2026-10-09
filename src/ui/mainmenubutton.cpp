@@ -3,50 +3,59 @@
 #include <QDynamicPropertyChangeEvent>
 #include <QFocusEvent>
 #include <QPainter>
-#include <QStyle>
-#include <QStyleOptionButton>
 
 MainMenuButton::MainMenuButton(QWidget *parent)
-    : QPushButton(parent), backgroundAnimation(this)
+    : QPushButton(parent), colorAnimation(this), clickFeedbackTimer(this)
 {
-    backgroundAnimation.setEasingCurve(QEasingCurve::OutCubic);
-    connect(&backgroundAnimation, &QVariantAnimation::valueChanged, this,
+    colorAnimation.setEasingCurve(QEasingCurve::InOutCubic);
+    connect(&colorAnimation, &QVariantAnimation::valueChanged, this,
             [this](const QVariant &value) {
-                backgroundColor = value.value<QColor>();
+                iconColor = value.value<QColor>();
                 update();
             });
-    connect(this, &QPushButton::pressed, this, [this] { updateBackground(); });
-    connect(this, &QPushButton::released, this, [this] { updateBackground(); });
-    updateBackground(false);
+    clickFeedbackTimer.setSingleShot(true);
+    clickFeedbackTimer.setInterval(160);
+    connect(&clickFeedbackTimer, &QTimer::timeout, this, [this] { updateIconColor(); });
+    connect(this, &QPushButton::pressed, this, [this] { updateIconColor(); });
+    connect(this, &QPushButton::released, this, [this] { updateIconColor(); });
+    connect(this, &QPushButton::clicked, this, [this] {
+        // One-shot actions get brief color feedback, not a persistent selection.
+        if (property("menuDirectAction").toBool()) {
+            clickFeedbackTimer.start();
+            updateIconColor();
+        }
+    });
+    updateIconColor(false);
 }
 
-void MainMenuButton::updateBackground(bool animate)
+void MainMenuButton::updateIconColor(bool animate)
 {
     const bool dark = palette().color(QPalette::Window).lightness() < 128;
-    QColor target = dark ? QColor(118, 151, 168, 0) : QColor(255, 255, 255, 0);
-    if (isEnabled()) {
-        if (isDown())
-            target = dark ? QColor(108, 151, 172, 150) : QColor(212, 230, 237, 180);
-        else if (property("menuSelected").toBool())
-            target = dark ? QColor(118, 151, 168, 135) : QColor(255, 255, 255, 210);
-        else if (hovered)
-            target = dark ? QColor(118, 151, 168, 85) : QColor(255, 255, 255, 110);
-    }
+    QColor target = dark ? QColor("#8da4b2") : QColor("#68818e");
+    if (!isEnabled())
+        target = dark ? QColor("#556772") : QColor("#9baab2");
+    else if (isDown())
+        target = dark ? QColor("#ffffff") : QColor("#0d2939");
+    else if (property("menuSelected").toBool() || clickFeedbackTimer.isActive())
+        target = dark ? QColor("#f4faff") : QColor("#193f55");
+    else if (hovered)
+        target = dark ? QColor("#cedde6") : QColor("#385565");
+
     // Retarget from the current frame instead of jumping on rapid mouse movement.
-    if (animate && backgroundAnimation.state() == QAbstractAnimation::Running &&
-        backgroundAnimation.endValue().value<QColor>() == target)
+    if (animate && colorAnimation.state() == QAbstractAnimation::Running &&
+        colorAnimation.endValue().value<QColor>() == target)
         return;
-    const QColor start = backgroundColor;
-    backgroundAnimation.stop();
-    if (!animate || backgroundColor == target || !isVisible()) {
-        backgroundColor = target;
+    const QColor start = iconColor;
+    colorAnimation.stop();
+    if (!animate || iconColor == target || !isVisible()) {
+        iconColor = target;
         update();
         return;
     }
-    backgroundAnimation.setDuration(isDown() ? 70 : target.alpha() ? 140 : 180);
-    backgroundAnimation.setStartValue(start);
-    backgroundAnimation.setEndValue(target);
-    backgroundAnimation.start();
+    colorAnimation.setDuration(isDown() ? 90 : 180);
+    colorAnimation.setStartValue(start);
+    colorAnimation.setEndValue(target);
+    colorAnimation.start();
 }
 
 bool MainMenuButton::event(QEvent *event)
@@ -55,11 +64,11 @@ bool MainMenuButton::event(QEvent *event)
     switch (event->type()) {
     case QEvent::Enter:
         hovered = true;
-        updateBackground();
+        updateIconColor();
         break;
     case QEvent::Leave:
         hovered = false;
-        updateBackground();
+        updateIconColor();
         break;
     case QEvent::FocusIn: {
         const auto reason = static_cast<QFocusEvent *>(event)->reason();
@@ -75,16 +84,20 @@ bool MainMenuButton::event(QEvent *event)
         break;
     case QEvent::DynamicPropertyChange:
         if (static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == "menuSelected")
-            updateBackground();
+            updateIconColor();
         break;
     case QEvent::EnabledChange:
+        clickFeedbackTimer.stop();
+        updateIconColor(false);
+        break;
     case QEvent::PaletteChange:
-        updateBackground(false);
+        updateIconColor(false);
         break;
     case QEvent::Hide:
         hovered = false;
         keyboardFocus = false;
-        updateBackground(false);
+        clickFeedbackTimer.stop();
+        updateIconColor(false);
         break;
     default:
         break;
@@ -96,19 +109,23 @@ void MainMenuButton::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    const QRectF surface = QRectF(rect()).adjusted(1, 1, -1, -1);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(backgroundColor);
-    painter.drawRoundedRect(surface, 14, 14);
     // Only keyboard navigation gets an outline, never a retained mouse focus.
     if (keyboardFocus && isEnabled()) {
         painter.setPen(QPen(QColor(131, 174, 202), 1));
         painter.setBrush(Qt::NoBrush);
-        painter.drawRoundedRect(surface, 14, 14);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 14, 14);
     }
-    // Keep Qt's icon/DPI/disabled rendering, but do not draw its native frame.
-    QStyleOptionButton option;
-    initStyleOption(&option);
-    option.state &= ~(QStyle::State_HasFocus | QStyle::State_MouseOver | QStyle::State_Sunken);
-    style()->drawControl(QStyle::CE_PushButtonLabel, &option, &painter, this);
+    if (icon().isNull()) return;
+    // Tint the existing alpha mask (SVG or spinner), keeping all DPI-aware strokes.
+    QPixmap tinted = icon().pixmap(iconSize(), devicePixelRatioF(), QIcon::Normal, QIcon::Off);
+    if (tinted.isNull()) return;
+    {
+        QPainter tintPainter(&tinted);
+        tintPainter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        tintPainter.fillRect(QRectF(QPointF(), tinted.deviceIndependentSize()), iconColor);
+    }
+    // Place at a fixed logical origin. A second QIcon/style conversion can round
+    // fractional DPRs again, changing coverage or alignment during recoloring.
+    painter.drawPixmap(QPointF((width() - iconSize().width()) / 2.0,
+                              (height() - iconSize().height()) / 2.0), tinted);
 }

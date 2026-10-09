@@ -199,6 +199,33 @@ private slots:
             QCOMPARE(button->grab().toImage(), resting);
         }
     }
+    void castingSelectionSurvivesDrawerChanges()
+    {
+        QVERIFY(writeFile(fixturePath + "/download_config.txt", ""));
+        MenuWidget menu;
+        menu.setAttribute(Qt::WA_DontShowOnScreen);
+        menu.show();
+        menu.repairWindow = new RepairWindow;
+        menu.repairWindow->setAttribute(Qt::WA_DontShowOnScreen);
+        auto *castButton = menu.buttons[MenuWidget::ScreenCast];
+        auto *drawerButton = menu.buttons[MenuWidget::RepairTools];
+        castButton->click();
+        QCOMPARE(menu.screenCastController->state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(castButton->property("menuSelected").toBool());
+        QVERIFY(!menu.screenCastWindow->isVisible());
+        drawerButton->click();
+        QVERIFY(menu.repairWindow->isVisible());
+        QVERIFY(drawerButton->property("menuSelected").toBool());
+        QVERIFY(castButton->property("menuSelected").toBool());
+        drawerButton->click();
+        QVERIFY(!menu.repairWindow->isVisible());
+        QVERIFY(!drawerButton->property("menuSelected").toBool());
+        QVERIFY(castButton->property("menuSelected").toBool());
+        castButton->click();
+        QCOMPARE(menu.screenCastController->state(), ScreenCastController::Idle);
+        QVERIFY(!castButton->property("menuSelected").toBool());
+        QVERIFY(!menu.screenCastWindow->isVisible());
+    }
     void waitingSpinnerAndCancel() {
         MenuWidget menu;
         const auto topLevels = QApplication::topLevelWidgets().size();
@@ -207,6 +234,7 @@ private slots:
         QCOMPARE(menu.screenCastController->state(), ScreenCastController::WaitingForDevice);
         QVERIFY(button->text().isEmpty());
         QVERIFY(!button->icon().isNull());
+        QVERIFY(button->property("menuSelected").toBool());
         QVERIFY(button->isEnabled());
         QVERIFY(menu.screenCastSpinnerTimer->isActive());
         const auto firstFrame = button->icon().pixmap(24, 24).toImage();
@@ -219,6 +247,7 @@ private slots:
         QVERIFY(button->text().isEmpty());
         QVERIFY(!button->icon().isNull());
         QVERIFY(!menu.screenCastSpinnerTimer->isActive());
+        QVERIFY(!button->property("menuSelected").toBool());
         QCOMPARE(button->accessibleName(), QStringLiteral("投屏"));
     }
     void authorizedAdbStartsAndSecondClickStops() {

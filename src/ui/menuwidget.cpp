@@ -103,6 +103,7 @@ void MenuWidget::setupUI()
         button->setAccessibleName(labels[index]);
         button->setObjectName(QString("menuAction%1").arg(index));
         button->setCursor(Qt::PointingHandCursor);
+        button->setProperty("menuDirectAction", index == ExtractImg || index == ContactAuthor);
         mainLayout->addWidget(button, 0, Qt::AlignHCenter);
         buttons.append(button);
         connect(button, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
@@ -166,7 +167,7 @@ void MenuWidget::toggleSubmenu(MenuAction action, QWidget *window)
 void MenuWidget::updateMenuSelection()
 {
     const QList<QPair<MenuAction, QWidget *>> windows = {
-        {ScreenCast, screenCastWindow}, {RepairTools, repairWindow}, {Payload, payloadWindow},
+        {RepairTools, repairWindow}, {Payload, payloadWindow},
         {DeviceCheck, deviceCheckWindow}, {Configuration, configWindow}};
     for (const auto &entry : windows) {
         const bool selected = entry.second && entry.second->isVisible() && !entry.second->isMinimized();
@@ -196,6 +197,8 @@ void MenuWidget::updateScreenCastButton()
     const auto state = screenCastController->state();
     const bool loading = state == ScreenCastController::WaitingForDevice || state == ScreenCastController::Starting;
     button->setProperty("screenCastLoading", loading);
+    button->setProperty("menuSelected", loading || state == ScreenCastController::Streaming ||
+                        state == ScreenCastController::Stopping);
     button->setToolTip(screenCastController->statusText());
     // Remain clickable while a disconnected session is stopping so the user
     // can immediately cancel auto-reconnect as well.
