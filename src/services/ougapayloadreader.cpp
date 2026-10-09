@@ -151,8 +151,10 @@ QByteArray OugaHttpRangeReader::requestSingleRange(quint64 offset, quint64 lengt
   QNetworkRequest request(m_url);
   request.setRawHeader("Range", "bytes=" + QByteArray::number(offset) +
                                    "-" + QByteArray::number(end));
-  // Like VioletToolBox's raw response stream, retain the wire bytes. Explicit
-  // Accept-Encoding disables Qt's automatic decompression and preserves offsets.
+  // Match VioletToolBox's raw response stream, not Qt's default decoding.
+  // Omitting Accept-Encoding lets Qt add gzip/deflate and decode the body;
+  // an explicit header disables that decoding (verified with Qt 6.11.2).
+  // Even a mislabeled response must retain its wire bytes and Range offsets.
   request.setRawHeader("Accept-Encoding", "identity");
   if (!m_validator.isEmpty())
     request.setRawHeader("If-Range", m_validator);

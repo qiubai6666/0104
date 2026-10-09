@@ -373,10 +373,19 @@ public:
           if (fault == "encoding" || fault == "encodingCorrupt" ||
               (fault == "lateEncoding" && late))
             header += "Content-Encoding: gzip\r\n";
-          if (fault == "encodedBody" || (fault == "lateEncodedBody" && late)) {
+          if (fault == "encodingDeflate" || (fault == "lateEncodingDeflate" && late))
             header += "Content-Encoding: deflate\r\n";
+          if (fault == "encodingBrotli" || (fault == "lateEncodingBrotli" && late))
+            header += "Content-Encoding: br\r\n";
+          if (fault == "encodedBody" || (fault == "lateEncodedBody" && late) ||
+              (fault == "lateEncodedBodySameLength" && late)) {
+            header += "Content-Encoding: deflate\r\n";
+            const qsizetype rawLength = body.size();
             // qCompress prefixes the real zlib stream with a Qt-only length.
             body = qCompress(body).mid(4);
+            if (fault == "lateEncodedBodySameLength")
+              // A matching length is not evidence that these are Payload bytes.
+              body.resize(rawLength, '\0');
           }
           header += "ETag: " + QByteArray(fault == "etag" && late ? "\"v2\"" : "\"v1\"") + "\r\n";
           if (fault != "overlong")
@@ -4104,7 +4113,9 @@ private slots:
     for (const QString kind : {"raw", "large", "stored", "zip64", "compressed", "duplicate",
          "syntax", "short", "aligned", "unknown", "unknownProbe", "overexpanded",
          "segmentLimit", "200", "late200", "range", "missing", "total", "length", "etag",
-         "encoding", "lateEncoding", "encodedBody", "lateEncodedBody", "encodingCorrupt",
+         "encoding", "lateEncoding", "encodingDeflate", "lateEncodingDeflate",
+         "encodingBrotli", "lateEncodingBrotli", "encodingStored", "encodedBody",
+         "lateEncodedBody", "lateEncodedBodySameLength", "encodingCorrupt",
          "truncated", "overlong", "redirect", "cancel", "delta",
          "unsupported", "missingPartition", "existingOutput"})
       QTest::newRow(qPrintable(kind)) << kind;
@@ -4130,7 +4141,8 @@ private slots:
     // A large unselected tail lets us prove Range does not read the whole OTA.
     payload += QByteArray(4 * 1024 * 1024, 't');
     QByteArray source = payload;
-    if (kind == "stored" || kind == "compressed" || kind == "duplicate")
+    if (kind == "stored" || kind == "compressed" || kind == "duplicate" ||
+        kind == "encodingStored")
       source = zipBytes("payload.bin", payload, kind == "compressed" ? 8 : 0,
                         kind == "duplicate");
     if (kind == "zip64") source = zip64PayloadBytes(payload);
@@ -4141,7 +4153,8 @@ private slots:
       QVERIFY(position >= 0);
       source[position] = char(source.at(position) ^ 1);
     }
-    const QString fault = kind == "cancel" ? "stall" : kind;
+    const QString fault = kind == "cancel" ? "stall" :
+                          kind == "encodingStored" ? "encoding" : kind;
     PayloadRangeServer server(source, fault);
     OugaPreparation prep;
     QSignalSpy finished(&prep, &OugaPreparation::finished),
@@ -4170,7 +4183,10 @@ private slots:
     const bool success = kind == "raw" || kind == "large" ||
                          kind == "stored" || kind == "zip64" || kind == "syntax" ||
                          kind == "short" || kind == "aligned" || kind == "unknown" ||
-                         kind == "encoding" || kind == "lateEncoding";
+                         kind == "encoding" || kind == "lateEncoding" ||
+                         kind == "encodingDeflate" || kind == "lateEncodingDeflate" ||
+                         kind == "encodingBrotli" || kind == "lateEncodingBrotli" ||
+                         kind == "encodingStored";
     QCOMPARE(finished.first()[0].toBool(), success);
     QCOMPARE(prepared.size(), success ? 1 : 0);
     QCOMPARE(server.missingRange, 0);

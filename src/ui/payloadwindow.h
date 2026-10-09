@@ -4,7 +4,6 @@
 #include <QDialog>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QCheckBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -29,8 +28,6 @@ private:
     QString getOutputPath();
     
     QLineEdit *urlEdit;
-    QCheckBox *bootCheckBox;
-    QCheckBox *initBootCheckBox;
     QPushButton *extractButton;
     QPushButton *cancelButton;
 };

@@ -8,55 +8,6 @@
 #include <QGuiApplication>
 #include <QDesktopServices>
 #include <QUrl>
-#include <QPainter>
-#include <QPainterPath>
-#include <QStyleOptionButton>
-#include <QStyle>
-
-namespace {
-// 自绘勾选框，统一高 DPI 下的外观，同时保留 QCheckBox 的键盘和点击行为。
-class PayloadCheckBox : public QCheckBox
-{
-public:
-    explicit PayloadCheckBox(const QString &text, QWidget *parent)
-        : QCheckBox(text, parent)
-    {
-        setCursor(Qt::PointingHandCursor);
-    }
-
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        QStyleOptionButton option;
-        initStyleOption(&option);
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        const QRect indicator = style()->subElementRect(QStyle::SE_CheckBoxIndicator, &option, this);
-        const bool checked = option.state & QStyle::State_On;
-        const bool hovered = option.state & QStyle::State_MouseOver;
-        const QColor fill = checked ? QColor(hovered ? "#578FA6" : "#649EB3")
-                                    : QColor(hovered ? "#F3F7FB" : "#FFFFFF");
-        const QColor border = hasFocus() ? QColor("#83AECA")
-                                        : QColor(checked ? "#5C93A8" : "#CBD9E6");
-        painter.setPen(QPen(border, hasFocus() ? 1.5 : 1.0));
-        painter.setBrush(fill);
-        painter.drawRoundedRect(QRectF(indicator).adjusted(0.75, 0.75, -0.75, -0.75), 4, 4);
-        if (checked) {
-            const qreal x = indicator.x(), y = indicator.y();
-            QPainterPath check;
-            check.moveTo(x + 4.5, y + 9);
-            check.lineTo(x + 7.5, y + 12);
-            check.lineTo(x + 13.5, y + 5.5);
-            painter.setPen(QPen(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            painter.setBrush(Qt::NoBrush);
-            painter.drawPath(check);
-        }
-        QStyleOptionButton labelOption = option;
-        labelOption.rect = style()->subElementRect(QStyle::SE_CheckBoxContents, &option, this);
-        style()->drawControl(QStyle::CE_CheckBoxLabel, &labelOption, &painter, this);
-    }
-};
-} // namespace
 
 PayloadWindow::PayloadWindow(QWidget *parent)
     : QDialog(parent)
@@ -107,49 +58,8 @@ void PayloadWindow::setupUI()
     )");
     mainLayout->addWidget(urlEdit);
     
-    // 分区选择
-    QLabel *partLabel = new QLabel("选择要提取的分区：", container);
-    partLabel->setStyleSheet("QLabel { color: #2c3e50; background: transparent; font-size: 13px; }");
-    mainLayout->addWidget(partLabel);
-    
-    QHBoxLayout *checkBoxLayout = new QHBoxLayout();
-    checkBoxLayout->setSpacing(15);  // 保留原有复选框横向位置
-    
-    bootCheckBox = new PayloadCheckBox("boot", container);
-    bootCheckBox->setStyleSheet(R"(
-        QCheckBox {
-            color: #2c3e50;
-            background: transparent;
-            font-size: 13px;
-        }
-        QCheckBox::indicator {
-            width: 18px;
-            height: 18px;
-        }
-    )");
-    bootCheckBox->setChecked(true);
-    
-    initBootCheckBox = new PayloadCheckBox("init_boot", container);
-    initBootCheckBox->setStyleSheet(R"(
-        QCheckBox {
-            color: #2c3e50;
-            background: transparent;
-            font-size: 13px;
-        }
-        QCheckBox::indicator {
-            width: 18px;
-            height: 18px;
-        }
-    )");
-    
-    checkBoxLayout->addWidget(bootCheckBox);
-    checkBoxLayout->addWidget(initBootCheckBox);
-    checkBoxLayout->addStretch();
-    
-    mainLayout->addLayout(checkBoxLayout);
-    
     // 提示信息
-    QLabel *infoLabel = new QLabel("输出路径：桌面/IMG 文件夹", container);
+    QLabel *infoLabel = new QLabel("Payload 中的全部可用镜像将被提取\n输出路径：桌面/IMG 文件夹", container);
     infoLabel->setStyleSheet("QLabel { color: #666; background: transparent; font-size: 11px; }");
     mainLayout->addWidget(infoLabel);
     
@@ -247,22 +157,6 @@ void PayloadWindow::onExtractClicked()
         return;
     }
     
-    // 检查是否选择了分区
-    if (!bootCheckBox->isChecked() && !initBootCheckBox->isChecked()) {
-        QMessageBox::warning(this, "警告", "请至少选择一个分区！");
-        return;
-    }
-    
-    // 构建分区参数
-    QStringList partitions;
-    if (bootCheckBox->isChecked()) {
-        partitions << "boot";
-    }
-    if (initBootCheckBox->isChecked()) {
-        partitions << "init_boot";
-    }
-    
-    QString partitionsArg = partitions.join(",");
     QString outputPath = getOutputPath();
     QString payloadExe = ResourceExtractor::getResourcePath() + "/payload.exe";
     
@@ -277,7 +171,6 @@ void PayloadWindow::onExtractClicked()
     process->setWorkingDirectory(ResourceExtractor::getResourcePath());
     
     QStringList args;
-    args << "--partitions" << partitionsArg;
     args << "--out" << outputPath;
     args << url;
     

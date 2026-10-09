@@ -13,6 +13,9 @@
 #include "devicecheckwindow.h"
 #include "menuwidget.h"
 #include "repairwindow.h"
+#include "payloadwindow.h"
+#include <QCheckBox>
+#include <QLabel>
 #include "devicemanager.h"
 #include "processmanager.h"
 #include "resourceextractor.h"
@@ -67,6 +70,7 @@ public:
 private slots:
     void initTestCase();
     void init();
+    void payloadShortcutHasNoBootFilters();
     void ougaSingleWindowAndLease();
     void xiaomiMenuAndSingleWindow();
     void openListMenuAndSingleWindow();
@@ -130,6 +134,16 @@ void DeviceOperationTests::initTestCase()
         if (held) DeviceManager::instance()->pauseMonitoring();
         else DeviceManager::instance()->resumeMonitoring();
     });
+}
+
+void DeviceOperationTests::payloadShortcutHasNoBootFilters()
+{
+    PayloadWindow window;
+    QVERIFY(window.findChildren<QCheckBox *>().isEmpty());
+    bool describesAllImages = false;
+    for (auto label : window.findChildren<QLabel *>())
+        describesAllImages |= label->text().contains(QStringLiteral("全部可用镜像"));
+    QVERIFY(describesAllImages);
 }
 
 void DeviceOperationTests::ougaSingleWindowAndLease()
