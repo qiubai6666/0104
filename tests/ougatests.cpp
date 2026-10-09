@@ -538,6 +538,7 @@ class FakeRunner final : public OugaCommandRunner {
 public:
   Device device = fixtureDevice();
   QStringList trace, boundTrace;
+  QList<int> readTimeouts;
   QString failAt, failOutput = "FAILED (remote: test failure)";
   int failCode = 1;
   bool normal = true, holdFlash = false, stuckMode = false, failOnce = false,
@@ -547,16 +548,18 @@ public:
   std::function<QString(int)> deviceList;
   std::function<QString()> userspaceOutput;
   std::function<QString()> allOutput;
+  std::function<QString()> unlockedOutput, oemOutput;
   int deviceLists = 0;
   int probes = 0, outputStyle = 0;
   bool markedOutput = false;
   bool active = false;
-  void run(const QString &, const QStringList &args, int) override {
+  void run(const QString &, const QStringList &args, int readTimeoutMs) override {
     Q_ASSERT(!active);
     active = true;
     QStringList a = args.value(0) == "-s" ? args.mid(2) : args;
     trace << a.join(' ');
     boundTrace << args.join(' ');
+    readTimeouts << readTimeoutMs;
     if (args.value(0) == "-s" && args.value(1) != device.serial) {
       complete(-1, false, "ERROR: wrong device");
       return;
@@ -582,6 +585,10 @@ public:
           complete(0, true, allOutput());
           return;
         }
+        if (a.value(1) == "unlocked" && unlockedOutput) {
+          complete(0, true, unlockedOutput());
+          return;
+        }
         complete(disconnected ? 1 : 0, true,
                  disconnected ? "FAILED transport disconnected" : dump(device));
         return;
@@ -592,6 +599,10 @@ public:
                  deviceList ? deviceList(deviceLists) :
                  (disconnected ? QString() : device.serial + "\tfastboot\n") +
                      (multipleDevices ? "SECOND\tfastboot\n" : ""));
+        return;
+      }
+      if (a == QStringList{"oem", "device-info"} && oemOutput) {
+        complete(0, true, oemOutput());
         return;
       }
       if (a.value(0) == "reboot" && !stuckMode)
@@ -3820,6 +3831,7 @@ private slots:
     QString e;
     QVERIFY(OugaFlashPlanner::build(images(), r.device, options(), &p, &e));
     QSignalSpy done(&s, &OugaFlashService::finished);
+    QSignalSpy logs(&s, &OugaFlashService::log);
     parent.show();
     s.execute(p);
     QTRY_VERIFY(r.active && r.trace.last().startsWith("flash "));
@@ -3829,6 +3841,9 @@ private slots:
     parent.showMinimized();
     QVERIFY(s.busy());
     s.requestStop();
+    QCOMPARE(logs.last()[0].toString(), QString("已请求停止，将在 boot_a 刷入完成后终止后续分区任务"));
+    s.requestStop();
+    QCOMPARE(logs.last()[0].toString(), QString("已收到停止请求，将在当前分区刷入完成后结束任务"));
     QVERIFY(r.running());
     QCOMPARE(done.count(), 0);
     int count = r.trace.size();
@@ -3836,6 +3851,9 @@ private slots:
     QTRY_COMPARE(done.count(), 1);
     QCOMPARE(r.trace.size(), count);
     QVERIFY(!done[0][0].toBool());
+    QCOMPARE(std::count_if(logs.cbegin(), logs.cend(), [](const QList<QVariant> &row) {
+      return row.first().toString() == "已停止任务";
+    }), 1);
     QVERIFY(parent.close());
   }
   void afterSuperCheckpoint() {
@@ -5545,6 +5563,99 @@ private slots:
     QVERIFY(done[0][2].toString().contains("timed out"));
     QVERIFY(!runner.running());
   }
+  void referenceUnlockFallback_data() {
+    QTest::addColumn<QString>("direct");
+    QTest::addColumn<QString>("oem");
+    QTest::addColumn<bool>("known");
+    QTest::addColumn<bool>("unlocked");
+    QTest::addColumn<bool>("fallback");
+    for (const QString value : {"yes", "TRUE", "1", "no", "False", "0"})
+      QTest::newRow(qPrintable(value)) << "(bootloader) unlocked: " + value
+          << QString() << true << (value == "yes" || value == "TRUE" || value == "1") << false;
+    QTest::newRow("oem-unlocked") << QString("FAILED (remote: unsupported variable)")
+        << QString("(bootloader) Device unlocked: TRUE") << true << true << true;
+    QTest::newRow("oem-locked") << QString("unlocked: unknown")
+        << QString("(bootloader) Device unlocked: false") << true << false << true;
+    QTest::newRow("oem-unreadable") << QString("unlocked: unknown")
+        << QString("unrecognized response") << false << false << true;
+    for (const QString error : {"", "Write to device failed", "no link", "Too many links", "USB Error",
+                               "device disconnected", "device not found", "status read failed",
+                               "failed to read", "failed to write", "< waiting for any device >"})
+      QTest::newRow(qPrintable("transport-" + error)) << error
+          << QString("Device unlocked: true") << false << false << false;
+  }
+  void referenceUnlockFallback() {
+    QFETCH(QString, direct); QFETCH(QString, oem);
+    QFETCH(bool, known); QFETCH(bool, unlocked); QFETCH(bool, fallback);
+    FakeRunner runner;
+    runner.device.unlockKnown = false;
+    runner.device.product.clear();
+    runner.unlockedOutput = [direct] { return direct; };
+    runner.oemOutput = [oem] { return oem; };
+    OugaFlashService service(&runner);
+    configure(service);
+    QSignalSpy ready(&service, &OugaFlashService::deviceReady);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.probe(runner.device.serial);
+    QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 3000);
+    QVERIFY(done.first()[0].toBool());
+    QCOMPARE(ready.size(), 1);
+    const Device state = qvariant_cast<Device>(ready.first()[0]);
+    QCOMPARE(state.unlockKnown, known);
+    if (known) QCOMPARE(state.unlocked, unlocked);
+    QCOMPARE(runner.trace.contains("oem device-info"), fallback);
+    QVERIFY(!runner.trace.contains("getvar product"));
+    for (const QString &command : runner.trace)
+      QVERIFY(command == "devices" || command.startsWith("getvar ") || command == "oem device-info");
+  }
+  void referenceBooleanAndPlatformParsing() {
+    for (const QString value : {"yes", "true", "1", "no", "false", "0"}) {
+      const Device parsed = parseDevice("S", "is-userspace: " + value + "\nunlocked: " + value);
+      QVERIFY(parsed.modeKnown && parsed.unlockKnown);
+      QCOMPARE(parsed.userspace, value == "yes" || value == "true" || value == "1");
+      QCOMPARE(parsed.unlocked, parsed.userspace);
+    }
+    QCOMPARE(parseDevice("S", "partition-size:boot_a: 0x1000").platform, Platform::Qualcomm);
+    QCOMPARE(parseDevice("S", "partition-size:lk_b: 0x1000\npartition-size:xbl_a: 0x1000").platform, Platform::MediaTek);
+    QCOMPARE(parseDevice("S", {}).platform, Platform::Unknown);
+  }
+  void referencePartitionTableRead_data() {
+    QTest::addColumn<QString>("output"); QTest::addColumn<bool>("success");
+    QTest::newRow("lk-and-xbl") << QString("partition-size:lk_b: 0x1000\npartition-size:xbl_a: 0x1000") << true;
+    QTest::newRow("no-lk") << QString("partition-type:boot_a: raw") << true;
+    QTest::newRow("empty") << QString() << false;
+    QTest::newRow("transport") << QString("FAILED (remote: status read failed)") << false;
+    QTest::newRow("ordinary-error") << QString("FAILED (remote: unknown command)") << false;
+  }
+  void referencePartitionTableRead() {
+    QFETCH(QString, output); QFETCH(bool, success);
+    FakeRunner runner;
+    runner.allOutput = [output] { return output; };
+    const Device initial = fixtureDevice(Platform::Qualcomm, "b");
+    OugaFlashService service(&runner); configure(service);
+    QSignalSpy ready(&service, &OugaFlashService::deviceReady);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy logs(&service, &OugaFlashService::log);
+    QSignalSpy steps(&service, &OugaFlashService::stepFinished);
+    service.readPartitionTable(initial);
+    QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 3000);
+    QCOMPARE(done.first()[0].toBool(), success);
+    QCOMPARE(steps.size(), 1);
+    QCOMPARE(steps.first()[0].toBool(), success);
+    QCOMPARE(runner.trace, QStringList{"getvar all"});
+    QCOMPARE(runner.readTimeouts, QList<int>{30000});
+    QCOMPARE(ready.size(), int(success));
+    if (success) {
+      const Device device = qvariant_cast<Device>(ready.first()[0]);
+      QCOMPARE(device.slot, initial.slot);
+      QCOMPARE(device.unlocked, initial.unlocked);
+      QCOMPARE(device.unlockKnown, initial.unlockKnown);
+      QCOMPARE(device.platform, output.contains("lk_b") ? Platform::MediaTek : Platform::Qualcomm);
+    } else {
+      QVERIFY(logs.last()[0].toString().startsWith("无法读取FastbootD分区表，已安全终止任务"));
+      QCOMPARE(logs.last()[0].toString().contains("数据线无法瞬时传输较大数据流信息"), transportFailure(output));
+    }
+  }
   void writeIgnoresReadDeadline() {
     OugaProcessRunner runner;
     QSignalSpy done(&runner, &OugaCommandRunner::completed);
@@ -6810,6 +6921,123 @@ private slots:
                  ->rowCount(),
              0);
   }
+  void referenceProcessorGate_data() {
+    QTest::addColumn<int>("platform");
+    QTest::addColumn<QString>("scenario");
+    QTest::addColumn<int>("mode");
+    for (int platform : {1, 2}) {
+      for (const QString scenario : {"matched", "mismatch", "mixed", "unchecked-match", "unchecked-mismatch",
+                                     "missing-continue", "missing-cancel", "missing-stop", "removed-feature"})
+        QTest::newRow(qPrintable(QString("p%1-%2").arg(platform).arg(scenario)))
+            << platform << scenario << int(FlashMode::Normal);
+      for (FlashMode mode : {FlashMode::BothSlots, FlashMode::Force, FlashMode::OnlyFastbootd})
+        QTest::newRow(qPrintable(QString("p%1-mode%2-mixed").arg(platform).arg(int(mode))))
+            << platform << QString("mixed") << int(mode);
+    }
+  }
+  void referenceProcessorGate() {
+    QFETCH(int, platform); QFETCH(QString, scenario); QFETCH(int, mode);
+    const Platform pf = Platform(platform);
+    FakeRunner runner;
+    runner.device = fixtureDevice(pf);
+    runner.multipleDevices = false;
+    QVERIFY(put(dir + "/boot.img", QByteArray(512, 'b')));
+    const QString feature = pf == Platform::MediaTek ? "lk" : "xbl";
+    const QString other = pf == Platform::MediaTek ? "xbl" : "lk";
+    if (scenario == "matched" || scenario == "unchecked-match" || scenario == "removed-feature" || scenario == "mixed")
+      QVERIFY(put(dir + "/" + feature + "_b.img", QByteArray(512, 'f')));
+    if (scenario == "mismatch" || scenario == "unchecked-mismatch" || scenario == "mixed")
+      QVERIFY(put(dir + "/" + other + ".img", QByteArray(512, 'o')));
+    const QString fake = dir + "/fake-fastboot.exe";
+    QVERIFY(put(fake, "Injected runner only"));
+    QSettings().setValue("Ouga/fastboot", fake);
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    window.show();
+    configure(*window.findChild<OugaFlashService *>());
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(dir);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    auto table = window.findChild<QTableWidget *>("OugaPartitionTableDataGrid");
+    if (scenario.startsWith("unchecked"))
+      for (int row = 0; row < table->rowCount(); ++row)
+        if (table->item(row, 1)->text() != "boot") table->item(row, 0)->setCheckState(Qt::Unchecked);
+    if (scenario == "removed-feature") QVERIFY(QFile::remove(dir + "/" + feature + "_b.img"));
+    window.findChild<QCheckBox *>("ClearDataCheckBox")->setChecked(false);
+    window.findChild<QCheckBox *>("AutoRebootOugaCheckBox")->setChecked(false);
+    if (FlashMode(mode) == FlashMode::BothSlots) window.findChild<QCheckBox *>("FlashABCheckBox")->setChecked(true);
+    if (FlashMode(mode) == FlashMode::Force) window.findChild<QCheckBox *>("FixSuperCheckBox")->setChecked(true);
+    if (FlashMode(mode) == FlashMode::OnlyFastbootd) window.findChild<QCheckBox *>("PureFBDCheckBox")->setChecked(true);
+    int prompts = 0;
+    QStringList unexpected;
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, &window, [&] {
+      auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+      if (!dialog) return;
+      if (dialog->objectName() != "OugaIncompletePackageDialog") {
+        unexpected << dialog->windowTitle(); dialog->reject(); return;
+      }
+      ++prompts;
+      QVERIFY(dialog->findChild<QPushButton *>("OugaIncompletePackageContinue"));
+      QVERIFY(dialog->findChild<QPushButton *>("OugaIncompletePackageCancel"));
+      if (scenario == "missing-cancel" && pf == Platform::Qualcomm)
+        QVERIFY(dialog->grab().save(dir + "/incomplete-package.png"));
+      if (scenario == "missing-stop") window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+      if (scenario == "missing-cancel" || scenario == "removed-feature") dialog->reject();
+      else dialog->accept();
+    });
+    answer.start(5);
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 8000);
+    answer.stop();
+    const bool missing = scenario.startsWith("missing") || scenario == "removed-feature";
+    QCOMPARE(prompts, missing ? 1 : 0);
+    QVERIFY2(unexpected.isEmpty(), qPrintable(unexpected.join(';')));
+    const bool writes = scenario == "matched" || scenario == "unchecked-match" || scenario == "missing-continue";
+    QCOMPARE(std::any_of(runner.trace.cbegin(), runner.trace.cend(), [](const QString &command) {
+      return command.startsWith("flash ");
+    }), writes);
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
+    QVERIFY(log.contains("校验刷写文件处理器类型 ..."));
+    if (scenario == "mixed") QVERIFY(log.contains("同时包含联发科特征文件lk和高通骁龙特征文件xbl"));
+    if (scenario == "mismatch" || scenario == "unchecked-mismatch") QVERIFY(log.contains("刷写文件与设备处理器不匹配"));
+    if (scenario == "missing-continue") QVERIFY(log.contains("用户已确认继续刷入，将继续使用设备分区表检测到的处理器类型."));
+    if (!writes) QVERIFY(!runner.trace.contains("erase frp"));
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(window.close());
+  }
+  void referenceSourcePreflight_data() {
+    QTest::addColumn<QString>("scenario");
+    for (const QString scenario : {"empty", "unselected", "missing", "payload"})
+      QTest::newRow(qPrintable(scenario)) << scenario;
+  }
+  void referenceSourcePreflight() {
+    QFETCH(QString, scenario);
+    FakeRunner runner;
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs");
+    if (scenario != "empty") {
+      const QString path = dir + (scenario == "payload" ? "/payload.bin" : "/boot.img");
+      QVERIFY(put(path, QByteArray(512, 'b')));
+      auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+      folder->setText(dir);
+      QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+      QTRY_VERIFY(!window.isBusy());
+      if (scenario == "missing") QVERIFY(QFile::remove(path));
+      if (scenario == "unselected") {
+        auto table = window.findChild<QTableWidget *>("OugaPartitionTableDataGrid");
+        for (int row = 0; row < table->rowCount(); ++row) table->item(row, 0)->setCheckState(Qt::Unchecked);
+      }
+    }
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    QVERIFY(!window.isBusy());
+    QVERIFY(runner.trace.isEmpty());
+    const QString log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
+    const QString expected = scenario == "empty" ? "分区表为空，请先选择解包完成的镜像文件夹后再开始线刷."
+        : scenario == "unselected" ? "分区表中没有已勾选的镜像文件，请先勾选需要刷写的分区."
+        : scenario == "payload" ? "检测到未解包的Payload.bin或全量包Zip文件，请先解包Payload并加载镜像分区后再开始线刷."
+        : "分区表中没有已勾选且文件有效的镜像，请重新选择解包完成的镜像文件夹.";
+    QVERIFY2(log.contains(expected), qPrintable(log));
+  }
   void widgetStartWorkflow_data() {
     QTest::addColumn<int>("outcome");
 
@@ -7003,6 +7231,8 @@ private slots:
     window.showMinimized();
     const int count = runner.trace.size();
     window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+    const QString requested = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox")->toPlainText();
+    QCOMPARE(requested.count("已请求停止，将在 boot_a 刷入完成后终止后续分区任务"), 1);
     QVERIFY(window.isBusy());
     QVERIFY(runner.active);
     QCOMPARE(runner.trace.size(), count);

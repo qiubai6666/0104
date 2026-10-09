@@ -11,6 +11,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
+#include <QGroupBox>
 #include <QIcon>
 #include <QJsonArray>
 #include <QLabel>
@@ -74,6 +75,52 @@ QString selectItem(QWidget *parent, const QString &title, const QString &prompt,
              : QString();
 }
 } // namespace
+
+bool OugaFlashWindow::confirmIncompletePackage() {
+  QDialog dialog(this);
+  dialog.setObjectName("OugaIncompletePackageDialog");
+  dialog.setFont(QFont("Microsoft YaHei UI"));
+  dialog.setStyleSheet("QDialog { background:white; }");
+  dialog.setWindowTitle("刷机包完整性提示");
+  dialog.setFixedWidth(460);
+  auto layout = new QVBoxLayout(&dialog);
+  layout->setContentsMargins(24, 20, 24, 20);
+  auto heading = new QLabel("识别到刷机包可能不完整", &dialog);
+  heading->setStyleSheet("font-size:17px; font-weight:600; color:#263142;");
+  layout->addWidget(heading);
+  auto warning = new QGroupBox(&dialog);
+  warning->setStyleSheet("QGroupBox { background:#FAFBFD; border:1px solid #E2E8F0; border-radius:8px; }");
+  auto content = new QVBoxLayout(warning);
+  content->setContentsMargins(14, 12, 14, 12);
+  auto question = new QLabel("用户选择的刷写文件中未找到联发科特征文件lk或高通骁龙特征文件xbl，是否继续刷入？", warning);
+  question->setWordWrap(true);
+  question->setStyleSheet("font-size:12px; color:#334155;");
+  content->addWidget(question);
+  auto detail = new QLabel("继续刷入将使用设备分区表检测到的处理器类型，请确认刷机包完整且与当前设备匹配.", warning);
+  detail->setWordWrap(true);
+  detail->setStyleSheet("color:#D97706; font-size:11.5px;");
+  content->addWidget(detail);
+  layout->addWidget(warning);
+  auto buttons = new QHBoxLayout;
+  buttons->setContentsMargins(0, 20, 0, 0);
+  buttons->setSpacing(10);
+  buttons->addStretch();
+  auto cancel = new QPushButton("取消刷入", &dialog);
+  cancel->setObjectName("OugaIncompletePackageCancel");
+  auto proceed = new QPushButton("继续刷入", &dialog);
+  proceed->setObjectName("OugaIncompletePackageContinue");
+  proceed->setDefault(true);
+  cancel->setFixedSize(88, 32);
+  cancel->setStyleSheet("background:white; color:#475569; border:1px solid #CBD5E1;");
+  proceed->setFixedSize(98, 32);
+  proceed->setStyleSheet("background:#B876DD; color:white; border:1px solid #B876DD;");
+  buttons->addWidget(cancel);
+  buttons->addWidget(proceed);
+  layout->addLayout(buttons);
+  connect(proceed, &QPushButton::clicked, &dialog, &QDialog::accept);
+  connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+  return dialog.exec() == QDialog::Accepted;
+}
 
 void OugaFlashWindow::arbDialog() {
   if (isBusy())

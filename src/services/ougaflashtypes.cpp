@@ -175,18 +175,27 @@ Device parseDevice(const QString &serial, const QString &out) {
     d.slot.remove(0, 1);
   QString mode = d.variables.value("is-userspace").toLower(),
           unlock = d.variables.value("unlocked").toLower();
-  d.modeKnown = mode == "yes" || mode == "no";
-  d.userspace = mode == "yes";
-  d.unlockKnown = unlock == "yes" || unlock == "no";
-  d.unlocked = unlock == "yes";
-  bool lk = false, xbl = false;
+  const auto yes = [](const QString &value) { return value == "yes" || value == "true" || value == "1"; };
+  const auto no = [](const QString &value) { return value == "no" || value == "false" || value == "0"; };
+  d.modeKnown = yes(mode) || no(mode);
+  d.userspace = yes(mode);
+  d.unlockKnown = yes(unlock) || no(unlock);
+  d.unlocked = yes(unlock);
+  bool lk = false;
   for (const QString &n : d.partitions) {
     lk |= baseName(n) == "lk";
-    xbl |= baseName(n) == "xbl";
   }
-  if (lk != xbl)
+  if (!out.trimmed().isEmpty())
     d.platform = lk ? Platform::MediaTek : Platform::Qualcomm;
   return d;
+}
+bool transportFailure(const QString &out) {
+  if (out.trimmed().isEmpty()) return true;
+  for (const QString text : {"Write to device failed", "no link", "Too many links", "USB Error",
+                             "device disconnected", "device not found", "status read failed",
+                             "failed to read", "failed to write", "< waiting for"})
+    if (out.contains(text, Qt::CaseInsensitive)) return true;
+  return false;
 }
 bool commandSucceeded(int code, bool normal, const QString &out) {
   static const QRegularExpression failure(

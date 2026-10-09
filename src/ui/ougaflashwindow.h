@@ -66,6 +66,7 @@ private:
     Discover,
     Probe,
     Switch,
+    PartitionTable,
     Execute,
     ArbDiscover,
     Arb
@@ -147,6 +148,8 @@ private:
   void discoverDevice();
   void serviceFinished(bool success, const QString &message);
   void buildAndExecute();
+  bool validateProcessorFeatures();
+  bool confirmIncompletePackage();
   void requestStop();
   void arbDialog();
   void rescueDialog();

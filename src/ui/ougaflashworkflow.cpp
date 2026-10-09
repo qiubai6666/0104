@@ -187,7 +187,7 @@ void OugaFlashWindow::endTask(bool success, const QString &message) {
               ? "分区 " + m_extractNames.first() + " 提取完成！" : "镜像提取完成！");
       log(QString("已加载 %1 个镜像文件").arg(m_pages[m_page].images.size()));
     }
-  } else if (m_task != Task::Execute) {
+  } else if (m_task != Task::Execute && !message.isEmpty()) {
     log((success ? "完成：" : "已停止/失败：") + message);
   }
   if (m_session && !m_service->busy()) {
@@ -705,6 +705,26 @@ void OugaFlashWindow::startFlash(bool repair) {
     return;
   }
   Page &page = m_pages[m_page];
+  if (!m_page && !repair) {
+    QString error;
+    if (page.images.isEmpty())
+      error = "分区表为空，请先选择解包完成的镜像文件夹后再开始线刷.";
+    else {
+      bool selected = false, valid = false, unpacked = false;
+      for (const Partition &image : page.images) {
+        if (!image.selected) continue;
+        selected = true;
+        const QFileInfo file(image.path.trimmed());
+        unpacked |= file.fileName().compare("payload.bin", Qt::CaseInsensitive) == 0 ||
+                    file.suffix().compare("zip", Qt::CaseInsensitive) == 0;
+        valid |= !image.path.trimmed().isEmpty() && !image.path.contains("(缺失)", Qt::CaseInsensitive) && file.exists();
+      }
+      if (!selected) error = "分区表中没有已勾选的镜像文件，请先勾选需要刷写的分区.";
+      else if (unpacked) error = "检测到未解包的Payload.bin或全量包Zip文件，请先解包Payload并加载镜像分区后再开始线刷.";
+      else if (!valid) error = "分区表中没有已勾选且文件有效的镜像，请重新选择解包完成的镜像文件夹.";
+    }
+    if (!error.isEmpty()) { log(error); return; }
+  }
   if ((!repair && page.images.isEmpty()) || page.directory.isEmpty()) {
     log("错误：请先选择并加载有效的刷写文件夹");
     return;
@@ -842,23 +862,41 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
       m_service->probe(serial, !m_page && m_requestedMode != FlashMode::RepairFastbootd);
       return;
     }
+    if (completed == Task::PartitionTable) {
+      buildAndExecute();
+      return;
+    }
     if (completed != Task::Probe && completed != Task::Switch) {
       endTask(false, "意外的设备准备状态，拒绝继续");
       return;
     }
     const bool userspace = startsInFastbootd(m_requestedMode);
-    if (m_requestedMode == FlashMode::OnlyFastbootd &&
-        (!m_device.modeKnown || !m_device.userspace ||
-         m_device.platform != Platform::Qualcomm)) {
-      endTask(false,
-              "仅FBD模式只允许已处于FastbootD的高通设备；不自动回普通Fastboot");
-      return;
-    }
     const bool independent = m_page || m_requestedMode == FlashMode::RepairFastbootd;
-    if (!m_device.modeKnown || (!independent && (!m_device.unlockKnown || !m_device.unlocked ||
-        m_device.platform == Platform::Unknown ||
-        (m_device.slot != "a" && m_device.slot != "b")))) {
-      endTask(false, "设备模式、解锁状态、平台、机型或槽位无法确认，拒绝执行");
+    if (!independent) {
+      log("设备解锁状态..." + QString(!m_device.unlockKnown ? "检测失败" : m_device.unlocked ? "已解锁" : "未解锁"));
+      if (!m_device.unlockKnown || !m_device.unlocked) {
+        log(!m_device.unlockKnown ? "设备Fastboot通信链路堵塞，为了防止变砖，请重新插拔数据线或更换USB接口后重试."
+                                 : "请将BL锁解开后再尝试刷入!!!");
+        endTask(false, {});
+        return;
+      }
+      const bool slotKnown = m_device.slot == "a" || m_device.slot == "b";
+      log("设备当前启动槽位：" + (slotKnown ? m_device.slot.toUpper() + "槽" : "未知槽位"));
+      if (!slotKnown) {
+        log("为了本次的刷写安全，请确保你的设备为A/B槽位设备，不支持非A/B槽位设备，如果你的设备为A/B槽位设备却出现此报错，请检查数据线或连接接口后重试.");
+        endTask(false, {});
+        return;
+      }
+      if (completed == Task::Probe)
+        log("设备是否处于FastbootD模式..." + QString(m_device.userspace ? "是" : "否"));
+      if (m_requestedMode == FlashMode::OnlyFastbootd && !m_device.userspace) {
+        log("仅FastbootD线刷要求设备已进入FastbootD模式.");
+        endTask(false, {});
+        return;
+      }
+    }
+    if (!m_device.modeKnown) {
+      endTask(false, "无法确定 Fastboot/FastbootD 模式");
       return;
     }
     if (m_device.userspace != userspace) {
@@ -870,7 +908,12 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
       m_service->prepareMode(m_device.serial, userspace);
       return;
     }
-    buildAndExecute();
+    if (!independent) {
+      m_task = Task::PartitionTable;
+      m_service->readPartitionTable(m_device);
+    } else {
+      buildAndExecute();
+    }
   });
 }
 void OugaFlashWindow::buildAndExecute() {
@@ -878,6 +921,8 @@ void OugaFlashWindow::buildAndExecute() {
   if (!continueTask(taskGeneration))
     return;
   Page &page = m_pages[m_page];
+  if (!m_page && m_requestedMode != FlashMode::RepairFastbootd &&
+      !validateProcessorFeatures()) return;
   const bool additional = needsAdditionalImages(m_requestedMode);
   QVector<Partition> planImages = page.images;
   if (m_requestedMode == FlashMode::RepairFastbootd) {
@@ -973,14 +1018,59 @@ void OugaFlashWindow::buildAndExecute() {
   m_service->execute(m_plan);
 }
 
+bool OugaFlashWindow::validateProcessorFeatures() {
+  const quint64 generation = m_generation;
+  flashLogStart("校验刷写文件处理器类型");
+  bool hasLk = false, hasXbl = false;
+  for (const Partition &image : m_pages[m_page].images) {
+    const QString path = image.path.trimmed();
+    if (path.isEmpty() || path.contains("(缺失)", Qt::CaseInsensitive) || !QFileInfo::exists(path)) continue;
+    const QString name = baseName(image.name), file = baseName(QFileInfo(path).fileName());
+    hasLk |= name == "lk" || file == "lk";
+    hasXbl |= name == "xbl" || file == "xbl";
+  }
+  QString error;
+  if (hasLk && hasXbl)
+    error = "已安全终止任务，用户选择的刷写文件中同时包含联发科特征文件lk和高通骁龙特征文件xbl，请使用正确的刷写文件.";
+  else if (m_device.platform == Platform::Qualcomm && hasLk)
+    error = "已安全终止任务，设备分区表检测结果为高通骁龙（设备连接不稳定会误判），但刷写文件中无高通特征文件xbl，刷写文件与设备处理器不匹配，若确定刷写文件与设备匹配，请检查数据线或连接接口后重试.";
+  else if (m_device.platform == Platform::MediaTek && hasXbl)
+    error = "已安全终止任务，设备分区表检测结果为联发科（设备连接不稳定会误判），但刷写文件中无联发科特征文件lk，刷写文件与设备处理器不匹配，若确定刷写文件与设备匹配，请检查数据线或连接接口后重试.";
+  if (!error.isEmpty()) {
+    flashLogFinish(false);
+    log(error);
+    endTask(false, {});
+    return false;
+  }
+  if (!hasLk && !hasXbl) {
+    flashLogFinish(false);
+    log("已安全终止任务，用户选择的刷写文件中不包含联发科特征文件lk和高通特征文件xbl，刷机包不完整.");
+    const bool accepted = confirmIncompletePackage();
+    if (!continueTask(generation)) return false;
+    if (!accepted) { endTask(false, {}); return false; }
+    log("用户已确认继续刷入，将继续使用设备分区表检测到的处理器类型.");
+  } else {
+    flashLogFinish(true);
+  }
+  log("设备处理器：" + QString(m_device.platform == Platform::MediaTek ? "联发科" : "高通骁龙"));
+  return true;
+}
+
 void OugaFlashWindow::requestStop() {
   if (!isBusy()) { log("当前无可停止的任务"); return; }
-  if (m_stopRequested) return;
+  if (m_stopRequested) {
+    if (m_service->busy()) m_service->requestStop();
+    else log("已收到停止请求，将在当前分区刷入完成后结束任务");
+    return;
+  }
   m_stopRequested = true;
-  log("已请求停止，当前分区刷写完成后将停止后续任务.");
   updateBusy();
-  if (m_service->busy()) m_service->requestStop();
-  else if (m_prepare->busy()) m_prepare->cancel();
+  if (m_service->busy()) {
+    m_service->requestStop();
+    return;
+  }
+  log("已请求停止，将在 当前分区 刷入完成后终止后续分区任务");
+  if (m_prepare->busy()) m_prepare->cancel();
   else if (m_rom->busy()) m_rom->cancel();
   else if (m_task != Task::PathCheck && m_task != Task::PayloadInspect && m_task != Task::Arb)
     endTask(false, "任务已按用户请求停止.");

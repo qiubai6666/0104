@@ -11,7 +11,7 @@ class OugaFlashService : public QObject {
 public:
   struct Timing {
     int pollMs = 1000, modeTimeoutMs = 120000, stableWindowMs = 30000,
-        stableSamples = 3, waitScale = 1, readTimeoutMs = 5000;
+        stableSamples = 3, waitScale = 1, readTimeoutMs = 10000;
   };
   explicit OugaFlashService(OugaCommandRunner *runner,
                             QObject *parent = nullptr);
@@ -20,6 +20,7 @@ public:
   bool busy() const { return m_busy; }
   void discover();
   void probe(const QString &serial, bool fullPackage = true);
+  void readPartitionTable(const Ouga::Device &device);
   void prepareMode(const QString &serial,
                    bool userspace); // explicit preparation, never flash
   void execute(const Ouga::Plan &plan);
@@ -69,7 +70,7 @@ private:
   void logPartitionSummary();
   void command(const QStringList &args,
                std::function<void(int, bool, const QString &)> callback,
-               bool bound = true);
+               bool bound = true, int timeoutMs = -1);
   void probeStable(bool userspace,
                    std::function<void(const Ouga::Device &)> ready,
                    std::function<void()> failed = {});

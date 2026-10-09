@@ -782,8 +782,14 @@ void OugaFlashWindow::log(const QString &message) {
                     timestamp);
   QColor color("#000000");
   if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
-      text.contains("FAILED") || text.contains("失败"))
+      text.contains("FAILED") || text.contains("失败") ||
+      text.startsWith("分区表为空") || text.startsWith("分区表中没有") ||
+      text.startsWith("检测到未解包") || text.startsWith("已安全终止") ||
+      text.startsWith("请将BL锁") || text.startsWith("为了本次的刷写安全") ||
+      text.startsWith("已请求停止，将在 ") || text == "已停止任务")
     color = QColor("#FF0000");
+  else if (text == "当前无可停止的任务" || text.startsWith("已收到停止请求"))
+    color = QColor("#FFA500");
   else if (text.startsWith("警告") || text.contains("请求停止") ||
            text.startsWith("刷机包对应的机型为") || text.contains("未验证") || text.contains("取消") ||
            text.startsWith("正在判断刷机包对应的机型") ||
@@ -799,6 +805,28 @@ void OugaFlashWindow::log(const QString &message) {
   QTextCharFormat content;
   content.setForeground(color);
   cursor.insertText(text, content);
+  QString prefix, valueColor;
+  if (text.startsWith("设备解锁状态...")) {
+    prefix = "设备解锁状态...";
+    valueColor = text.endsWith("已解锁") ? "#008000" : "#FF0000";
+  } else if (text.startsWith("设备当前启动槽位：")) {
+    prefix = "设备当前启动槽位：";
+    valueColor = text.endsWith("未知槽位") ? "#FF0000" : "#0000FF";
+  } else if (text.startsWith("设备是否处于FastbootD模式...")) {
+    prefix = "设备是否处于FastbootD模式...";
+    valueColor = text.endsWith("是") ? "#008000" : "#0000FF";
+  } else if (text.startsWith("设备处理器：")) {
+    prefix = "设备处理器：";
+    valueColor = text.endsWith("联发科") ? "#800080" : "#0000FF";
+  }
+  if (!prefix.isEmpty()) {
+    const int end = cursor.position();
+    cursor.setPosition(end - text.size() + prefix.size());
+    cursor.setPosition(end, QTextCursor::KeepAnchor);
+    content.setForeground(QColor(valueColor));
+    cursor.mergeCharFormat(content);
+    cursor.clearSelection();
+  }
   m_log->setTextCursor(cursor);
   m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
 }

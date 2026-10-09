@@ -86,6 +86,7 @@ bool startsInFastbootd(FlashMode mode);
 QString sizeText(qint64 bytes);
 Device parseDevice(const QString &serial, const QString &output);
 bool commandSucceeded(int code, bool normalExit, const QString &output);
+bool transportFailure(const QString &output);
 bool partitionMissing(const QString &output);
 QString planText(const Plan &plan);
 QString platformText(Platform platform);

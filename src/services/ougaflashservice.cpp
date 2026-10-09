@@ -168,6 +168,7 @@ void OugaFlashService::finish(bool success, const QString &message) {
   m_modeClock.invalidate();
   QString result = message;
   if (m_executing) {
+    if (m_stop) writeLog("已停止任务");
     if (m_fullPackage) {
       logPartitionSummary();
       if (m_stop) {
@@ -277,7 +278,7 @@ bool OugaFlashService::saveLog() {
 }
 void OugaFlashService::command(
     const QStringList &args, std::function<void(int, bool, const QString &)> cb,
-    bool bound) {
+    bool bound, int timeoutMs) {
   if (m_stop) {
     finish(false, "已请求停止；不会启动下一条命令，已写内容不会回滚");
     return;
@@ -303,7 +304,7 @@ void OugaFlashService::command(
     if (!m_commandFlashTarget.isEmpty()) display.last() = '"' + display.last() + '"';
     m_nativeOutput += timestamp + "[FASTBOOT CMD] " + display.join(' ') + '\n';
   }
-  int timeout = m_timing.readTimeoutMs;
+  int timeout = timeoutMs >= 0 ? timeoutMs : m_timing.readTimeoutMs;
   if (m_modeClock.isValid())
     timeout = qMax(
         1, qMin(timeout, m_timing.modeTimeoutMs - int(m_modeClock.elapsed())));
@@ -343,8 +344,6 @@ void OugaFlashService::queryDevice(
               keys << "unlocked";
             if (d.slot.isEmpty())
               keys << "current-slot";
-            if (d.product.isEmpty())
-              keys << "product";
             queryMissing(keys, all, callback);
           });
 }
@@ -356,8 +355,30 @@ void OugaFlashService::queryMissing(
     return;
   }
   const QString key = keys.takeFirst();
-  command({"getvar", key}, [this, keys, text, callback](int code, bool normal,
+  command({"getvar", key}, [this, key, keys, text, callback](int code, bool normal,
                                                         const QString &out) {
+    if (key == "unlocked") {
+      const Device state = parseDevice(m_serial, out);
+      if (state.unlockKnown) {
+        queryMissing(keys, text + "\nunlocked: " + (state.unlocked ? "yes" : "no"), callback);
+        return;
+      }
+      if (transportFailure(out)) {
+        callback(0, true, text + "\nunlocked: unknown");
+        return;
+      }
+      command({"oem", "device-info"}, [this, keys, text, callback](int, bool, const QString &output) {
+        const auto match = QRegularExpression("Device\\s+unlocked\\s*:\\s*(true|false)",
+            QRegularExpression::CaseInsensitiveOption).match(output);
+        if (!match.hasMatch()) {
+          callback(0, true, text + "\nunlocked: unknown");
+          return;
+        }
+        queryMissing(keys, text + "\nunlocked: " +
+            (match.captured(1).compare("true", Qt::CaseInsensitive) == 0 ? "yes" : "no"), callback);
+      });
+      return;
+    }
     if (!commandSucceeded(code, normal, out)) {
       callback(code, normal, out);
       return;
@@ -389,11 +410,37 @@ void OugaFlashService::probe(const QString &serial, bool fullPackage) {
       finish(false, "无法确定 Fastboot/FastbootD 模式");
       return;
     }
+    m_expected = d;
     probeStable(d.userspace, [this](const Device &dev) {
       emit deviceReady(dev);
       finish(true, "设备快照已读取，尚未执行任何写入");
     });
   });
+}
+void OugaFlashService::readPartitionTable(const Device &device) {
+  if (!acquire()) return;
+  m_serial = device.serial;
+  beginStep("解析分区表/判断处理器类型");
+  command({"getvar", "all"}, [this, device](int code, bool normal, const QString &output) {
+    if (!commandSucceeded(code, normal, output) || output.trimmed().isEmpty()) {
+      endStep(false);
+      appendNative(output, true);
+      writeLog(transportFailure(output)
+          ? "无法读取FastbootD分区表，已安全终止任务，此报错是由于你的数据线无法瞬时传输较大数据流信息导致，请更换质量更好的数据线然后重新进入FastbootD后重试."
+          : "无法读取FastbootD分区表，已安全终止任务.");
+      finish(false, {});
+      return;
+    }
+    const Device table = parseDevice(m_serial, output);
+    Device updated = device;
+    updated.partitions = table.partitions;
+    updated.sizes = table.sizes;
+    updated.logical = table.logical;
+    updated.platform = table.platform;
+    endStep(true);
+    emit deviceReady(updated);
+    finish(true, {});
+  }, true, 30000);
 }
 void OugaFlashService::queryMode(std::function<void(bool)> ready) {
   const auto mode = [](const QString &output) -> std::optional<bool> {
@@ -466,6 +513,10 @@ void OugaFlashService::pollStable(std::function<void(const Device &)> ready,
         }
         m_modeClock.invalidate();
         Device device = parseDevice(m_serial, output);
+        if (m_fullPackage && !device.unlockKnown) {
+          device.unlockKnown = m_expected.unlockKnown;
+          device.unlocked = m_expected.unlocked;
+        }
         device.modeKnown = true;
         device.userspace = m_expectedMode;
         ready(device);
@@ -562,8 +613,14 @@ void OugaFlashService::execute(const Plan &plan) {
 }
 void OugaFlashService::requestStop() {
   if (!m_busy) return;
+  if (m_stop) {
+    writeLog("已收到停止请求，将在当前分区刷入完成后结束任务");
+    return;
+  }
   m_stop = true;
-  writeLog("已请求停止，当前分区刷写完成后将停止后续任务.");
+  const QString target = m_runner->running() && !m_commandFlashTarget.isEmpty()
+      ? m_commandFlashTarget : QString("当前分区");
+  writeLog("已请求停止，将在 " + target + " 刷入完成后终止后续分区任务");
   if (m_wait.isActive()) {
     m_wait.stop();
     finish(false, "任务已按用户请求停止.");
