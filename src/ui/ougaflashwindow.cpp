@@ -323,12 +323,12 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   setStyleSheet(R"(
     QWidget { font-family:"Microsoft YaHei UI"; }
     OugaFlashWindow { background:#F3F6FA; }
-    QGroupBox { background:#FFFFFF; border:1px solid #D9E2EC; border-radius:8px;
+    QGroupBox { background:#FFFFFF; border:1px solid #D9E2EC; border-radius:12px;
       margin-top:8px; color:#334155; font-weight:600; font-size:12px; }
     QGroupBox::title { subcontrol-origin:margin; subcontrol-position:top left;
       left:10px; padding:0 5px; background:#FFFFFF; }
     QPushButton { background:#FFFFFF; color:#526579; border:1px solid #CBD7E2;
-      border-radius:6px; font-size:12px; font-weight:400; padding:0 5px; }
+      border-radius:8px; font-size:12px; font-weight:400; padding:0 5px; }
     QPushButton:hover { border-color:#7892A8; background:#EEF3F7; }
     QPushButton:pressed { background:#E3EBF1; }
     QPushButton[tone="sky"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
@@ -343,7 +343,7 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
     QPushButton[tone="stop"]:hover { background:#D9E3EB; border-color:#B8C9D6; }
     QPushButton:disabled { color:#A9B5C1; border-color:#D9E2EC; }
     QLineEdit, QComboBox { background:#FFFFFF; color:#526579; border:1px solid #D2DDE7;
-      border-radius:3px; padding:0 9px; font-size:12px; font-weight:400; }
+      border-radius:6px; padding:0 9px; font-size:12px; font-weight:400; }
     QLineEdit:focus, QComboBox:focus { border-color:#7892A8; }
     QComboBox { color:#526579; padding-right:23px; }
     QComboBox::drop-down { border:0; width:22px; }
@@ -363,7 +363,7 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
       font-family:"Cascadia Mono","Microsoft YaHei UI","Consolas";
       font-size:11.75px; font-weight:400; }
     QScrollBar:vertical { width:8px; background:#F8FAFC; margin:0; }
-    QScrollBar::handle:vertical { background:#C9D5DF; border-radius:4px; min-height:24px; }
+    QScrollBar::handle:vertical { background:#C9D5DF; border-radius:5px; min-height:24px; }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
   )");
   auto rootLayout = new QVBoxLayout(this);

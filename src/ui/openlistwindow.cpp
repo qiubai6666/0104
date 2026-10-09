@@ -168,18 +168,18 @@ void OpenListWindow::setupUi() {
     logsLayout->addWidget(m_log); layout->addWidget(logs,1);
     setStyleSheet(R"(
         QWidget#openListWindow { background:#F3F6FA; }
-        QGroupBox { background:#FFFFFF; border:1px solid #D9E2EC; border-radius:8px; margin-top:8px; color:#334155; font-weight:600; }
+        QGroupBox { background:#FFFFFF; border:1px solid #D9E2EC; border-radius:12px; margin-top:8px; color:#334155; font-weight:600; }
         QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 5px; background:#FFFFFF; }
         QLabel { color:#526579; }
-        QPushButton { background:#E7EEF3; color:#526579; border:1px solid #CBD7E2; border-radius:6px; padding:7px 12px; }
+        QPushButton { background:#E7EEF3; color:#526579; border:1px solid #CBD7E2; border-radius:8px; padding:7px 12px; }
         QPushButton:hover { background:#DCE7EF; border-color:#7892A8; }
         QPushButton:disabled { color:#A9B5C1; }
-        QLineEdit { background:#FFFFFF; color:#526579; border:1px solid #D2DDE7; border-radius:4px; padding:7px; }
+        QLineEdit { background:#FFFFFF; color:#526579; border:1px solid #D2DDE7; border-radius:6px; padding:7px; }
         QTableWidget { background:#FFFFFF; alternate-background-color:#F8FAFC; color:#334155; border:1px solid #DCE5ED; selection-background-color:#DCE7EF; selection-color:#334155; }
         QTableWidget::item { padding:0 4px; }
         QHeaderView::section { background:#EEF3F7; color:#526579; border:0; padding:6px; }
         QPlainTextEdit { background:#F8FAFC; color:#334155; border:0; font-family:"Microsoft YaHei UI","Consolas"; }
-        QProgressBar { border:1px solid #CBD7E2; border-radius:4px; background:#FFFFFF; text-align:center; min-height:20px; }
+        QProgressBar { border:1px solid #CBD7E2; border-radius:6px; background:#FFFFFF; text-align:center; min-height:20px; }
         QProgressBar::chunk { background:#718CA4; }
     )");
 }
