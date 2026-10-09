@@ -27,7 +27,8 @@ class OugaFlashWindow : public QWidget {
 public:
   explicit OugaFlashWindow(QWidget *parent = nullptr,
                            OugaCommandRunner *runner = nullptr,
-                           const QString &logDirectory = {});
+                           const QString &logDirectory = {},
+                           std::function<QString()> preferredSerial = {});
   bool isBusy() const;
 
 protected:
@@ -73,6 +74,7 @@ private:
   };
   // Logical launcher only: a native owner suppresses the Windows taskbar button.
   QPointer<QWidget> m_launcher;
+  std::function<QString()> m_preferredSerial;
   OugaFlashService *m_service = nullptr;
   OugaPreparation *m_prepare = nullptr;
   OugaRomService *m_rom = nullptr;
@@ -94,6 +96,7 @@ private:
   Ouga::FlashMode m_requestedMode = Ouga::FlashMode::Normal;
   Ouga::Device m_device;
   Ouga::Plan m_plan;
+  QTextBlock m_deviceWaitLogBlock;
   QStringList m_serials, m_extractNames;
   QString m_payloadSource, m_payloadOutput, m_archiveRoot, m_downloaded;
   bool m_unpackPayload = false;

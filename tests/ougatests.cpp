@@ -3536,10 +3536,10 @@ private slots:
       r.stuckMode = true;
     s.execute(p);
     QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
-    QCOMPARE(done[0][0].toBool(), kind == 4);
-    QCOMPARE(r.trace.contains("reboot"), kind == 0 || kind == 1 || kind == 4);
+    QCOMPARE(done[0][0].toBool(), kind == 3 || kind == 4);
+    QCOMPARE(r.trace.contains("reboot"), kind == 0 || kind == 1 || kind == 3 || kind == 4);
     for (const auto &row : prog)
-      QVERIFY(kind == 4 || row[2].toString() != "所有任务执行成功！");
+      QVERIFY(kind == 3 || kind == 4 || row[2].toString() != "所有任务执行成功！");
   }
   void formatDependencies_data() {
     QTest::addColumn<QString>("missing");
@@ -3630,14 +3630,136 @@ private slots:
     QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
     QVERIFY(done[0][0].toBool());
     QCOMPARE(ready.count(), 1);
-    QCOMPARE(runner.deviceLists, 4); // Wait, then three consecutive successes.
-    QCOMPARE(runner.trace.count("getvar all"), 2); // Read before/after, never per sample.
-    QCOMPARE(runner.trace.count("getvar is-userspace"), 2);
-    QCOMPARE(
-        qvariant_cast<Device>(ready[0][0]).variables.value("has-slot:boot"),
-        QString("yes"));
+    QCOMPARE(runner.deviceLists, 3);
+    QCOMPARE(runner.trace.count("getvar all"), 0);
+    QCOMPARE(runner.trace.count("getvar is-userspace"), 1);
+    QVERIFY(qvariant_cast<Device>(ready[0][0]).partitions.isEmpty());
     for (const QString &cmd : runner.trace)
       QVERIFY(cmd.startsWith("getvar ") || cmd == "devices");
+  }
+  void referenceInitialDeviceWait_data() {
+    QTest::addColumn<QString>("scenario");
+    for (const QString scenario : {"single", "delayed", "multiple-then-single", "multiple-timeout", "preferred",
+                                   "preferred-missing", "empty-timeout", "invalid-list", "mode-delayed", "mode-timeout", "stop"})
+      QTest::newRow(qPrintable(scenario)) << scenario;
+  }
+  void referenceInitialDeviceWait() {
+    QFETCH(QString, scenario);
+    FakeRunner runner;
+    OugaFlashService service(&runner); configure(service);
+    OugaFlashService::Timing timing;
+    timing.modeTimeoutMs = 250; timing.pollMs = 1;
+    service.setTiming(timing);
+    runner.deviceList = [&](int count) {
+      if (scenario == "stop" && count == 2) service.requestStop();
+      if (scenario == "stop") return QString();
+      if (scenario == "empty-timeout" || (scenario == "delayed" && count < 3)) return QString();
+      if (scenario == "preferred-missing") return QString("OTHER\tfastboot\n");
+      if (scenario == "invalid-list") return QString("TEST-SERIAL fastboot trailing\n");
+      if (scenario == "multiple-timeout" || scenario == "preferred" || (scenario == "multiple-then-single" && count < 3))
+        return QString("TEST-SERIAL\tfastboot\nSECOND\tfastboot\n");
+      return QString("TEST-SERIAL\tfastboot\n");
+    };
+    runner.userspaceOutput = [&] {
+      return QString("is-userspace: ") + (scenario == "mode-timeout" || runner.deviceLists < 3 ? "no" : "yes");
+    };
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy found(&service, &OugaFlashService::devicesFound);
+    QSignalSpy waits(&service, &OugaFlashService::deviceWaitStarted);
+    QSignalSpy updates(&service, &OugaFlashService::deviceWaitUpdated);
+    const bool preferred = scenario.startsWith("preferred");
+    std::optional<bool> mode;
+    if (scenario.startsWith("mode")) mode = true;
+    service.discover(preferred ? "TEST-SERIAL" : QString(), mode);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 2000);
+    const bool success = !scenario.endsWith("timeout") && scenario != "preferred-missing" &&
+                         scenario != "invalid-list" && scenario != "stop";
+    QCOMPARE(done[0][0].toBool(), success);
+    QCOMPARE(found.count(), int(success));
+    QCOMPARE(waits.count(), 1);
+    QVERIFY(waits[0][0].toString().startsWith(mode.has_value() ? "等待FastbootD设备连接..." : "等待Fastboot设备连接..."));
+    QCOMPARE(updates.last()[0].toString(), success ? QString("[TEST-SERIAL]")
+                                                : scenario == "stop" ? QString("已停止.") : QString("等待超时."));
+    QCOMPARE(updates.last()[1].toInt(), success ? 1 : -1);
+    for (const auto &command : runner.boundTrace)
+      QVERIFY(command == "devices" || command == "-s TEST-SERIAL getvar is-userspace");
+    if (success) QCOMPARE(found[0][0].toStringList(), QStringList{"TEST-SERIAL"});
+    if (scenario == "delayed" || scenario == "multiple-then-single" || scenario == "mode-delayed")
+      QCOMPARE(runner.deviceLists, 3);
+    QVERIFY(!DeviceOperationLease::owner());
+  }
+  void referencePreparationQueries_data() {
+    QTest::addColumn<QString>("scenario");
+    for (const QString scenario : {"full", "locked", "unknown-unlock", "unknown-slot", "only-fbd",
+                                   "sale-fbd", "repair", "full-switch"})
+      QTest::newRow(qPrintable(scenario)) << scenario;
+  }
+  void referencePreparationQueries() {
+    QFETCH(QString, scenario);
+    FakeRunner runner;
+    runner.multipleDevices = false;
+    runner.device.userspace = scenario != "full-switch";
+    if (scenario == "locked") runner.device.unlocked = false;
+    if (scenario == "unknown-unlock") runner.unlockedOutput = [] { return QString("USB Error"); };
+    if (scenario == "unknown-slot") runner.device.slot.clear();
+    OugaFlashService service(&runner); configure(service);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    QSignalSpy ready(&service, &OugaFlashService::deviceReady);
+    const bool independent = scenario == "sale-fbd" || scenario == "repair";
+    const std::optional<bool> required = scenario == "only-fbd" ? std::optional<bool>(true) : std::nullopt;
+    service.probe(runner.device.serial, !independent, required, scenario == "sale-fbd");
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 2000);
+    QVERIFY(done[0][0].toBool());
+    QStringList expected = {"devices", "devices", "devices"};
+    if (required.has_value()) expected << "getvar is-userspace";
+    if (!independent) {
+      expected << "getvar unlocked";
+      if (scenario != "locked" && scenario != "unknown-unlock") {
+        expected << "getvar current-slot";
+        if (scenario != "unknown-slot") expected << "getvar is-userspace";
+      }
+    } else {
+      expected << "getvar is-userspace";
+      if (scenario == "sale-fbd") expected << "getvar current-slot";
+    }
+    QCOMPARE(runner.trace, expected);
+    if (scenario == "full-switch") {
+      runner.trace.clear();
+      service.prepareMode(runner.device.serial, true);
+      QTRY_COMPARE_WITH_TIMEOUT(done.count(), 2, 2000);
+      QCOMPARE(runner.trace, (QStringList{"reboot fastboot", "devices", "getvar is-userspace", "devices",
+          "devices", "devices", "getvar is-userspace", "getvar unlocked", "getvar current-slot"}));
+      QVERIFY(qvariant_cast<Device>(ready.last()[0]).userspace);
+    }
+    QVERIFY(!runner.trace.contains("getvar all"));
+  }
+  void referenceTransitionDoesNotRevalidateIdentity() {
+    FakeRunner runner;
+    runner.device = standardFbdDevice(Platform::Qualcomm, "a", 1);
+    const auto ps = standardFbdImages("a", 1);
+    Plan plan; QString error;
+    QVERIFY2(OugaFlashPlanner::build(ps, runner.device, options(), &plan, &error), qPrintable(error));
+    runner.after = [&](const QStringList &args) {
+      if (args.value(0) == "reboot") {
+        runner.device.product = "CHANGED";
+        runner.device.unlocked = false;
+        runner.device.unlockKnown = false;
+        runner.device.slot = "b";
+        runner.device.partitions.remove("xbl_a");
+        runner.device.partitions.insert("lk_a");
+      }
+    };
+    OugaFlashService service(&runner); configure(service);
+    QSignalSpy done(&service, &OugaFlashService::finished);
+    service.execute(plan);
+    QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 3000);
+    QVERIFY2(done[0][0].toBool(), qPrintable(done[0][1].toString()));
+    QVERIFY(runner.trace.contains("flash modem_a " + dir + "/modem.img"));
+    QVERIFY(runner.trace.contains("flash modem_b " + dir + "/modem.img"));
+    QVERIFY(runner.trace.contains("erase frp"));
+    QVERIFY(!runner.trace.contains("getvar unlocked"));
+    QVERIFY(!runner.trace.contains("getvar current-slot"));
+    QCOMPARE(runner.trace.first(), QString("getvar all")); // COW inventory, without an extra preparation loop.
   }
   void referenceConnectionStability_data() {
     QTest::addColumn<QString>("scenario");
@@ -4308,7 +4430,7 @@ private slots:
       QVERIFY(cmd == "devices" || cmd.startsWith("-s TEST-SERIAL "));
     QVERIFY(runner.device.userspace);
     QCOMPARE(runner.device.slot, start);
-    QVERIFY(fbdProbes >= 3); // Wait mode query, final stability mode query, final table.
+    QCOMPARE(fbdProbes, 2); // Wait mode query, then the final stability mode query.
     QCOMPARE(progress.last()[0].toInt(), plan.flashCount);
     QCOMPARE(progress.last()[1].toInt(), plan.flashCount);
     QVERIFY(QDir(dir + "/logs").entryList({"*.txt"}, QDir::Files).isEmpty());
@@ -7045,6 +7167,73 @@ private slots:
     QTest::newRow("zero-exit-FAILED") << 2;
     QTest::newRow("nonzero") << 3;
   }
+  void referenceWidgetDeviceWait_data() {
+    QTest::addColumn<QString>("scenario");
+    for (const QString scenario : {"preferred", "multiple-wait", "late-single"})
+      QTest::newRow(qPrintable(scenario)) << scenario;
+  }
+  void referenceWidgetDeviceWait() {
+    QFETCH(QString, scenario);
+    FakeRunner runner;
+    runner.multipleDevices = true;
+    runner.deviceList = [&](int count) {
+      return QString("TEST-SERIAL\tfastboot\n") +
+          (scenario == "late-single" && count >= 4 ? QString() : QString("SECOND\tfastboot\n"));
+    };
+    QVERIFY(put(dir + "/boot.img", QByteArray(512, 'b')));
+    QVERIFY(put(dir + "/xbl.img", QByteArray(512, 'x')));
+    const QString tool = dir + "/fake-fastboot.exe";
+    QVERIFY(put(tool, "Injected runner only"));
+    QSettings().setValue("Ouga/fastboot", tool);
+    OugaFlashWindow window(nullptr, &runner, dir + "/logs", [scenario] {
+      return scenario == "preferred" ? QString("TEST-SERIAL") : QString();
+    });
+    window.show();
+    auto service = window.findChild<OugaFlashService *>();
+    configure(*service);
+    if (scenario == "multiple-wait") {
+      OugaFlashService::Timing timing;
+      timing.pollMs = 50; timing.modeTimeoutMs = 2400; timing.stableWindowMs = 1000;
+      timing.waitScale = 0; service->setTiming(timing);
+    }
+    auto folder = window.findChild<QLineEdit *>("FolderPathTextBox");
+    folder->setText(dir);
+    QVERIFY(QMetaObject::invokeMethod(folder, "editingFinished"));
+    QTRY_VERIFY(!window.isBusy());
+    window.findChild<QCheckBox *>("ClearDataCheckBox")->setChecked(false);
+    window.findChild<QCheckBox *>("AutoRebootOugaCheckBox")->setChecked(false);
+    int dialogs = 0;
+    QTimer rejectDialogs;
+    connect(&rejectDialogs, &QTimer::timeout, &window, [&] {
+      if (auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget())) {
+        ++dialogs; dialog->reject();
+      }
+    });
+    rejectDialogs.start(5);
+    window.findChild<QPushButton *>("StartFlashButton")->click();
+    auto log = window.findChild<QPlainTextEdit *>("OugaFlashLogTextBox");
+    if (scenario == "multiple-wait") {
+      QTRY_VERIFY_WITH_TIMEOUT(log->toPlainText().contains("等待Fastboot设备连接...2s"), 1700);
+      QVERIFY(window.isBusy());
+      QCOMPARE(log->toPlainText().count("等待Fastboot设备连接..."), 1);
+      QVERIFY(window.grab().save(dir + "/device-wait.png"));
+      window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+    }
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isBusy(), 5000);
+    rejectDialogs.stop();
+    QCOMPARE(dialogs, 0);
+    const QString text = log->toPlainText();
+    QCOMPARE(text.count("等待Fastboot设备连接..."), 1);
+    QVERIFY(text.contains("等待Fastboot设备连接..." + (scenario == "multiple-wait" ? QString("已停止.")
+        : QString("[TEST-SERIAL]"))));
+    QCOMPARE(std::any_of(runner.trace.cbegin(), runner.trace.cend(), [](const QString &command) {
+      return command.startsWith("flash ");
+    }), scenario != "multiple-wait");
+    for (const QString &command : runner.boundTrace)
+      QVERIFY(command == "devices" || command.startsWith("-s TEST-SERIAL "));
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(window.close());
+  }
   void widgetStartWorkflow() {
     QFETCH(int, outcome);
     FakeRunner runner;
@@ -7166,6 +7355,10 @@ private slots:
     QStringList unexpected;
     QTimer answer;
     connect(&answer, &QTimer::timeout, &window, [&] {
+      if (stage == "device" && runner.deviceLists > 0 && !stoppedInPrompt) {
+        stoppedInPrompt = true;
+        window.findChild<QPushButton *>("OugaFlashStopPanel")->click();
+      }
       auto dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
       if (!dialog)
         return;

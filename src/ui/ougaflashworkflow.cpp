@@ -23,12 +23,18 @@
 #include <QSettings>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QScrollBar>
 #include <QTimer>
 #include <QUuid>
 #include <QtConcurrent>
 #include <algorithm>
 using namespace Ouga;
 namespace {
+std::optional<bool> initialConnectionMode(FlashMode mode) {
+  if (mode == FlashMode::OnlyFastbootd) return true;
+  if (mode == FlashMode::RepairFastbootd || mode == FlashMode::AfterSalesBootloader) return false;
+  return {};
+}
 QString uniqueWork(const QString &directory, const QString &name) {
   return QDir(directory).filePath(name + "-" +
                                   QUuid::createUuid().toString(QUuid::Id128));
@@ -70,6 +76,23 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
   connect(m_service, &OugaFlashService::log, this, &OugaFlashWindow::log);
   connect(m_service, &OugaFlashService::stepStarted, this, &OugaFlashWindow::flashLogStart);
   connect(m_service, &OugaFlashService::stepFinished, this, &OugaFlashWindow::flashLogFinish);
+  connect(m_service, &OugaFlashService::deviceWaitStarted, this, [this](const QString &title, int remaining) {
+    log(title + QString::number(remaining) + "s");
+    m_deviceWaitLogBlock = m_log->document()->lastBlock();
+  });
+  connect(m_service, &OugaFlashService::deviceWaitUpdated, this, [this](const QString &result, int state) {
+    if (!m_deviceWaitLogBlock.isValid()) return;
+    QTextCursor cursor(m_deviceWaitLogBlock);
+    const int start = m_deviceWaitLogBlock.text().lastIndexOf("...") + 3;
+    cursor.setPosition(m_deviceWaitLogBlock.position() + start);
+    cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+    QTextCharFormat format;
+    format.setForeground(QColor(state > 0 ? "#008000" : state < 0 ? "#FF0000" : "#0000FF"));
+    format.setFontWeight(state ? QFont::Bold : QFont::DemiBold);
+    cursor.insertText(result, format);
+    if (state) m_deviceWaitLogBlock = QTextBlock();
+    m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
+  });
   connect(m_service, &OugaFlashService::coolingProgress, this, [this](int remaining) {
     if (remaining == 120) {
       log("剩余时间：120秒");
@@ -806,7 +829,7 @@ void OugaFlashWindow::discoverDevice() {
   m_task = Task::Discover;
   m_serials.clear();
   updateBusy();
-  m_service->discover();
+  m_service->discover(m_preferredSerial ? m_preferredSerial() : QString(), initialConnectionMode(m_requestedMode));
 }
 void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
   if (m_task == Task::None)
@@ -845,21 +868,10 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
         endTask(false, "没有检测到Fastboot设备，请连接设备后重试");
         return;
       }
-      QString serial = m_serials.first();
-      if (m_serials.size() > 1) {
-        bool accepted = false;
-        serial =
-            QInputDialog::getItem(this, "选择线刷设备", "仅操作所选序列号：",
-                                  m_serials, 0, false, &accepted);
-        if (!continueTask(generation))
-          return;
-        if (!accepted || serial.isEmpty()) {
-          endTask(false, "用户取消设备选择；没有写入");
-          return;
-        }
-      }
+      const QString serial = m_serials.first();
       m_task = Task::Probe;
-      m_service->probe(serial, !m_page && m_requestedMode != FlashMode::RepairFastbootd);
+      m_service->probe(serial, !m_page && m_requestedMode != FlashMode::RepairFastbootd,
+                       initialConnectionMode(m_requestedMode), m_requestedMode == FlashMode::AfterSalesFastbootd);
       return;
     }
     if (completed == Task::PartitionTable) {

@@ -123,7 +123,9 @@ void RepairWindow::onButtonClicked()
         xiaomiWindow->activateWindow();
         break;
     case OugaFlash:
-        if (!ougaWindow) ougaWindow = new OugaFlashWindow(this);
+        if (!ougaWindow) ougaWindow = new OugaFlashWindow(this, nullptr, {}, [] {
+            return DeviceManager::instance()->deviceSerial();
+        });
         ougaWindow->showNormal();
         ougaWindow->raise();
         ougaWindow->activateWindow();

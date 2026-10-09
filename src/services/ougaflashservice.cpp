@@ -32,6 +32,12 @@ OugaFlashService::OugaFlashService(OugaCommandRunner *runner, QObject *parent)
     : QObject(parent), m_runner(runner) {
   Q_ASSERT(runner);
   m_wait.setSingleShot(true);
+  m_countdown.setInterval(200);
+  connect(&m_countdown, &QTimer::timeout, this, [this] {
+    const qint64 elapsed = m_connectionReady ? m_stableClock.elapsed() : m_modeClock.elapsed();
+    const int timeout = m_connectionReady ? m_timing.stableWindowMs : m_timing.modeTimeoutMs;
+    updateDeviceWaitLog(QString::number(qMax<qint64>(0, (timeout - elapsed + 999) / 1000)) + "s", 0);
+  });
   connect(runner, &OugaCommandRunner::output, this,
           [this](const QString &text) {
             m_streamedOutput += text;
@@ -165,7 +171,10 @@ void OugaFlashService::logPartitionSummary() {
 void OugaFlashService::finish(bool success, const QString &message) {
   ++m_generation;
   m_wait.stop();
+  if (m_countdown.isActive()) updateDeviceWaitLog(m_stop ? "已停止." : "等待超时.", -1);
   m_modeClock.invalidate();
+  m_stableClock.invalidate();
+  m_connectionReady = false;
   QString result = message;
   if (m_executing) {
     if (m_stop) writeLog("已停止任务");
@@ -305,117 +314,86 @@ void OugaFlashService::command(
     m_nativeOutput += timestamp + "[FASTBOOT CMD] " + display.join(' ') + '\n';
   }
   int timeout = timeoutMs >= 0 ? timeoutMs : m_timing.readTimeoutMs;
-  if (m_modeClock.isValid())
+  if (m_modeClock.isValid() || (m_connectionReady && m_stableClock.isValid()))
     timeout = qMax(
-        1, qMin(timeout, m_timing.modeTimeoutMs - int(m_modeClock.elapsed())));
+        1, qMin(timeout, m_connectionReady ? m_timing.stableWindowMs - int(m_stableClock.elapsed())
+                                          : m_timing.modeTimeoutMs - int(m_modeClock.elapsed())));
   m_runner->run(m_tool, a, timeout);
 }
-void OugaFlashService::discover() {
-  if (!acquire())
-    return;
-  m_serial.clear();
-  command(
-      {"devices"},
-      [this](int c, bool n, const QString &out) {
-        if (!commandSucceeded(c, n, out)) {
-          finish(false, "读取设备列表失败");
-          return;
-        }
-        const QStringList serials = connectedSerials(out);
-        emit devicesFound(serials);
-        finish(true, serials.isEmpty() ? "没有 Fastboot 设备"
-                                       : "已读取设备列表，请明确选择设备");
-      },
-      false);
+void OugaFlashService::discover(const QString &preferredSerial, std::optional<bool> userspace) {
+  if (!acquire()) return;
+  m_serial = preferredSerial;
+  waitDevice(userspace, [this] {
+    emit devicesFound({m_serial});
+    finish(true, {});
+  }, {}, true);
 }
-void OugaFlashService::queryDevice(
-    std::function<void(int, bool, const QString &)> callback) {
-  command({"getvar", "all"},
-          [this, callback](int c, bool normal, const QString &all) {
-            if (!commandSucceeded(c, normal, all)) {
-              callback(c, normal, all);
-              return;
-            }
-            Device d = parseDevice(m_serial, all);
-            QStringList keys;
-            if (!d.modeKnown)
-              keys << "is-userspace";
-            if (!d.unlockKnown)
-              keys << "unlocked";
-            if (d.slot.isEmpty())
-              keys << "current-slot";
-            queryMissing(keys, all, callback);
-          });
-}
-void OugaFlashService::queryMissing(
-    QStringList keys, QString text,
-    std::function<void(int, bool, const QString &)> callback) {
-  if (keys.isEmpty()) {
-    callback(0, true, text);
-    return;
-  }
-  const QString key = keys.takeFirst();
-  command({"getvar", key}, [this, key, keys, text, callback](int code, bool normal,
-                                                        const QString &out) {
-    if (key == "unlocked") {
-      const Device state = parseDevice(m_serial, out);
-      if (state.unlockKnown) {
-        queryMissing(keys, text + "\nunlocked: " + (state.unlocked ? "yes" : "no"), callback);
-        return;
-      }
-      if (transportFailure(out)) {
-        callback(0, true, text + "\nunlocked: unknown");
-        return;
-      }
-      command({"oem", "device-info"}, [this, keys, text, callback](int, bool, const QString &output) {
-        const auto match = QRegularExpression("Device\\s+unlocked\\s*:\\s*(true|false)",
-            QRegularExpression::CaseInsensitiveOption).match(output);
-        if (!match.hasMatch()) {
-          callback(0, true, text + "\nunlocked: unknown");
-          return;
-        }
-        queryMissing(keys, text + "\nunlocked: " +
-            (match.captured(1).compare("true", Qt::CaseInsensitive) == 0 ? "yes" : "no"), callback);
-      });
+void OugaFlashService::queryUnlock(std::function<void(std::optional<bool>)> ready) {
+  command({"getvar", "unlocked"}, [this, ready](int, bool, const QString &out) {
+    const Device state = parseDevice(m_serial, out);
+    if (state.unlockKnown) {
+      ready(state.unlocked);
       return;
     }
-    if (!commandSucceeded(code, normal, out)) {
-      callback(code, normal, out);
+    if (transportFailure(out)) {
+      ready({});
       return;
     }
-    queryMissing(keys, text + '\n' + out, callback);
+    command({"oem", "device-info"}, [ready](int, bool, const QString &output) {
+      const auto match = QRegularExpression("Device\\s+unlocked\\s*:\\s*(true|false)",
+          QRegularExpression::CaseInsensitiveOption).match(output);
+      if (!match.hasMatch()) {
+        ready({});
+        return;
+      }
+      ready(match.captured(1).compare("true", Qt::CaseInsensitive) == 0);
+    });
   });
 }
-void OugaFlashService::probe(const QString &serial, bool fullPackage) {
+void OugaFlashService::queryDevice(std::function<void(const Device &)> ready, bool includeMode) {
+  queryUnlock([this, ready, includeMode](std::optional<bool> unlocked) {
+    Device device = m_expected;
+    device.serial = m_serial;
+    device.unlockKnown = unlocked.has_value();
+    device.unlocked = unlocked.value_or(false);
+    if (!device.unlocked) { ready(device); return; }
+    command({"getvar", "current-slot"}, [this, ready, includeMode, device](int, bool, const QString &output) mutable {
+      device.slot = parseDevice(m_serial, output).slot;
+      if ((device.slot != "a" && device.slot != "b") || !includeMode) { ready(device); return; }
+      queryMode([ready, device](bool userspace) mutable {
+        device.modeKnown = true;
+        device.userspace = userspace;
+        ready(device);
+      });
+    });
+  });
+}
+void OugaFlashService::probe(const QString &serial, bool fullPackage,
+                             std::optional<bool> requiredMode, bool readSlot) {
   if (!acquire())
     return;
   m_serial = serial;
   m_fullPackage = fullPackage;
-  if (!fullPackage) {
-    queryMode([this](bool userspace) {
-      probeStable(userspace, [this](const Device &device) {
-        emit deviceReady(device);
-        finish(true, {});
+  m_expected = Device();
+  m_expected.serial = serial;
+  probeStable(requiredMode, [this, fullPackage, readSlot](const Device &) {
+    auto ready = [this](const Device &device) {
+      m_expected = device;
+      emit deviceReady(device);
+      finish(true, {});
+    };
+    if (fullPackage) { queryDevice(ready, true); return; }
+    queryMode([this, readSlot, ready](bool userspace) {
+      Device device = m_expected;
+      device.modeKnown = true;
+      device.userspace = userspace;
+      if (!readSlot) { ready(device); return; }
+      command({"getvar", "current-slot"}, [this, ready, device](int, bool, const QString &output) mutable {
+        device.slot = parseDevice(m_serial, output).slot;
+        ready(device);
       });
     });
-    return;
-  }
-  queryDevice([this](int c, bool n, const QString &out) {
-    if (!commandSucceeded(c, n, out)) {
-      finish(false, "设备探测失败");
-      return;
-    }
-    Device d = parseDevice(m_serial, out);
-    if (!d.modeKnown) {
-      finish(false, "无法确定 Fastboot/FastbootD 模式");
-      return;
-    }
-    m_expected = d;
-    probeStable(d.userspace, [this](const Device &dev) {
-      emit deviceReady(dev);
-      finish(true, "设备快照已读取，尚未执行任何写入");
-    });
-  });
+  }, {}, false);
 }
 void OugaFlashService::readPartitionTable(const Device &device) {
   if (!acquire()) return;
@@ -456,128 +434,156 @@ void OugaFlashService::queryMode(std::function<void(bool)> ready) {
     if (direct.has_value()) { ready(*direct); return; }
     command({"getvar", "all"}, [ready, mode](int, bool, const QString &all) {
       ready(mode(all).value_or(all.contains("super-partition-name", Qt::CaseInsensitive)));
-    });
+    }, true, 15000);
   });
 }
-void OugaFlashService::probeStable(bool userspace,
-                                   std::function<void(const Device &)> ready,
-                                   std::function<void()> failed) {
-  m_expectedMode = userspace;
-  m_stable = 0;
+void OugaFlashService::startDeviceWaitLog(const QString &title, int timeoutMs) {
+  m_deviceWaitTitle = title;
+  m_deviceWaitLine = -1;
+  const int seconds = (timeoutMs + 999) / 1000;
+  if (m_executing) {
+    m_deviceWaitLine = m_lines.size();
+    m_lines << QDateTime::currentDateTime().toString("[HH:mm:ss ] ") + title + QString::number(seconds) + "s";
+  }
+  emit deviceWaitStarted(title, seconds);
+  emit deviceWaitUpdated(QString::number(seconds) + "s", 0);
+  m_countdown.start();
+}
+void OugaFlashService::updateDeviceWaitLog(const QString &result, int state) {
+  if (m_deviceWaitLine >= 0 && m_deviceWaitLine < m_lines.size()) {
+    const QString timestamp = m_lines[m_deviceWaitLine].left(m_lines[m_deviceWaitLine].indexOf("] ") + 2);
+    m_lines[m_deviceWaitLine] = timestamp + m_deviceWaitTitle + result;
+  }
+  emit deviceWaitUpdated(result, state);
+  if (state) {
+    m_countdown.stop();
+    m_deviceWaitLine = -1;
+  }
+}
+void OugaFlashService::waitDevice(std::optional<bool> userspace, std::function<void()> ready,
+                                  std::function<void()> failed, bool showSerial, const QString &title) {
+  m_requiredMode = userspace;
   m_connectionReady = false;
-  m_modeClock.start();
   m_stableClock.invalidate();
-  pollStable(std::move(ready), std::move(failed));
+  m_modeClock.start();
+  startDeviceWaitLog(title.isEmpty() ? QString("等待%1设备连接...").arg(userspace.value_or(false) ? "FastbootD" : "Fastboot")
+                                     : title, m_timing.modeTimeoutMs);
+  pollDevice(std::move(ready), std::move(failed), showSerial);
+}
+void OugaFlashService::pollDevice(std::function<void()> ready, std::function<void()> failed, bool showSerial) {
+  if (m_stop) { finish(false, {}); return; }
+  if (m_modeClock.elapsed() >= m_timing.modeTimeoutMs) {
+    updateDeviceWaitLog("等待超时.", -1);
+    m_modeClock.invalidate();
+    if (failed) failed();
+    else finish(false, {});
+    return;
+  }
+  auto retry = [this, ready, failed, showSerial] {
+    const quint64 generation = m_generation;
+    QTimer::singleShot(qMin(200, m_timing.pollMs), this, [this, ready, failed, showSerial, generation] {
+      if (m_busy && generation == m_generation) pollDevice(ready, failed, showSerial);
+    });
+  };
+  command({"devices"}, [this, ready, retry, showSerial](int, bool, const QString &output) {
+    if (m_stop) { finish(false, {}); return; }
+    const QStringList serials = connectedSerials(output);
+    const QString serial = m_serial.isEmpty() ? (serials.size() == 1 ? serials.first() : QString())
+        : (serials.contains(m_serial, Qt::CaseInsensitive) ? m_serial : QString());
+    if (serial.isEmpty()) { retry(); return; }
+    const QString previousSerial = m_serial;
+    m_serial = serial;
+    auto check = [this, ready, retry, showSerial, previousSerial](bool modeMatches) {
+      if (m_stop) { finish(false, {}); return; }
+      if (!modeMatches) { m_serial = previousSerial; retry(); return; }
+      updateDeviceWaitLog(showSerial ? "[" + m_serial + "]" : QString("OK"), 1);
+      m_modeClock.invalidate();
+      ready();
+    };
+    if (!m_requiredMode.has_value()) { check(true); return; }
+    queryMode([this, check](bool mode) { check(mode == *m_requiredMode); });
+  }, false);
+}
+void OugaFlashService::probeStable(std::optional<bool> userspace,
+                                   std::function<void(const Device &)> ready,
+                                   std::function<void()> failed, bool waitFirst, const QString &title) {
+  auto start = [this, userspace, ready, failed, title] {
+    m_requiredMode = userspace;
+    m_stable = 0;
+    m_connectionReady = true;
+    m_modeClock.invalidate();
+    m_stableClock.start();
+    startDeviceWaitLog(title, m_timing.stableWindowMs);
+    pollStable(ready, failed);
+  };
+  if (waitFirst) waitDevice(userspace, start, failed);
+  else start();
 }
 void OugaFlashService::pollStable(std::function<void(const Device &)> ready,
                                   std::function<void()> failed) {
-  if (m_stop) {
-    finish(false, "已在命令边界停止");
-    return;
-  }
-  if ((!m_connectionReady && m_modeClock.elapsed() >= m_timing.modeTimeoutMs) ||
-      (m_connectionReady && m_stableClock.elapsed() >= m_timing.stableWindowMs)) {
+  if (m_stop) { finish(false, {}); return; }
+  if (m_stableClock.elapsed() >= m_timing.stableWindowMs) {
+    updateDeviceWaitLog("等待超时.", -1);
+    m_stableClock.invalidate();
+    m_connectionReady = false;
     if (failed) failed();
-    else finish(false, "等待原设备模式超时（不接管其他设备）");
+    else finish(false, {});
     return;
   }
   auto retry = [this, ready, failed] {
     const quint64 generation = m_generation;
-    const int delay = m_connectionReady ? m_timing.pollMs : qMin(200, m_timing.pollMs);
-    QTimer::singleShot(delay, this, [this, ready, failed, generation] {
-      if (m_busy && generation == m_generation)
-        pollStable(ready, failed);
+    QTimer::singleShot(m_timing.pollMs, this, [this, ready, failed, generation] {
+      if (m_busy && generation == m_generation) pollStable(ready, failed);
     });
   };
-  command({"devices"}, [this, ready, failed, retry](int, bool, const QString &out) {
-    const bool connected = connectedSerials(out).contains(m_serial, Qt::CaseInsensitive);
-    if (!connected) { m_stable = 0; retry(); return; }
-    if (m_connectionReady && ++m_stable < m_timing.stableSamples) {
-      retry();
-      return;
-    }
-    queryMode([this, ready, failed, retry](bool userspace) {
-      if (userspace != m_expectedMode) { m_stable = 0; retry(); return; }
-      if (!m_connectionReady) {
-        m_connectionReady = true;
-        m_stable = 0;
-        m_stableClock.start();
-        // The reference begins its stability loop immediately after the wait.
-        pollStable(ready, failed);
-        return;
-      }
-      // Read the table once for subsequent planning, outside stability sampling.
-      command({"getvar", "all"}, [this, ready, retry](int c, bool normal, const QString &output) {
-        if (m_fullPackage && !commandSucceeded(c, normal, output)) {
-          m_stable = 0; retry(); return;
-        }
-        m_modeClock.invalidate();
-        Device device = parseDevice(m_serial, output);
-        if (m_fullPackage && !device.unlockKnown) {
-          device.unlockKnown = m_expected.unlockKnown;
-          device.unlocked = m_expected.unlocked;
-        }
+  command({"devices"}, [this, ready, retry](int, bool, const QString &output) {
+    if (m_stop) { finish(false, {}); return; }
+    m_stable = connectedSerials(output).contains(m_serial, Qt::CaseInsensitive) ? m_stable + 1 : 0;
+    if (m_stable < m_timing.stableSamples) { retry(); return; }
+    auto check = [this, ready, retry](bool modeMatches) {
+      if (m_stop) { finish(false, {}); return; }
+      if (!modeMatches) { m_stable = 0; retry(); return; }
+      updateDeviceWaitLog("OK", 1);
+      m_stableClock.invalidate();
+      m_connectionReady = false;
+      Device device = m_expected;
+      device.serial = m_serial;
+      if (m_requiredMode.has_value()) {
         device.modeKnown = true;
-        device.userspace = m_expectedMode;
-        ready(device);
-      });
-    });
+        device.userspace = *m_requiredMode;
+      }
+      ready(device);
+    };
+    if (!m_requiredMode.has_value()) { check(true); return; }
+    queryMode([this, check](bool mode) { check(mode == *m_requiredMode); });
   }, false);
 }
 void OugaFlashService::prepareMode(const QString &serial, bool userspace) {
   if (!acquire())
     return;
   m_serial = serial;
+  beginStep(userspace ? "重启设备到FastbootD模式" : "重启设备到Fastboot");
   command({"reboot", userspace ? "fastboot" : "bootloader"},
           [this, userspace](int c, bool n, const QString &out) {
             if (!commandSucceeded(c, n, out)) {
+              endStep(false);
+              appendNative(out, true);
               finish(false, "准备模式切换失败");
               return;
             }
+            endStep(true);
+            appendNative(out, false);
             probeStable(userspace, [this](const Device &d) {
-              emit deviceReady(d);
-              finish(true, "设备模式准备完成");
+              m_expected = d;
+              auto ready = [this](const Device &device) {
+                m_expected = device;
+                emit deviceReady(device);
+                finish(true, {});
+              };
+              if (m_fullPackage) queryDevice(ready, false);
+              else ready(d);
             });
           });
-}
-void OugaFlashService::validateAndResume() {
-  probeStable(m_expected.userspace, [this](const Device &device) {
-    QString error;
-    if (!compatible(device, true, &error)) {
-      finish(false, error);
-      return;
-    }
-    next();
-  });
-}
-bool OugaFlashService::compatible(const Device &d, bool initial,
-                                  QString *e) const {
-  if (!m_fullPackage) {
-    if (d.serial != m_serial || !d.modeKnown ||
-        (initial && d.userspace != m_expected.userspace)) {
-      *e = "设备模式已改变，请重新开始";
-      return false;
-    }
-    return true;
-  }
-  if (d.serial != m_serial ||
-      (!d.variables.value("serialno").isEmpty() &&
-       d.variables.value("serialno") != m_serial) ||
-      (!m_expected.product.isEmpty() && d.product != m_expected.product) || d.platform != m_expected.platform ||
-      !d.unlockKnown || !d.unlocked || !d.modeKnown) {
-    *e = "原设备身份、平台或解锁状态不一致/未知";
-    return false;
-  }
-  if (d.slot != m_expected.slot) {
-    *e = "活动槽发生非计划改变";
-    return false;
-  }
-  if (initial &&
-      d.userspace != m_expected.userspace) {
-    *e = "设备模式已改变，请重新开始";
-    return false;
-  }
-  return true;
 }
 void OugaFlashService::execute(const Plan &plan) {
   if (!acquire()) return;
@@ -609,7 +615,10 @@ void OugaFlashService::execute(const Plan &plan) {
   m_executing = true;
   if (m_fullPackage)
     writeLog("请将手机停留在选择语言界面，请勿触碰设备和数据线.");
-  validateAndResume();
+  const quint64 generation = m_generation;
+  QTimer::singleShot(0, this, [this, generation] {
+    if (m_busy && generation == m_generation) next();
+  });
 }
 void OugaFlashService::requestStop() {
   if (!m_busy) return;
@@ -787,7 +796,6 @@ void OugaFlashService::next() {
     // Reference sale FB continues automatically after the cooling countdown.
     probeStable(step.userspace, [this](const Device &device) {
       QString error;
-      if (!compatible(device, false, &error)) { finish(false, error); return; }
       Options options = m_plan.options;
       options.afterSuper = true;
       options.clearData = m_clearData;
@@ -914,20 +922,23 @@ void OugaFlashService::completeStep(const Step &step, bool success, const QStrin
     auto skipModem = [this] {
       skipSaleModem("等待Fastboot设备连接超时，跳过modem分区刷写");
     };
-    probeStable(step.userspace, [this, salePostActions, saleModem, skipModem](const Device &device) {
-      QString error;
-      if (!compatible(device, false, &error)) {
-        if (salePostActions) skipSalePostActions();
-        else if (saleModem) skipModem();
-        else finish(false, error);
-        return;
-      }
+    auto ready = [this](const Device &device) {
       m_expected = device;
       ++m_index;
       next();
-    }, salePostActions ? std::function<void()>([this] { skipSalePostActions(); })
-                       : saleModem ? std::function<void()>(skipModem)
-                                   : std::function<void()>());
+    };
+    if (m_fullPackage && !step.userspace) {
+      waitDevice(false, [this, ready] {
+        Device device = m_expected;
+        device.userspace = false;
+        ready(device);
+      });
+    } else {
+      probeStable(step.userspace, ready,
+          salePostActions ? std::function<void()>([this] { skipSalePostActions(); })
+                          : saleModem ? std::function<void()>(skipModem) : std::function<void()>(),
+          true, m_plan.options.mode == FlashMode::RepairFastbootd ? "等待FastbootD设备稳定..." : "等待设备连接稳定...");
+    }
     return;
   }
   if (success && step.arguments.value(0) == "set_active")

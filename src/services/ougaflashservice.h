@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QTimer>
 #include <functional>
+#include <optional>
 class OugaFlashService : public QObject {
   Q_OBJECT
 public:
@@ -18,8 +19,9 @@ public:
   void configure(const QString &fastboot, const QString &logDirectory);
   void setTiming(const Timing &timing) { m_timing = timing; }
   bool busy() const { return m_busy; }
-  void discover();
-  void probe(const QString &serial, bool fullPackage = true);
+  void discover(const QString &preferredSerial = {}, std::optional<bool> userspace = {});
+  void probe(const QString &serial, bool fullPackage = true,
+             std::optional<bool> requiredMode = {}, bool readSlot = false);
   void readPartitionTable(const Ouga::Device &device);
   void prepareMode(const QString &serial,
                    bool userspace); // explicit preparation, never flash
@@ -36,6 +38,8 @@ signals:
   void stepStarted(const QString &title);
   void stepFinished(bool success);
   void coolingProgress(int remainingSeconds);
+  void deviceWaitStarted(const QString &title, int remainingSeconds);
+  void deviceWaitUpdated(const QString &result, int state);
   void nativeLog(const QString &text, bool error);
   void finished(bool success, const QString &message);
   void busyChanged(bool busy);
@@ -49,8 +53,8 @@ private:
   Ouga::Plan m_plan;
   Ouga::Device m_expected;
   int m_index = 0, m_completed = 0, m_stable = 0, m_successful = 0,
-      m_stepLine = -1;
-  bool m_busy = false, m_stop = false, m_expectedMode = true, m_executing = false,
+      m_stepLine = -1, m_deviceWaitLine = -1;
+  bool m_busy = false, m_stop = false, m_executing = false,
        m_phaseFailed = false, m_clearData = false, m_autoReboot = false,
        m_clearDataStarted = false, m_connectionReady = false, m_fullPackage = true,
        m_summaryLogged = false, m_channelOutputRecorded = false;
@@ -62,6 +66,9 @@ private:
   bool m_transferFailed = false;
   QElapsedTimer m_modeClock, m_stableClock;
   QTimer m_wait;
+  QTimer m_countdown;
+  QString m_deviceWaitTitle;
+  std::optional<bool> m_requiredMode;
   quint64 m_generation = 0;
   std::function<void(int, bool, const QString &)> m_callback;
   bool acquire();
@@ -71,17 +78,21 @@ private:
   void command(const QStringList &args,
                std::function<void(int, bool, const QString &)> callback,
                bool bound = true, int timeoutMs = -1);
-  void probeStable(bool userspace,
+  void waitDevice(std::optional<bool> userspace, std::function<void()> ready,
+                  std::function<void()> failed = {}, bool showSerial = false,
+                  const QString &title = {});
+  void pollDevice(std::function<void()> ready, std::function<void()> failed, bool showSerial);
+  void probeStable(std::optional<bool> userspace,
                    std::function<void(const Ouga::Device &)> ready,
-                   std::function<void()> failed = {});
+                   std::function<void()> failed = {}, bool waitFirst = true,
+                   const QString &title = "等待设备连接稳定...");
   void pollStable(std::function<void(const Ouga::Device &)> ready,
                   std::function<void()> failed);
-  void queryDevice(std::function<void(int, bool, const QString &)> callback);
+  void queryDevice(std::function<void(const Ouga::Device &)> ready, bool includeMode);
+  void queryUnlock(std::function<void(std::optional<bool>)> ready);
   void queryMode(std::function<void(bool)> ready);
-  void queryMissing(QStringList keys, QString text,
-                    std::function<void(int, bool, const QString &)> callback);
-  bool compatible(const Ouga::Device &device, bool initial,
-                  QString *error) const;
+  void startDeviceWaitLog(const QString &title, int timeoutMs);
+  void updateDeviceWaitLog(const QString &result, int state);
   void next();
   void clearData();
   void cleanCowPartitions();
@@ -89,7 +100,6 @@ private:
   void completeCowCleanup(bool success);
   void skipSalePostActions();
   void skipSaleModem(const QString &message);
-  void validateAndResume();
   void updateTransferOutput(const QString &text);
   void beginStep(const QString &title);
   void endStep(bool success);

@@ -303,8 +303,8 @@ private:
 };
 
 OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
-                                 const QString &logDirectory)
-    : QWidget(nullptr), m_launcher(parent), m_logDirectory(logDirectory) {
+                                 const QString &logDirectory, std::function<QString()> preferredSerial)
+    : QWidget(nullptr), m_launcher(parent), m_preferredSerial(std::move(preferredSerial)), m_logDirectory(logDirectory) {
   // Keep the always-on-top menu out of the native ownership/z-order chain.
   setWindowFlags(Qt::Window);
   if (parent)
