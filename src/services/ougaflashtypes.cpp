@@ -57,31 +57,12 @@ QStringList criticalExtractionImages(Platform platform) {
 QString afterSalesSlot(const Device &device, QString *error) {
   if (error)
     error->clear();
-  quint64 sizes[2] = {0, 0};
-  bool found[2] = {false, false};
+  long double sizes[2] = {0, 0};
   for (const QString &name : device.partitions) {
-    if (!device.isLogical(name) ||
+    if (!logicalName(name) ||
         (!name.endsWith("_a") && !name.endsWith("_b")))
       continue;
-    if (!device.sizes.contains(name)) {
-      if (error)
-        *error = "无法读取双槽逻辑分区容量：" + name;
-      return {};
-    }
-    const int index = name.endsWith("_a") ? 0 : 1;
-    const quint64 bytes = device.sizes.value(name);
-    if (bytes > quint64(LLONG_MAX) - sizes[index]) {
-      if (error)
-        *error = "槽位容量溢出";
-      return {};
-    }
-    sizes[index] += bytes;
-    found[index] = true;
-  }
-  if (!found[0] || !found[1] || (!sizes[0] && !sizes[1])) {
-    if (error)
-      *error = "无法读取双槽逻辑分区容量，不能猜测启动槽 A";
-    return {};
+    sizes[name.endsWith("_a") ? 0 : 1] += device.sizes.value(name);
   }
   return sizes[0] >= sizes[1] ? "a" : "b";
 }
@@ -106,19 +87,13 @@ QString Device::targetPartition(const QString &name,
   const QString n = baseName(name);
   if (!safeName(n) || (requestedSlot != "a" && requestedSlot != "b"))
     return fail("分区名称或目标槽位无效：" + name);
-  const bool plain = partitions.contains(n), a = partitions.contains(n + "_a"),
-             b = partitions.contains(n + "_b");
-  const QString hasSlot = variables.value("has-slot:" + n);
-  if (plain && (a || b))
-    return fail("分区表有槽/无槽映射冲突：" + n);
-  if ((!hasSlot.isEmpty() && hasSlot != "yes" && hasSlot != "no") ||
-      (hasSlot == "no" && (a || b)) || (hasSlot == "yes" && plain))
-    return fail("has-slot 与分区表冲突或状态未知：" + n);
-  if (plain)
-    return n;
+  // ResolveOujiaTargetPartitionNameAsync prefers the requested suffixed
+  // partition, then falls back to the plain name; has-slot is not a veto.
   const QString target = n + "_" + requestedSlot;
   if (partitions.contains(target))
     return target;
+  if (partitions.contains(n))
+    return n;
   return fail("实际目标不存在：" + target);
 }
 bool Device::isLogical(const QString &name) const {
@@ -238,6 +213,7 @@ QString planText(const Plan &p) {
   QString t = p.summary + "\n" + p.warnings.join('\n') + "\n";
   int i = 0;
   for (const Step &s : p.steps) {
+    if (s.kind == Step::PostActions) continue;
     t += QString("%1. [%2] %3")
              .arg(++i)
              .arg(s.userspace ? "FastbootD" : "Fastboot", s.title);

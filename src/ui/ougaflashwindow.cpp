@@ -390,7 +390,7 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
   m_validation = new QWidget;
   m_validation->setObjectName("PartitionTableValidationSettingPanel");
   m_validation->setToolTip("分区表校验仅适用于全量包模式；关闭后仍检查所选镜像"
-                           "、目标、容量和设备状态");
+                           "、目标和设备状态");
   auto validation = new QHBoxLayout(m_validation);
   validation->setContentsMargins(0, 0, 0, 0);
   validation->setSpacing(0);
@@ -581,8 +581,12 @@ void OugaFlashWindow::buildPage(int index) {
         this,
         m_page ? "选择售后散包文件夹" : "选择解包好的文件夹或解包输出路径",
         m_pages[m_page].folder->text());
-    if (!directory.isEmpty())
+    if (!directory.isEmpty() && acceptsFolder(directory)) {
+      const QDir folder(directory);
+      if (!m_page && folder.dirName().compare("images", Qt::CaseInsensitive) != 0)
+        folder.mkdir("images");
       load(directory);
+    }
   });
   connect(page.folder, &QLineEdit::editingFinished, this, [this, index] {
     if (!m_loading && index == m_page && !isBusy()) {
@@ -732,8 +736,18 @@ void OugaFlashWindow::updateBusy() {
   const bool busy = isBusy();
   for (auto &page : m_pages) {
     page.widget->setEnabled(!busy);
-    if (!busy)
+    // The reference lets the user cancel data wipe/reboot while flashing.
+    if (busy && m_task == Task::Execute) {
+      page.widget->setEnabled(true);
+      for (auto child : page.widget->findChildren<QWidget *>())
+        child->setEnabled(child == page.actions || child == page.wipe ||
+                          child == page.reboot || child == page.wipe->parentWidget());
+    }
+    if (!busy) {
+      for (auto child : page.widget->findChildren<QWidget *>())
+        child->setEnabled(true);
       page.unpack->setEnabled(&page == &m_pages[0]);
+    }
   }
   m_settings->setEnabled(!busy);
   m_validation->setEnabled(!busy && !m_page);
@@ -763,13 +777,13 @@ void OugaFlashWindow::log(const QString &message) {
   block.setLineHeight(19, QTextBlockFormat::FixedHeight);
   cursor.setBlockFormat(block);
   QTextCharFormat timestamp;
-  timestamp.setForeground(QColor("#8A9AAA"));
+  timestamp.setForeground(QColor("#94A3B8"));
   cursor.insertText(QDateTime::currentDateTime().toString("[HH:mm:ss ] "),
                     timestamp);
-  QColor color("#526579");
+  QColor color("#000000");
   if (text.startsWith("错误") || text.startsWith("已停止/失败") ||
-      text.contains("FAILED") || text.startsWith("计划已阻止"))
-    color = QColor("#9A5558");
+      text.contains("FAILED") || text.contains("失败"))
+    color = QColor("#FF0000");
   else if (text.startsWith("警告") || text.contains("请求停止") ||
            text.startsWith("刷机包对应的机型为") || text.contains("未验证") || text.contains("取消") ||
            text.startsWith("正在判断刷机包对应的机型") ||
@@ -778,13 +792,61 @@ void OugaFlashWindow::log(const QString &message) {
   else if (text.startsWith("完成：") || text.contains("成功") ||
            text.startsWith("发现 ") || text.startsWith("解包完成") ||
            text.startsWith("已加载 ") || text.endsWith("提取完成！"))
-    color = QColor("#4F7F5B");
+    color = QColor("#008000");
   else if (text.startsWith("开始") || text.startsWith("加载") ||
            text.startsWith("已选择"))
     color = QColor("#657F96");
   QTextCharFormat content;
   content.setForeground(color);
   cursor.insertText(text, content);
+  m_log->setTextCursor(cursor);
+  m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
+}
+void OugaFlashWindow::flashLogStart(const QString &title) {
+  log(title + " ...");
+  m_flashLogBlock = m_log->document()->lastBlock();
+  const int tag = m_flashLogBlock.text().indexOf("[Flashing]");
+  if (tag >= 0) {
+    QTextCursor cursor(m_flashLogBlock);
+    cursor.setPosition(m_flashLogBlock.position() + tag);
+    cursor.setPosition(m_flashLogBlock.position() + tag + 10, QTextCursor::KeepAnchor);
+    QTextCharFormat format;
+    format.setForeground(QColor("#800080"));
+    format.setFontWeight(QFont::Bold);
+    cursor.mergeCharFormat(format);
+  }
+}
+void OugaFlashWindow::flashLogFinish(bool success) {
+  if (!m_flashLogBlock.isValid()) return;
+  QTextCursor cursor(m_flashLogBlock);
+  cursor.movePosition(QTextCursor::EndOfBlock);
+  QTextCharFormat format;
+  format.setForeground(QColor(success ? "#008000" : "#FF0000"));
+  format.setFontWeight(QFont::Bold);
+  const bool slot = m_flashLogBlock.text().contains("设置槽位：");
+  cursor.insertText(success ? (slot ? "Done" : "OK") : "Error", format);
+  m_flashLogBlock = QTextBlock();
+  m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
+}
+void OugaFlashWindow::flashNativeLog(const QString &text, bool error) {
+  QTextCursor cursor(m_log->document());
+  cursor.movePosition(QTextCursor::End);
+  if (!m_log->document()->isEmpty()) cursor.insertBlock();
+  QTextCharFormat format;
+  format.setForeground(QColor(error ? "#FF0000" : "#808080"));
+  format.setFontWeight(error ? QFont::Bold : QFont::Normal);
+  cursor.insertText(text, format);
+  if (!error) {
+    const int okay = text.indexOf("OKAY", 0, Qt::CaseInsensitive);
+    if (okay >= 0 || text.trimmed().startsWith("Finished")) {
+      cursor.movePosition(QTextCursor::StartOfBlock);
+      cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, qMax(0, okay));
+      cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+      format.setForeground(QColor("#008000"));
+      format.setFontWeight(QFont::Bold);
+      cursor.mergeCharFormat(format);
+    }
+  }
   m_log->setTextCursor(cursor);
   m_log->verticalScrollBar()->setValue(m_log->verticalScrollBar()->maximum());
 }
@@ -839,11 +901,9 @@ void OugaFlashWindow::display(const QVector<Partition> &images,
     auto size = new QTableWidgetItem(sizeText(image.bytes));
     size->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
     size->setTextAlignment(Qt::AlignCenter);
-    size->setToolTip("展开大小：" + sizeText(image.expandedBytes));
     m_table->setItem(row, 2, size);
     auto file = new QTableWidgetItem(image.path);
-    file->setToolTip(image.path + "\nSHA-256：" +
-                     QString::fromLatin1(image.sha256.toHex()));
+    file->setToolTip(image.path);
     m_table->setItem(row, 3, file);
   }
   m_loading = false;
@@ -895,37 +955,21 @@ void OugaFlashWindow::closeEvent(QCloseEvent *event) {
   event->accept();
 }
 void OugaFlashWindow::dragEnterEvent(QDragEnterEvent *event) {
-  if (!isBusy() && event->mimeData()->hasUrls() &&
-      event->mimeData()->urls().size() == 1 &&
+  if (m_page && !isBusy() && event->mimeData()->hasUrls() &&
+      !event->mimeData()->urls().isEmpty() &&
       event->mimeData()->urls().first().isLocalFile())
     event->acceptProposedAction();
 }
 void OugaFlashWindow::dropEvent(QDropEvent *event) {
-  if (isBusy() || !event->mimeData()->hasUrls() ||
-      event->mimeData()->urls().size() != 1)
+  if (!m_page || isBusy() || !event->mimeData()->hasUrls() ||
+      event->mimeData()->urls().isEmpty())
     return;
   const QUrl url = event->mimeData()->urls().first();
   if (!url.isLocalFile())
     return;
-  QString file = url.toLocalFile();
-  QFileInfo info(file);
-  if (info.isDir())
-    load(file);
-  else if (!m_page && info.isFile() &&
-           (info.suffix().compare("bin", Qt::CaseInsensitive) == 0 ||
-            info.suffix().compare("zip", Qt::CaseInsensitive) == 0)) {
-    m_pages[0].payloadFile->setText(file);
-    log("已选择Payload/全量包文件，点击解包Payload准备文件；不会自动写入。");
-  } else if (info.isFile() &&
-             (info.suffix().compare("img", Qt::CaseInsensitive) == 0 ||
-              info.suffix().compare("iso", Qt::CaseInsensitive) == 0 ||
-              info.suffix().compare("raw", Qt::CaseInsensitive) == 0 ||
-              info.suffix().compare("sparse", Qt::CaseInsensitive) == 0))
-    load(info.absolutePath());
-  else {
-    log("请拖入有效刷写文件夹，或在全量模式选择Payload.bin/ZIP文件");
-    return;
-  }
+  const QString directory = url.toLocalFile();
+  if (!QFileInfo(directory).isDir() || !acceptsFolder(directory)) return;
+  load(directory);
   event->acceptProposedAction();
 }
 
@@ -938,7 +982,7 @@ void OugaFlashWindow::setExecutionOverlay(bool active) {
 void OugaFlashWindow::executionProgress(int writes, int total,
                                         const QString &stage) {
   const int percent =
-      stage == "全部步骤成功"
+      stage == "所有任务执行成功！"
           ? 100
           : (total > 0 ? int(qMin<qint64>(99, qint64(writes) * 100 /
                                                   (qint64(total) + 1)))

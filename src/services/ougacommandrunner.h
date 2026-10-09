@@ -12,6 +12,7 @@ public:
   virtual bool running() const = 0;
 signals:
   void output(const QString &text);
+  void nativeOutputLine(const QString &text, bool standardError);
   void completed(int exitCode, bool normalExit, const QString &output);
   void stalled();
 };
@@ -37,7 +38,9 @@ private:
   QProcess m_process;
   QTimer m_watchdog, m_readDeadline;
   QString m_output;
+  QString m_stdoutPending, m_stderrPending;
   bool m_done = true;
   void finish(int code, bool normal);
+  void captureOutput(bool standardError, bool flush = false);
 };
 #endif

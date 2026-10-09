@@ -13,7 +13,7 @@ class OugaPreparation : public QObject {
 public:
   explicit OugaPreparation(QObject *parent = nullptr);
   bool busy() const { return m_busy; }
-  void scan(const QString &directory);
+  void scan(const QString &directory, bool afterSales = false);
   void payload(const QString &tool, const QString &file, const QString &output,
                const QStringList &selected = {},
                const QString &oldDirectory = {});
@@ -23,7 +23,7 @@ public:
   void extractArchive(const QString &tool, const QString &file,
                       const QString &output, bool scanImages = true);
   void makeSuper(const QString &tool, const QString &directory,
-                 const QString &output);
+                 const QString &output, bool afterSales = false);
   void discoverAdb(const QString &adb);
   void readCurrentArb(const QString &adb, const QString &serial,
                       const QString &output);

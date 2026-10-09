@@ -10,3 +10,4 @@
 /qiubai/NOTICE.txt -text
 /qiubai/mke2fs.conf -text
 /qiubai/source.properties -text
+/qiubai/tmp/*.img -text

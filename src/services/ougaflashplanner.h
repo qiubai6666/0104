@@ -3,6 +3,8 @@
 #include "ougaflashtypes.h"
 class OugaFlashPlanner {
 public:
+  static QVector<Ouga::Step> postActions(const Ouga::Device &device,
+                                         const Ouga::Options &options);
   static bool build(const QVector<Ouga::Partition> &partitions,
                     const Ouga::Device &device, const Ouga::Options &options,
                     Ouga::Plan *plan, QString *error);

@@ -26,16 +26,20 @@ struct OugaPayloadLayout {
 };
 class OugaPackage {
 public:
-  // A lightweight presence check only; scan() remains the validation gate.
+  enum class LoadMode { FullFolder, AfterSales, Payload };
   static bool hasImageCandidates(const QString &directory);
-  // known: canonical path -> SHA-256 already established for this exact
-  // invocation (e.g. a payload written from hash-verified operations). The
-  // value becomes the expected digest that flashing re-verifies on disk.
+  static QVector<Ouga::Partition> saleBootloaderSources(const QString &directory);
+  static QVector<Ouga::Partition> repairSources(
+      const QString &directory, const QVector<Ouga::Partition> &table,
+      bool afterSales);
+  // Reference folder loaders enumerate names and file sizes. They do not
+  // inspect sparse/Super metadata or infer targets from rawprogram XML.
+  // known: canonical path -> digest from this extraction invocation.
   static QVector<Ouga::Partition>
   scan(const QString &directory, QString *error,
-       const QMap<QString, QByteArray> &known = {}, bool hash = true);
-  // hash=false validates structure only and leaves sha256 empty; such images
-  // must be hashed (hashImages) before planning, like the reference loader.
+       const QMap<QString, QByteArray> &known = {}, bool hash = true,
+       LoadMode mode = LoadMode::FullFolder);
+  // hash=false validates structure only and leaves sha256 empty.
   static bool inspect(const QString &name, const QString &file,
                       Ouga::Partition *image, QString *error,
                       const QByteArray &knownSha256 = {}, bool hash = true);

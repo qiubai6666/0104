@@ -10,6 +10,7 @@
 #include <QRegularExpression>
 #include <QLocale>
 #include <QUuid>
+#include <QTemporaryDir>
 #include <QtConcurrent>
 OugaPreparation::OugaPreparation(QObject *parent) : QObject(parent) {
   connect(&m_payloadProcess, &OugaPayloadProcess::output, this,
@@ -303,22 +304,20 @@ bool OugaPreparation::newOutput(const QString &source, const QString &output,
   }
   return true;
 }
-void OugaPreparation::scan(const QString &directory) {
+void OugaPreparation::scan(const QString &directory, bool afterSales) {
   if (!begin())
     return;
   auto images = std::make_shared<QVector<Ouga::Partition>>();
   work(
-      [images, directory] {
+      [images, directory, afterSales] {
         QString error;
-        // Like the reference loader, selecting a folder only enumerates and
-        // structurally checks images; SHA-256 is computed for the selected
-        // images when flashing starts.
-        *images = OugaPackage::scan(directory, &error, {}, false);
+        *images = OugaPackage::scan(directory, &error, {}, false,
+            afterSales ? OugaPackage::LoadMode::AfterSales : OugaPackage::LoadMode::FullFolder);
         return error;
       },
       [this, images, directory] {
         emit prepared(*images, directory);
-        end(true, "镜像扫描完成（SHA-256 将在开始刷写时对所选镜像计算）");
+        end(true, {});
       });
 }
 void OugaPreparation::listPayload(const QString &tool, const QString &file) {
@@ -446,10 +445,7 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
               work(
                   [this, entries, output, selected, images] {
                     QString e;
-                    // scan() validates mappings, sparse ranges and hashes once.
-                    // Reuse only this invocation's results for manifest comparison,
-                    // never a persistent cache or a size/mtime shortcut before flash.
-                    *images = OugaPackage::scan(output, &e);
+                    *images = OugaPackage::scan(output, &e, {}, true, OugaPackage::LoadMode::Payload);
                     if (!e.isEmpty())
                       return e;
                     QMap<QString, QByteArray> hashes;
@@ -464,8 +460,6 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
                         return QString("Payload 输出缺失/长度/SHA-256 不符：") +
                                p.name;
                       const QString canonical = QFileInfo(f).canonicalFilePath();
-                      // Excluded partitions (e.g. misc/FRP) are still verified,
-                      // but must not be added to the flashable image list.
                       const QByteArray hash = hashes.contains(canonical)
                           ? hashes.value(canonical) : OugaPackage::digest(f, &e);
                       if (hash != p.hash)
@@ -623,7 +617,7 @@ void OugaPreparation::nativePayload(
             return QString("Payload 输出缺失/长度不符：") + p.name;
           known.insert(QFileInfo(f).canonicalFilePath(), p.hash);
         }
-        *images = OugaPackage::scan(output, &e, known);
+        *images = OugaPackage::scan(output, &e, known, true, OugaPackage::LoadMode::Payload);
         return e;
       },
       [this, images, output] {
@@ -707,7 +701,7 @@ void OugaPreparation::extractArchive(const QString &tool, const QString &file,
                     if (!scanImages)
                       return QString();
                     QString e;
-                    *images = OugaPackage::scan(*root, &e);
+                    *images = OugaPackage::scan(*root, &e, {}, false, OugaPackage::LoadMode::AfterSales);
                     return e;
                   },
                   [this, images, root, scanImages] {
@@ -725,31 +719,57 @@ void OugaPreparation::extractArchive(const QString &tool, const QString &file,
       }, false, true);
 }
 void OugaPreparation::makeSuper(const QString &tool, const QString &directory,
-                                const QString &output) {
+                                const QString &output, bool afterSales) {
   if (!begin())
     return;
   QString e;
-  if (!newOutput(directory, output, &e)) {
+  if (afterSales) {
+    const QString expected = QDir(directory).absoluteFilePath("IMAGES");
+    if (QDir::cleanPath(QFileInfo(output).absoluteFilePath()).compare(
+            QDir::cleanPath(expected), Qt::CaseInsensitive) != 0) {
+      end(false, "售后Super输出必须为原包IMAGES目录");
+      return;
+    }
+    for (QString path = expected; !path.isEmpty();
+         path = QFileInfo(path).dir().path()) {
+      const QFileInfo info(path);
+      if (info.isSymLink() || info.isJunction()) {
+        end(false, "售后Super输出路径包含链接");
+        return;
+      }
+      if (info.dir().path() == path) break;
+    }
+    if (!QDir().mkpath(output)) {
+      end(false, "无法创建IMAGES目录");
+      return;
+    }
+  } else if (!newOutput(directory, output, &e)) {
     end(false, e);
     return;
   }
   auto args = std::make_shared<QStringList>();
   auto merged = std::make_shared<QSet<QString>>();
   auto images = std::make_shared<QVector<Ouga::Partition>>();
+  auto scratch = std::make_shared<QTemporaryDir>(
+      QDir(output).filePath(".violet-super-XXXXXX"));
+  if (!scratch->isValid()) {
+    end(false, "无法创建Super临时目录");
+    return;
+  }
   QString target = QDir(output).filePath("super.img");
   work(
-      [args, merged, images, directory, target] {
+      [args, merged, images, directory, target, afterSales] {
         QString e;
         if (!OugaPackage::lpmakeArguments(directory, target, args.get(),
                                           merged.get(), &e))
           return e;
-        *images = OugaPackage::scan(directory, &e);
+        if (!afterSales) *images = OugaPackage::scan(directory, &e);
         return e;
       },
-      [this, tool, args, merged, images, output, directory, target] {
+      [this, tool, args, merged, images, scratch, output, directory, target, afterSales] {
         run(tool, {"--help"}, output,
-            [this, tool, args, merged, images, output, directory,
-             target](bool ok, const QString &help) {
+            [this, tool, args, merged, images, scratch, output, directory,
+             target, afterSales](bool ok, const QString &help) {
               if (!ok) {
                 end(false, "无法查询 lpmake 参数能力");
                 return;
@@ -760,7 +780,7 @@ void OugaPreparation::makeSuper(const QString &tool, const QString &directory,
                   return;
                 }
               work(
-                  [args, output] {
+                  [args, output, scratch] {
                     QString e;
                     QMap<QString, quint64> allocation;
                     for (int i = 0; i < args->size() - 1; ++i)
@@ -773,23 +793,22 @@ void OugaPreparation::makeSuper(const QString &tool, const QString &directory,
                         QString value = args->at(i + 1);
                         int eq = value.indexOf('=');
                         QString n = value.left(eq), src = value.mid(eq + 1),
-                                dst = QDir(output).filePath(n + ".raw.img");
+                                dst = QDir(scratch->path()).filePath(n + ".raw.img");
                         if (!OugaPackage::toRaw(src, dst, allocation[n], &e))
                           return e;
-                        // All files are in the independent output directory.
-                        // Pass validated ASCII basenames to the old tool;
-                        // QProcess supplies its Unicode working directory.
-                        (*args)[i + 1] = n + "=" + QFileInfo(dst).fileName();
+                        // Keep Unicode firmware paths out of the legacy tool's
+                        // image arguments; QProcess supplies the working directory.
+                        (*args)[i + 1] = n + "=" + QDir(output).relativeFilePath(dst);
                       } else if (args->at(i) == "--output") {
                         (*args)[i + 1] = QFileInfo(args->at(i + 1)).fileName();
                       }
                     return QString();
                   },
-                  [this, tool, args, merged, images, output, directory,
-                   target] {
+                  [this, tool, args, merged, images, scratch, output, directory,
+                   target, afterSales] {
                     run(tool, *args, output,
-                        [this, merged, images, directory,
-                         target](bool success, const QString &out) {
+                        [this, args, merged, images, scratch, output, directory,
+                         target, afterSales](bool success, const QString &out) {
                           if (!success) {
                             end(false, "Super 生成失败：" + out);
                             return;
@@ -811,9 +830,66 @@ void OugaPreparation::makeSuper(const QString &tool, const QString &directory,
                                 images->append(image);
                                 return QString();
                               },
-                              [this, images, directory] {
+                              [this, args, images, scratch, output, directory, afterSales] {
+                                if (afterSales) {
+                                  emit log("构建刷机包 ...Done");
+                                  QSet<QString> processed;
+                                  for (int i = 0; i + 1 < args->size(); ++i)
+                                    if (args->at(i) == "--partition")
+                                      processed.insert(args->at(i + 1).section(':', 0, 0).toLower());
+                                  const QDir folder(output);
+                                  const auto entries = folder.entryInfoList(
+                                      QDir::AllEntries | QDir::NoDotAndDotDot);
+                                  for (const QFileInfo &entry : entries) {
+                                    if (entry.fileName().compare("super.img", Qt::CaseInsensitive) == 0)
+                                      continue;
+                                    const QString name = entry.isDir() ? entry.fileName() : entry.completeBaseName();
+                                    if (!entry.fileName().startsWith("my", Qt::CaseInsensitive) &&
+                                        !processed.contains(name.toLower())) continue;
+                                    bool linked = entry.isSymLink() || entry.isJunction();
+                                    if (entry.isDir() && !linked) {
+                                      QDirIterator descendants(entry.absoluteFilePath(),
+                                          QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                                          QDirIterator::Subdirectories);
+                                      while (descendants.hasNext()) {
+                                        descendants.next();
+                                        if (descendants.fileInfo().isSymLink() || descendants.fileInfo().isJunction()) {
+                                          linked = true;
+                                          break;
+                                        }
+                                      }
+                                    }
+                                    const bool removed = !linked &&
+                                        (entry.isDir() ? QDir(entry.absoluteFilePath()).removeRecursively()
+                                                       : QFile::remove(entry.absoluteFilePath()));
+                                    if (!removed) { emit log("清理失败: " + entry.absoluteFilePath()); break; }
+                                  }
+                                  for (const QFileInfo &entry : folder.entryInfoList(
+                                           {"rawprogram*_BLANK_GPT.xml", "rawprogram*_WIPE_PARTITIONS.xml"}, QDir::Files)) {
+                                    if (!QFile::remove(entry.absoluteFilePath())) {
+                                      emit log("XML过滤失败: " + entry.absoluteFilePath());
+                                      break;
+                                    }
+                                  }
+                                  QFile marker(QDir(directory).filePath("violet"));
+                                  if (marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                                    marker.close();
+                                    emit log("创建标记文件 ...OK");
+                                  } else {
+                                    emit log("创建violet标记文件失败: " + marker.errorString());
+                                  }
+                                  const Ouga::Partition super = images->last();
+                                  QString error;
+                                  *images = OugaPackage::scan(directory, &error, {}, false, OugaPackage::LoadMode::AfterSales);
+                                  if (!error.isEmpty()) {
+                                    end(false, error);
+                                    return;
+                                  }
+                                  for (auto &image : *images)
+                                    if (image.name == "super") image = super;
+                                }
                                 emit prepared(*images, directory);
-                                end(true, "Super 已生成，源包/源 JSON 未修改");
+                                end(true, afterSales ? QString() : "Super 已生成，源包/源 JSON 未修改");
                               });
                         });
                   });

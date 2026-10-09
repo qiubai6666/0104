@@ -75,35 +75,6 @@ QString selectItem(QWidget *parent, const QString &title, const QString &prompt,
 }
 } // namespace
 
-bool OugaFlashWindow::confirm(const Plan &plan) {
-  QDialog dialog(this);
-  dialog.setObjectName("OugaFlashConfirmDialog");
-  dialog.setWindowTitle("最终确认：将写入设备，不能自动回滚");
-  dialog.resize(900, 650);
-  auto layout = new QVBoxLayout(&dialog);
-  auto text = new QPlainTextEdit(planText(plan), &dialog);
-  text->setObjectName("OugaConfirmedPlan");
-  text->setReadOnly(true);
-  layout->addWidget(text);
-  auto agree = new QCheckBox("设备为本人所有或已获授权；已核对计划及其中列出的 FRP 等不可逆操作，"
-                             "并已备份数据",
-                             &dialog);
-  agree->setObjectName("OugaConfirmAgreement");
-  layout->addWidget(agree);
-  auto buttons = new QDialogButtonBox(
-      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-  buttons->button(QDialogButtonBox::Ok)
-      ->setObjectName("OugaConfirmWriteButton");
-  buttons->button(QDialogButtonBox::Ok)->setText("确认写入");
-  buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-  buttons->button(QDialogButtonBox::Cancel)->setText("取消");
-  connect(agree, &QCheckBox::toggled, buttons->button(QDialogButtonBox::Ok),
-          &QPushButton::setEnabled);
-  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-  layout->addWidget(buttons);
-  return dialog.exec() == QDialog::Accepted;
-}
 void OugaFlashWindow::arbDialog() {
   if (isBusy())
     return;
@@ -234,7 +205,6 @@ void OugaFlashWindow::rescueDialog() {
   m_task = Task::RescueSelection;
   m_stopRequested = false;
   m_selectedTargetSlot.clear();
-  m_packagePlatform = Platform::Unknown;
   m_device = Device();
   m_plan = Plan();
   m_progress->setValue(0);

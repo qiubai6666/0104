@@ -81,7 +81,6 @@ private:
   bool m_loading = false, m_stopRequested = false, m_session = false;
   quint64 m_generation = 0;
   QString m_selectedTargetSlot;
-  Ouga::Platform m_packagePlatform = Ouga::Platform::Unknown;
   QWidget *m_canvas = nullptr, *m_validation = nullptr;
   QGroupBox *m_settings = nullptr, *m_partitions = nullptr, *m_logs = nullptr;
   QCheckBox *m_full = nullptr, *m_sales = nullptr, *m_validateOn = nullptr,
@@ -117,11 +116,17 @@ private:
   void updateBusy();
   void updateSelection();
   void log(const QString &message);
+  void flashLogStart(const QString &title);
+  void flashLogFinish(bool success);
+  void flashNativeLog(const QString &text, bool error);
+  QTextBlock m_flashLogBlock;
+  QTextBlock m_coolingLogBlock;
   void payloadLogStart(const QString &name);
   void payloadLogFinish(const QString &name, bool success);
   QMap<QString, QTextBlock> m_payloadLogBlocks;
   void endTask(bool success, const QString &message);
   bool continueTask(quint64 generation);
+  bool acceptsFolder(const QString &path);
   void load(const QString &path);
   void display(const QVector<Ouga::Partition> &images,
                const QString &directory);
@@ -142,7 +147,6 @@ private:
   void discoverDevice();
   void serviceFinished(bool success, const QString &message);
   void buildAndExecute();
-  bool confirm(const Ouga::Plan &plan);
   void requestStop();
   void arbDialog();
   void rescueDialog();

@@ -18,8 +18,10 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QProgressBar>
+#include <QPlainTextEdit>
 #include <QCoreApplication>
 #include <QSettings>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUuid>
@@ -43,6 +45,21 @@ QString availablePayloadOutput(const QString &preferred) {
     return uniqueWork(target.absolutePath(), "images");
   return preferred;
 }
+// Fixed auxiliary images are distributed byte-for-byte from the reference.
+QString auxiliaryImage(const QString &name) {
+  const QString directory = QDir(QCoreApplication::applicationDirPath()).filePath("tmp");
+  const QFileInfo info(directory);
+  if (info.isSymLink() || info.isJunction()) return {};
+  const QString target = QDir(directory).filePath(name + ".img");
+  if (QFileInfo::exists(target)) return target;
+  QFile source(":/qiubai/qiubai/tmp/" + name + ".img");
+  if (!source.open(QIODevice::ReadOnly) || !QDir().mkpath(directory)) return {};
+  const QByteArray data = source.readAll();
+  QSaveFile output(target);
+  if (source.error() != QFile::NoError || !output.open(QIODevice::WriteOnly) ||
+      output.write(data) != data.size() || !output.commit()) return {};
+  return target;
+}
 } // namespace
 
 void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
@@ -51,6 +68,33 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
   m_prepare = new OugaPreparation(this);
   m_rom = new OugaRomService(this);
   connect(m_service, &OugaFlashService::log, this, &OugaFlashWindow::log);
+  connect(m_service, &OugaFlashService::stepStarted, this, &OugaFlashWindow::flashLogStart);
+  connect(m_service, &OugaFlashService::stepFinished, this, &OugaFlashWindow::flashLogFinish);
+  connect(m_service, &OugaFlashService::coolingProgress, this, [this](int remaining) {
+    if (remaining == 120) {
+      log("剩余时间：120秒");
+      m_coolingLogBlock = m_log->document()->lastBlock();
+    }
+    if (!m_coolingLogBlock.isValid()) return;
+    QTextCursor cursor(m_coolingLogBlock);
+    const int start = m_coolingLogBlock.text().indexOf("] ") + 2;
+    cursor.setPosition(m_coolingLogBlock.position() + start);
+    cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+    QTextCharFormat format;
+    format.setForeground(QColor(remaining ? "#8A6A32" : "#008000"));
+    format.setFontWeight(QFont::Bold);
+    cursor.insertText(remaining ? QString("剩余时间：%1秒").arg(remaining)
+                                : QString("设备冷却完成"), format);
+    if (!remaining) m_coolingLogBlock = QTextBlock();
+  });
+  connect(m_service, &OugaFlashService::nativeLog, this, &OugaFlashWindow::flashNativeLog);
+  for (const Page &page : m_pages) {
+    for (QCheckBox *box : {page.wipe, page.reboot})
+      connect(box, &QCheckBox::toggled, this, [this] {
+        const Page &active = m_pages[m_page];
+        m_service->setPostActions(active.wipe->isChecked(), active.reboot->isChecked());
+      });
+  }
   connect(m_prepare, &OugaPreparation::log, this, &OugaFlashWindow::log);
   connect(m_prepare, &OugaPreparation::archiveProgress, this, [this](int percent) {
     if (!m_stopRequested &&
@@ -122,27 +166,28 @@ void OugaFlashWindow::initializeServices(OugaCommandRunner *runner) {
           &OugaFlashWindow::transferProgress);
   connect(m_service, &OugaFlashService::progress, this,
           &OugaFlashWindow::executionProgress);
-  connect(m_service, &OugaFlashService::checkpoint, this,
-          [this](const Plan &plan) {
-            const quint64 generation = m_generation;
-            const bool accepted = !m_stopRequested && confirm(plan);
-            m_service->confirmCheckpoint(accepted && !m_stopRequested &&
-                                         generation == m_generation);
-          });
+  connect(m_service, &OugaFlashService::transferProgress, this,
+          &OugaFlashWindow::transferProgress);
 }
 
 void OugaFlashWindow::endTask(bool success, const QString &message) {
   ++m_generation;
-  if (success && m_task == Task::PayloadExtract) {
+  const bool scan = m_task == Task::Scan;
+  if (success && m_task == Task::Scan) {
+    log(QString(m_page ? "已加载 %1 个镜像文件" : "成功加载 %1 个镜像文件，已自动全选")
+            .arg(m_pages[m_page].images.size()));
+  } else if (success && m_task == Task::PayloadExtract) {
     if (m_unpackPayload) {
       log("Payload解包成功！");
       log("解包完成，文件保存在: " + m_payloadOutput);
+      log("正在解析分区文件...");
+      log(QString("成功加载 %1 个分区文件").arg(m_pages[m_page].images.size()));
     } else {
       log(m_extractNames.size() == 1
               ? "分区 " + m_extractNames.first() + " 提取完成！" : "镜像提取完成！");
+      log(QString("已加载 %1 个镜像文件").arg(m_pages[m_page].images.size()));
     }
-    log(QString("已加载 %1 个镜像文件").arg(m_pages[m_page].images.size()));
-  } else {
+  } else if (m_task != Task::Execute) {
     log((success ? "完成：" : "已停止/失败：") + message);
   }
   if (m_session && !m_service->busy()) {
@@ -153,7 +198,8 @@ void OugaFlashWindow::endTask(bool success, const QString &message) {
   m_task = Task::None;
   m_stopRequested = false;
   setExecutionOverlay(false);
-  m_progress->setProperty("rate", success ? (payloadComplete ? "完成" : "阶段完成") : "已停止");
+  if (!scan)
+    m_progress->setProperty("rate", success ? (payloadComplete ? "完成" : "阶段完成") : "已停止");
   m_progress->update();
   updateBusy();
 }
@@ -194,10 +240,14 @@ QString OugaFlashWindow::requireTool(const QString &key, const QString &label,
 void OugaFlashWindow::configureService() {
   m_service->configure(
       toolPath("fastboot", ResourceExtractor::getFastbootPath()),
-      m_logDirectory.isEmpty() ? QStandardPaths::writableLocation(
-                                     QStandardPaths::AppLocalDataLocation) +
-                                     "/ouga-logs"
-                               : m_logDirectory);
+      m_logDirectory);
+}
+bool OugaFlashWindow::acceptsFolder(const QString &path) {
+  if (!m_page || (QFileInfo(QDir(path).filePath("IMAGES")).isDir() &&
+                  QFileInfo(QDir(path).filePath("RADIO")).isDir()))
+    return true;
+  log("蜡笔，这不是一个散包文件夹哦！");
+  return false;
 }
 void OugaFlashWindow::load(const QString &path) {
   if (isBusy())
@@ -209,24 +259,8 @@ void OugaFlashWindow::load(const QString &path) {
   m_pages[m_page].directory.clear();
   m_pages[m_page].folder->setText(path);
   display({}, path);
-  const QFileInfo directory(path);
-  if (!m_page && directory.isDir() && directory.isReadable() &&
-      !directory.isSymLink() && !directory.isJunction() &&
-      !OugaPackage::hasImageCandidates(path)) {
-    // The full-package field also selects an extraction destination. Choosing
-    // it must not claim a scan failure or keep the previous package's images.
-    m_task = Task::None;
-    m_progress->setValue(0);
-    m_progress->setProperty("rate", "待解包");
-    m_progress->update();
-    updateBusy();
-    log("已选择解包输出目录：" + path +
-        "；请选择Payload.bin或全量包ZIP，再点击“解包Payload”。"
-        "提取和校验完成后才加载分区表；尚未写入设备。");
-    return;
-  }
   updateBusy();
-  m_prepare->scan(path);
+  m_prepare->scan(path, m_page != 0);
 }
 void OugaFlashWindow::inspectPath(
     const QString &name, const QString &file,
@@ -671,7 +705,7 @@ void OugaFlashWindow::startFlash(bool repair) {
     return;
   }
   Page &page = m_pages[m_page];
-  if (page.images.isEmpty() || page.directory.isEmpty()) {
+  if ((!repair && page.images.isEmpty()) || page.directory.isEmpty()) {
     log("错误：请先选择并加载有效的刷写文件夹");
     return;
   }
@@ -698,7 +732,6 @@ void OugaFlashWindow::startFlash(bool repair) {
   m_task = Task::Discover;
   m_stopRequested = false;
   m_selectedTargetSlot.clear();
-  m_packagePlatform = Platform::Unknown;
   m_device = Device();
   m_plan = Plan();
   m_progress->setValue(0);
@@ -726,48 +759,22 @@ void OugaFlashWindow::prepareFlash() {
   }
   configureService();
   if (m_requestedMode == FlashMode::AfterSalesBootloader) {
-    const auto &images = m_pages[m_page].images;
-    auto super =
-        std::find_if(images.cbegin(), images.cend(), [](const Partition &p) {
-          return p.selected && baseName(p.name) == "super";
-        });
-    if (super == images.cend()) {
-      const auto answer = QMessageBox::question(
-          this, "生成售后Super",
-          "FB模式需要有效的super.img。现在根据所选售后包的super_def生成吗？\n"
-          "只在独立工作目录生成，不修改原包，不写入设备。",
-          QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-      if (!continueTask(generation))
-        return;
-      if (answer != QMessageBox::Yes) {
-        endTask(false, "售后FB模式缺少选中的Super，用户取消生成");
-        return;
-      }
+    const QString directory = m_pages[m_page].directory;
+    if (!QFileInfo(QDir(directory).filePath("violet")).isFile()) {
       QString tool = requireTool("lpmake", "lpmake.exe");
-      if (!continueTask(generation))
-        return;
+      if (!continueTask(generation)) return;
       if (tool.isEmpty()) {
         endTask(false, "lpmake不可用，不能生成Super");
         return;
       }
-      QString output = QFileDialog::getExistingDirectory(
-          this, "选择源包之外的独立空Super工作目录");
-      if (!continueTask(generation))
-        return;
-      if (output.isEmpty()) {
-        endTask(false, "用户取消Super工作目录选择");
-        return;
-      }
+      const QString output = QDir(directory).filePath("IMAGES");
       m_task = Task::Super;
       m_progress->setProperty("rate", "生成Super...");
       updateBusy();
-      m_prepare->makeSuper(tool, m_pages[m_page].directory, output);
+      m_prepare->makeSuper(tool, directory, output, true);
       return;
     }
-    if (super->merged.isEmpty()) {
-      endTask(false, "Super缺少经过校验的合并清单，请重新加载有效售后包");
-      return;
-    }
+    log("检测到刷机包已合并，跳过制作步骤...");
   }
   discoverDevice();
 }
@@ -784,6 +791,10 @@ void OugaFlashWindow::discoverDevice() {
 void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
   if (m_task == Task::None)
     return;
+  if (m_task == Task::Execute) {
+    endTask(success && !m_stopRequested, message);
+    return;
+  }
   log(message);
   if (!success || m_stopRequested) {
     endTask(false,
@@ -792,7 +803,7 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
   }
   const Task completed = m_task;
   if (completed == Task::Execute) {
-    endTask(true, "线刷计划全部执行成功；请另行核实手机启动结果");
+    endTask(true, message);
     return;
   }
   QString error;
@@ -828,7 +839,7 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
         }
       }
       m_task = Task::Probe;
-      m_service->probe(serial);
+      m_service->probe(serial, !m_page && m_requestedMode != FlashMode::RepairFastbootd);
       return;
     }
     if (completed != Task::Probe && completed != Task::Switch) {
@@ -843,28 +854,16 @@ void OugaFlashWindow::serviceFinished(bool success, const QString &message) {
               "仅FBD模式只允许已处于FastbootD的高通设备；不自动回普通Fastboot");
       return;
     }
-    if (!m_device.modeKnown || !m_device.unlockKnown || !m_device.unlocked ||
-        m_device.product.isEmpty() || m_device.platform == Platform::Unknown ||
-        (m_device.slot != "a" && m_device.slot != "b")) {
+    const bool independent = m_page || m_requestedMode == FlashMode::RepairFastbootd;
+    if (!m_device.modeKnown || (!independent && (!m_device.unlockKnown || !m_device.unlocked ||
+        m_device.platform == Platform::Unknown ||
+        (m_device.slot != "a" && m_device.slot != "b")))) {
       endTask(false, "设备模式、解锁状态、平台、机型或槽位无法确认，拒绝执行");
       return;
     }
     if (m_device.userspace != userspace) {
       if (completed == Task::Switch) {
         endTask(false, "模式准备结果与请求不符，拒绝继续");
-        return;
-      }
-      const QString mode = userspace ? "FastbootD" : "普通Fastboot";
-      const auto answer = QMessageBox::question(
-          this, "准备线刷模式",
-          "设备：" + m_device.serial + "\n本操作需要" + mode +
-              "，是否先重启到该模式并重新读取分区表？\n此步只切换模式，不开始刷"
-              "写。",
-          QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-      if (!continueTask(generation))
-        return;
-      if (answer != QMessageBox::Yes) {
-        endTask(false, "用户取消模式切换；没有开始刷写");
         return;
       }
       m_task = Task::Switch;
@@ -880,73 +879,51 @@ void OugaFlashWindow::buildAndExecute() {
     return;
   Page &page = m_pages[m_page];
   const bool additional = needsAdditionalImages(m_requestedMode);
+  QVector<Partition> planImages = page.images;
+  if (m_requestedMode == FlashMode::RepairFastbootd) {
+    planImages = OugaPackage::repairSources(page.directory, page.images, m_page != 0);
+    const bool lk = std::any_of(planImages.cbegin(), planImages.cend(),
+        [](const Partition &image) { return image.name == "lk"; });
+    m_device.platform = lk ? Platform::MediaTek : Platform::Qualcomm;
+  } else if (m_requestedMode == FlashMode::AfterSalesBootloader) {
+    planImages = OugaPackage::saleBootloaderSources(page.directory);
+    m_device.platform = QFileInfo(QDir(page.directory).filePath("IMAGES/lk.img")).exists()
+        ? Platform::MediaTek : Platform::Qualcomm;
+  }
+  if (m_requestedMode == FlashMode::AfterSalesBootloader) {
+    // The fixed super path is independent of the selected partition rows.
+    const QString superPath = QDir(page.directory).filePath("IMAGES/super.img");
+    Partition super;
+    if (QFileInfo::exists(superPath)) {
+      super.name = "super";
+      super.path = superPath;
+      super.bytes = super.expandedBytes = QFileInfo(superPath).size();
+      for (int i = planImages.size() - 1; i >= 0; --i)
+        if (baseName(planImages[i].name) == "super") planImages.removeAt(i);
+      planImages << super;
+    } else {
+      // The mandatory source is independent of table selections.
+      for (auto &image : planImages)
+        if (baseName(image.name) == "super") image.selected = true;
+    }
+  }
   if (additional) {
-    for (const QString &name : {QString("my_company"), QString("my_preload")}) {
-      auto image = std::find_if(
-          page.images.begin(), page.images.end(),
-          [&](const Partition &p) { return baseName(p.name) == name; });
-      if (image != page.images.end()) {
-        if (!image->selected) {
-          const auto answer = QMessageBox::question(
-              this, "必要附加镜像",
-              "此模式必须刷入匹配的" + name +
-                  ".img。是否使用包中已校验的镜像？\n" + image->path,
-              QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-          if (!continueTask(taskGeneration))
-            return;
-          if (answer != QMessageBox::Yes) {
-            endTask(false, "未选择必要附加镜像：" + name);
-            return;
-          }
-          image->selected = true;
-          display(page.images, page.directory);
-        }
-        continue;
-      }
-      QString file = QFileDialog::getOpenFileName(
-          this, "选择与设备及ROM匹配的" + name + ".img（不使用内置替代镜像）",
-          {}, "镜像 (*.img)");
-      if (!continueTask(taskGeneration))
-        return;
-      if (file.isEmpty()) {
-        endTask(false, "缺少必要附加镜像：" + name);
+    for (int i = planImages.size() - 1; i >= 0; --i)
+      if (baseName(planImages[i].name) == "my_company" ||
+          baseName(planImages[i].name) == "my_preload")
+        planImages.removeAt(i);
+    for (const QString name : {"my_company", "my_preload"}) {
+      const QString file = auxiliaryImage(name);
+      Partition image;
+      if (!QFileInfo::exists(file)) {
+        endTask(false, "缺少必须刷写的双my镜像：tmp/" + name + ".img");
         return;
       }
-      m_task = Task::PathCheck;
-      updateBusy();
-      inspectPath(name, file, [this](Partition image, const QString &error) {
-        if (m_stopRequested || !error.isEmpty()) {
-          endTask(false, m_stopRequested ? "已取消附加镜像校验" : error);
-          return;
-        }
-        m_pages[m_page].images << image;
-        display(m_pages[m_page].images, m_pages[m_page].directory);
-        buildAndExecute();
-      });
-      return;
+      image.name = name;
+      image.path = file;
+      image.bytes = image.expandedBytes = QFileInfo(file).size();
+      planImages << image;
     }
-  }
-  bool xbl = false, lk = false;
-  for (const auto &image : page.images) {
-    xbl |= baseName(image.name) == "xbl";
-    lk |= baseName(image.name) == "lk";
-  }
-  if (!xbl && !lk && m_packagePlatform == Platform::Unknown) {
-    bool accepted = false;
-    QString selected = QInputDialog::getItem(
-        this, "核对刷机包平台",
-        "设备平台：" + platformText(m_device.platform) +
-            "\n无法从包中的xbl/lk判定平台。请核对机型并明确选择刷机包平台：",
-        {"高通", "联发科"}, m_device.platform == Platform::MediaTek ? 1 : 0,
-        false, &accepted);
-    if (!continueTask(taskGeneration))
-      return;
-    if (!accepted) {
-      endTask(false, "用户取消平台核对");
-      return;
-    }
-    m_packagePlatform =
-        selected == "高通" ? Platform::Qualcomm : Platform::MediaTek;
   }
   if (m_requestedMode == FlashMode::BothSlots &&
       m_selectedTargetSlot.isEmpty()) {
@@ -973,148 +950,38 @@ void OugaFlashWindow::buildAndExecute() {
                           options.mode != FlashMode::RepairFastbootd &&
                           m_validateOn->isChecked();
   options.targetSlot = m_selectedTargetSlot;
-  options.packagePlatform = m_packagePlatform;
-  auto formatReady = [this] {
-    return OugaProcessRunner::formatToolsError(
-               toolPath("fastboot", ResourceExtractor::getFastbootPath()))
-        .isEmpty();
-  };
-  options.formatToolsReady = formatReady();
-  if (options.clearData && m_device.platform == Platform::Qualcomm &&
-      !options.formatToolsReady) {
-    const auto answer = QMessageBox::question(
-        this, "缺少格式化依赖",
-        "清除数据需要与fastboot匹配的完整platform-tools：mke2fs.exe、make_f2fs."
-        "exe、mke2fs.conf。\n"
-        "是否选择完整platform-tools中的fastboot.exe？否则在首次写入前停止。",
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (!continueTask(taskGeneration))
-      return;
-    if (answer != QMessageBox::Yes) {
-      endTask(false, "格式化依赖缺失；未开始写入");
-      return;
+  options.packageDirectory = page.directory;
+  if (m_device.platform == Platform::Qualcomm ||
+      options.mode == FlashMode::AfterSalesBootloader ||
+      options.mode == FlashMode::AfterSalesFastbootd) {
+    const QString misc = auxiliaryImage("misc");
+    if (QFileInfo::exists(misc)) {
+      options.miscImage.name = "misc";
+      options.miscImage.path = QFileInfo(misc).canonicalFilePath();
+      options.miscImage.bytes = QFileInfo(misc).size();
+      options.miscImage.expandedBytes = options.miscImage.bytes;
     }
-    QString tool = QFileDialog::getOpenFileName(
-        this, "选择可信完整platform-tools中的fastboot.exe", {},
-        "Fastboot (fastboot.exe)");
-    if (!continueTask(taskGeneration))
-      return;
-    QFileInfo file(tool);
-    if (!file.isFile() || !file.isReadable()) {
-      endTask(false, "没有选择有效Fastboot工具");
-      return;
-    }
-    QSettings settings;
-    settings.setValue("Ouga/fastboot", file.absoluteFilePath());
-    options.formatToolsReady = formatReady();
-    if (!options.formatToolsReady) {
-      endTask(false, "所选platform-tools仍缺少完整格式化依赖");
-      return;
-    }
-    configureService();
-  }
-  QVector<Partition> planImages = page.images;
-  if (options.mode == FlashMode::RepairFastbootd) {
-    const QStringList required = criticalImages(m_device.platform);
-    for (auto &image : planImages)
-      image.selected = required.contains(baseName(image.name));
-  }
-  if (std::any_of(planImages.cbegin(), planImages.cend(),
-                  [](const Partition &p) {
-                    return p.selected && p.sha256.size() != 32;
-                  })) {
-    m_task = Task::PathCheck;
-    updateBusy();
-    log("正在并行计算所选镜像 SHA-256（文件夹加载时不校验）…");
-    struct Hashed {
-      QVector<Partition> images;
-      QString error;
-    };
-    auto watcher = new QFutureWatcher<Hashed>(this);
-    connect(watcher, &QFutureWatcher<Hashed>::finished, this,
-            [this, watcher, taskGeneration] {
-              const Hashed result = watcher->result();
-              watcher->deleteLater();
-              if (!continueTask(taskGeneration))
-                return;
-              if (!result.error.isEmpty()) {
-                endTask(false, "镜像校验失败：" + result.error);
-                return;
-              }
-              for (Partition &image : m_pages[m_page].images)
-                for (const Partition &h : result.images)
-                  if (h.path == image.path && h.sha256.size() == 32)
-                    image.sha256 = h.sha256;
-              log("所选镜像 SHA-256 计算完成");
-              buildAndExecute();
-            });
-    watcher->setFuture(QtConcurrent::run([planImages] {
-      Hashed result{planImages, {}};
-      OugaPackage::hashImages(&result.images, &result.error);
-      return result;
-    }));
-    return;
-  }
-  if (!m_currentArb.isEmpty() && m_currentArbSerial == m_device.serial) {
-    quint32 current = 0;
-    QString error;
-    if (!OugaPackage::readArb(m_currentArb, &current, &error)) {
-      endTask(false, "ARB基准无法读取：" + error);
-      return;
-    }
-    for (const auto &image : planImages)
-      if (image.selected && baseName(image.name) == "xbl_config") {
-        quint32 next = 0;
-        if (!OugaPackage::readArb(image.path, &next, &error)) {
-          endTask(false, "固件ARB解析失败：" + error);
-          return;
-        }
-        options.arbVerified = true;
-        options.arbDowngrade = next < current;
-        log(QString("镜像ARB比较：当前 %1 → 固件 %2；不等于硬件熔断状态")
-                .arg(current)
-                .arg(next));
-      }
   }
   QString error;
-  if (!OugaFlashPlanner::build(planImages, m_device, options, &m_plan,
-                               &error)) {
-    endTask(false, "计划已阻止：" + error);
-    return;
-  }
-  log(planText(m_plan));
-  const bool accepted = confirm(m_plan);
-  if (taskGeneration != m_generation)
-    return;
-  if (!accepted || m_stopRequested) {
-    endTask(false, "用户取消最终确认；没有开始写入");
+  if (!OugaFlashPlanner::build(planImages, m_device, options, &m_plan, &error)) {
+    endTask(false, error);
     return;
   }
   m_task = Task::Execute;
-  setExecutionOverlay(true);
   updateBusy();
+  m_service->setLogContext(page.directory, m_log->toPlainText());
   m_service->execute(m_plan);
 }
 
 void OugaFlashWindow::requestStop() {
-  if (!isBusy()) {
-    log("当前无可停止的任务");
-    return;
-  }
-  if (m_stopRequested) {
-    log("已收到停止请求，将在当前操作完成后结束任务");
-    return;
-  }
+  if (!isBusy()) { log("当前无可停止的任务"); return; }
+  if (m_stopRequested) return;
   m_stopRequested = true;
-  log("停止请求已记录：不回滚已写内容，当前写入结束后不启动下一条命令。");
+  log("已请求停止，当前分区刷写完成后将停止后续任务.");
   updateBusy();
-  if (m_service->busy())
-    m_service->requestStop();
-  else if (m_prepare->busy())
-    m_prepare->cancel();
-  else if (m_rom->busy())
-    m_rom->cancel();
-  else if (m_task != Task::PathCheck && m_task != Task::PayloadInspect &&
-           m_task != Task::Arb)
-    endTask(false, "已取消后续阶段；已产生的文件保留");
+  if (m_service->busy()) m_service->requestStop();
+  else if (m_prepare->busy()) m_prepare->cancel();
+  else if (m_rom->busy()) m_rom->cancel();
+  else if (m_task != Task::PathCheck && m_task != Task::PayloadInspect && m_task != Task::Arb)
+    endTask(false, "任务已按用户请求停止.");
 }

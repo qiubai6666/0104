@@ -29,6 +29,8 @@ struct Options {
   FlashMode mode = FlashMode::Normal;
   bool clearData = true, autoReboot = true, validateTable = true;
   QString targetSlot;
+  QString packageDirectory;
+  Partition miscImage;
   Platform packagePlatform = Platform::Unknown;
   bool arbVerified = false, arbDowngrade = false;
   bool formatToolsReady = false;
@@ -51,7 +53,7 @@ struct Device {
   bool sameSnapshot(const Device &other) const;
 };
 struct Step {
-  enum Kind { Command, ModeSwitch, Wait, Checkpoint, Reprobe };
+  enum Kind { Command, ModeSwitch, Wait, Checkpoint, Reprobe, PreSwitchGuard, ClearData, PostActions, CowCleanup, SaleTable };
   Kind kind = Command;
   QString title;
   QStringList arguments;
@@ -60,6 +62,7 @@ struct Step {
   qint64 bytes = 0;
   int waitMs = 0;
   bool userspace = true, allowMissing = false;
+  bool continueOnFailure = false, targetMissing = false;
 };
 struct Plan {
   Device device;

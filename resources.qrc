@@ -39,5 +39,8 @@
     <file>qiubai/mke2fs.exe</file>
     <file>qiubai/source.properties</file>
     <file>qiubai/sqlite3.exe</file>
+    <file>qiubai/tmp/my_company.img</file>
+    <file>qiubai/tmp/my_preload.img</file>
+    <file>qiubai/tmp/misc.img</file>
 </qresource>
 </RCC>

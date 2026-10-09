@@ -8,7 +8,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
-#include <QXmlStreamReader>
 #include <QtEndian>
 #include <QThread>
 #include <QThreadPool>
@@ -48,21 +47,6 @@ quint64 number(const QJsonValue &v, bool *ok) {
   s.remove(',');
   s.remove('_');
   return s.toULongLong(ok, s.startsWith("0x") ? 16 : 10);
-}
-const QStringList &imageFilters() {
-  // Match reference directory formats, but unlabelled .bin files may be
-  // Payloads or executables. Only validated rawprogram maps those to targets.
-  static const QStringList filters = {"*.img", "*.iso", "*.raw", "*.sparse"};
-  return filters;
-}
-QStringList imageDirectories(const QDir &root) {
-  QStringList dirs = {root.absolutePath()};
-  for (const QString n : {"images", "IMAGES", "RADIO"}) {
-    const QString d = root.filePath(n);
-    if (QDir(d).exists() && !dirs.contains(d, Qt::CaseInsensitive))
-      dirs << d;
-  }
-  return dirs;
 }
 const QStringList &afterSalesDirectories() {
   static const QStringList names = {
@@ -344,163 +328,129 @@ bool OugaPackage::hashImages(QVector<Ouga::Partition> *images, QString *error) {
   return true;
 }
 bool OugaPackage::hasImageCandidates(const QString &directory) {
-  const QDir root(directory);
-  if (!root.exists())
-    return false;
-  for (const QString &d : imageDirectories(root)) {
-    if (!QDir(d).entryList(imageFilters() + QStringList{"rawprogram*.xml"},
-                           QDir::Files).isEmpty())
-      return true;
-    // Even an empty/ambiguous recognized folder must go through strict scan().
-    for (const QString &name : afterSalesDirectories())
-      if (QDir(QDir(d).filePath(name)).exists())
-        return true;
+  return !QDir(directory).entryList({"*.img", "*.bin", "*.raw", "*.sparse"},
+                                    QDir::Files | QDir::Hidden | QDir::System).isEmpty();
+}
+QVector<Ouga::Partition> OugaPackage::saleBootloaderSources(const QString &directory) {
+  QVector<Ouga::Partition> images;
+  for (const QString folder : {"IMAGES", "RADIO"}) {
+    const auto files = QDir(QDir(directory).filePath(folder)).entryInfoList(
+        {"*.img"}, QDir::Files | QDir::Hidden | QDir::System, QDir::NoSort);
+    for (const QFileInfo &file : files) {
+      Ouga::Partition image;
+      image.name = file.completeBaseName().toLower();
+      image.path = file.absoluteFilePath();
+      image.bytes = image.expandedBytes = file.size();
+      images << image;
+    }
   }
-  return false;
+  return images;
+}
+QVector<Ouga::Partition> OugaPackage::repairSources(
+    const QString &directory, const QVector<Ouga::Partition> &table,
+    bool afterSales) {
+  const QStringList names = {"boot", "dtbo", "init_boot", "lk", "modem", "recovery",
+                             "vbmeta", "vbmeta_system", "vbmeta_vendor", "vendor_boot"};
+  QMap<QString, Ouga::Partition> sources;
+  const auto priority = [](const QString &path, const QString &name) {
+    const QString file = QFileInfo(path).completeBaseName().trimmed().toLower();
+    return file == name ? 0 : file == name + "_a" ? 1 : file == name + "_b" ? 2 : 3;
+  };
+  if (afterSales) {
+    for (const Ouga::Partition &image : table) {
+      const QString name = Ouga::baseName(image.name);
+      if (!names.contains(name) || image.path.contains("(缺失)", Qt::CaseInsensitive) ||
+          !QFileInfo::exists(image.path)) continue;
+      if (!sources.contains(name) || priority(image.path, name) < priority(sources[name].path, name))
+        sources[name] = image;
+    }
+  }
+  for (const QString &name : names) {
+    if (sources.contains(name)) continue;
+    for (const QString &folder : {directory, QDir(directory).filePath("IMAGES"),
+                                 QDir(directory).filePath("RADIO")}) {
+      for (const QString extension : {".img", ".bin"}) {
+        const QFileInfo file(QDir(folder).filePath(name + extension));
+        if (!file.exists()) continue;
+        Ouga::Partition image;
+        image.path = file.absoluteFilePath();
+        image.bytes = image.expandedBytes = file.size();
+        sources[name] = image;
+        break;
+      }
+      if (sources.contains(name)) break;
+    }
+  }
+  QVector<Ouga::Partition> images;
+  for (const QString &name : names) {
+    if (!sources.contains(name)) continue;
+    Ouga::Partition image = sources[name];
+    image.name = name;
+    image.bytes = image.expandedBytes = QFileInfo(image.path).size();
+    image.selected = true;
+    images << image;
+  }
+  return images;
 }
 QVector<Ouga::Partition> OugaPackage::scan(const QString &directory,
-                                           QString *error,
-                                           const QMap<QString, QByteArray> &known,
-                                           bool hash) {
-  if (error)
-    error->clear();
-  QVector<Ouga::Partition> result;
-  QDir root(directory);
+                                         QString *error,
+                                         const QMap<QString, QByteArray> &known,
+                                         bool hash, LoadMode mode) {
+  if (error) error->clear();
+  const QDir root(directory);
   if (!root.exists()) {
     fail(error, "目录不存在");
     return {};
   }
-  const QStringList dirs = imageDirectories(root);
-  QMap<QString, QString> files;
-  QSet<QString> usedFiles;
-  auto add = [&](const QString &name, const QString &file) {
-    if (Ouga::blockedImageName(name))
-      return true;
-    if (!Ouga::safeName(name) || !inside(directory, file))
-      return fail(error, "映射名称或路径越界：" + name + " / " + file);
-    QString n = Ouga::baseName(name), f = QFileInfo(file).canonicalFilePath();
-    if (files.contains(n) && files[n] != f)
-      return fail(error, "多个来源映射到 " + n + "，请在独立目录消除歧义");
-    files[n] = f;
-    usedFiles.insert(f);
-    return true;
+  QVector<QPair<QString, QFileInfo>> sources;
+  auto add = [&sources](const QFileInfo &file, const QString &name = {}) {
+    sources.append(qMakePair(name.isEmpty() ? file.completeBaseName() : name, file));
   };
-  QSet<QString> xmlLabels;
-  for (const QString &d : dirs)
-    for (const QFileInfo &xml :
-         QDir(d).entryInfoList({"rawprogram*.xml"}, QDir::Files)) {
-      if (xml.fileName().contains("BLANK_GPT", Qt::CaseInsensitive) ||
-          xml.fileName().contains("WIPE", Qt::CaseInsensitive))
-        continue;
-      QFile f(xml.absoluteFilePath());
-      if (!f.open(QIODevice::ReadOnly)) {
-        fail(error, "rawprogram 不可读");
-        return {};
-      }
-      QXmlStreamReader r(&f);
-      while (!r.atEnd()) {
-        r.readNext();
-        if (r.isDTD()) {
-          fail(error, "禁止 rawprogram DTD");
-          return {};
-        }
-        if (!r.isStartElement() || r.name() != QStringLiteral("program"))
-          continue;
-        auto a = r.attributes();
-        QString n = a.value("label").toString().toLower(),
-                rel = a.value("filename").toString();
-        if (rel.isEmpty() || Ouga::blockedImageName(n))
-          continue;
-        bool ok = true;
-        QString off = a.value("file_sector_offset").toString();
-        if (!off.isEmpty() && off.toULongLong(&ok) != 0) {
-          fail(error, "不支持 rawprogram 偏移/多段镜像：" + n);
-          return {};
-        }
-        if (!ok || xmlLabels.contains(n)) {
-          fail(error, "重复 rawprogram 分区/多段拼接：" + n);
-          return {};
-        }
-        xmlLabels.insert(n);
-        QString file = QDir(d).filePath(rel);
-        if (!inside(directory, file) || !QFileInfo(file).isFile()) {
-          fail(error, "rawprogram 文件缺失/越界：" + rel);
-          return {};
-        }
-        QString len = a.value("num_partition_sectors").toString(),
-                sector = a.value("SECTOR_SIZE_IN_BYTES").toString();
-        if (!len.isEmpty()) {
-          bool k1 = false, k2 = false;
-          quint64 count = len.toULongLong(&k1), unit = sector.toULongLong(&k2);
-          qint64 size = expandedSize(file, error);
-          if (!k1 || !k2 || !unit || count > quint64(LLONG_MAX) / unit ||
-              size <= 0 || count * unit != quint64(size)) {
-            fail(error,
-                 "rawprogram 范围不等于完整镜像（不支持偏移/填充/分段）：" + n);
-            return {};
-          }
-        }
-        if (!add(n, file))
-          return {};
-      }
-      if (r.hasError()) {
-        fail(error, "rawprogram XML 损坏");
-        return {};
+  if (mode == LoadMode::AfterSales) {
+    const QDir images(root.filePath("IMAGES"));
+    QSet<QString> priority;
+    for (const QString &name : afterSalesDirectories()) {
+      const auto files = QDir(images.filePath(name)).entryInfoList(
+          {"*.img"}, QDir::Files | QDir::Hidden | QDir::System, QDir::NoSort);
+      if (files.isEmpty()) continue;
+      add(files.first(), name);
+      priority.insert(name);
+    }
+    for (const QString folder : {"IMAGES", "RADIO"}) {
+      const auto files = QDir(root.filePath(folder)).entryInfoList(
+          {"*.img", "*.iso"}, QDir::Files | QDir::Hidden | QDir::System, QDir::NoSort);
+      for (const QFileInfo &file : files) {
+        const QString name = file.completeBaseName().toLower();
+        if (name == "userdata" || name == "metadata") continue;
+        bool conflict = false;
+        if (folder == "IMAGES")
+          for (const QString &preferred : priority)
+            conflict |= name.startsWith(preferred, Qt::CaseInsensitive);
+        if (!conflict) add(file, name);
       }
     }
-  for (const QString &d : dirs) {
-    for (const QFileInfo &f :
-         QDir(d).entryInfoList(imageFilters(), QDir::Files, QDir::Name)) {
-      if (usedFiles.contains(f.canonicalFilePath()))
-        continue;
-      if (!add(f.completeBaseName().toLower(), f.absoluteFilePath()))
-        return {};
-    }
-    // SMT's eight named after-sales directories: never arbitrarily pick a
-    // candidate.
-    for (const QString &n : afterSalesDirectories()) {
-      QDir sub(QDir(d).filePath(n));
-      if (!sub.exists())
-        continue;
-      auto candidates = sub.entryInfoList(imageFilters(), QDir::Files, QDir::Name);
-      if (candidates.size() != 1) {
-        fail(error, "售后子目录存在零个或多个候选：" + sub.path());
-        return {};
-      }
-      if (!add(n, candidates[0].absoluteFilePath()))
-        return {};
-    }
+  } else {
+    const QStringList filters = mode == LoadMode::Payload
+        ? QStringList{"*.img"} : QStringList{"*.img", "*.bin", "*.raw", "*.sparse"};
+    const auto files = root.entryInfoList(filters, QDir::Files | QDir::Hidden | QDir::System,
+        mode == LoadMode::Payload ? QDir::Name : QDir::NoSort);
+    for (const QFileInfo &file : files) add(file);
   }
-  struct Inspection {
+  QVector<Ouga::Partition> result;
+  for (const auto &source : sources) {
     Ouga::Partition image;
-    QString error;
-    bool valid = false;
-  };
-  QVector<QPair<QString, QString>> sources;
-  for (auto it = files.cbegin(); it != files.cend(); ++it)
-    sources.append(qMakePair(it.key(), it.value()));
-  // A private, bounded pool avoids flooding rotating disks and never changes
-  // the shared pool used by preparation/UI tasks. Preserve deterministic order.
-  QThreadPool pool;
-  pool.setMaxThreadCount(2);
-  const auto inspected = QtConcurrent::blockingMapped<QVector<Inspection>>(
-      &pool, sources, [&known, hash](const QPair<QString, QString> &source) {
-        Inspection checked;
-        checked.valid = inspect(source.first, source.second, &checked.image,
-                                &checked.error, known.value(source.second),
-                                hash);
-        return checked;
-      });
-  for (const auto &checked : inspected) {
-    if (!checked.valid) {
-      fail(error, checked.error);
-      return {};
+    image.name = source.first;
+    image.path = source.second.absoluteFilePath();
+    image.bytes = image.expandedBytes = source.second.size();
+    image.selected = mode != LoadMode::Payload;
+    const QString canonical = source.second.canonicalFilePath();
+    if (known.contains(canonical)) image.sha256 = known.value(canonical);
+    else if (hash) {
+      image.sha256 = digest(image.path, error);
+      if (image.sha256.size() != 32) return {};
     }
-    result << checked.image;
+    result << image;
   }
-  if (result.isEmpty())
-    fail(error,
-         "没有可确定用途的镜像；请提取 Payload 或选择 IMAGES/RADIO 的父目录");
   return result;
 }
 QString OugaPackage::findPayload(const QString &directory) {

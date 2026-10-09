@@ -1,10 +1,11 @@
 #include "ougacommandrunner.h"
 #include <QDir>
 #include <QFileInfo>
+#include <QRegularExpression>
 OugaProcessRunner::OugaProcessRunner(QObject *p) : OugaCommandRunner(p) {
   // Not registered with stopAllProcesses: an in-flight flash must never be
   // killed by cleanup.
-  m_process.setProcessChannelMode(QProcess::MergedChannels);
+  m_process.setProcessChannelMode(QProcess::SeparateChannels);
   m_readDeadline.setSingleShot(true);
   connect(&m_readDeadline, &QTimer::timeout, this, [this] {
     m_output += "\nERROR: read-only query timed out\n";
@@ -14,10 +15,10 @@ OugaProcessRunner::OugaProcessRunner(QObject *p) : OugaCommandRunner(p) {
   m_watchdog.setInterval(120000);
   m_watchdog.setSingleShot(true);
   connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] {
-    QString s = QString::fromLocal8Bit(m_process.readAllStandardOutput());
-    m_output += s;
-    emit output(s);
-    m_watchdog.start();
+    captureOutput(false);
+  });
+  connect(&m_process, &QProcess::readyReadStandardError, this, [this] {
+    captureOutput(true);
   });
   connect(&m_process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
           this, [this](int c, QProcess::ExitStatus s) {
@@ -39,6 +40,8 @@ void OugaProcessRunner::run(const QString &p, const QStringList &a,
     return;
   }
   m_output.clear();
+  m_stdoutPending.clear();
+  m_stderrPending.clear();
   m_done = false;
   m_process.setWorkingDirectory(QFileInfo(p).absolutePath());
   m_watchdog.start();
@@ -48,10 +51,30 @@ void OugaProcessRunner::run(const QString &p, const QStringList &a,
   m_process.start(p, a);
 }
 bool OugaProcessRunner::running() const { return !m_done; }
+void OugaProcessRunner::captureOutput(bool standardError, bool flush) {
+  const QString text = QString::fromLocal8Bit(standardError
+      ? m_process.readAllStandardError() : m_process.readAllStandardOutput());
+  m_output += text;
+  if (!text.isEmpty()) {
+    emit output(text);
+    m_watchdog.start();
+  }
+  QString &pending = standardError ? m_stderrPending : m_stdoutPending;
+  pending += text;
+  int end;
+  while ((end = pending.indexOf(QRegularExpression("[\r\n]"))) >= 0) {
+    const QString line = pending.left(end);
+    pending.remove(0, end + 1);
+    if (!line.trimmed().isEmpty()) emit nativeOutputLine(line, standardError);
+  }
+  if (flush && !pending.trimmed().isEmpty()) emit nativeOutputLine(pending, standardError);
+  if (flush) pending.clear();
+}
 void OugaProcessRunner::finish(int c, bool normal) {
   if (m_done)
     return;
-  m_output += QString::fromLocal8Bit(m_process.readAllStandardOutput());
+  captureOutput(false, true);
+  captureOutput(true, true);
   m_done = true;
   m_watchdog.stop();
   m_readDeadline.stop();
