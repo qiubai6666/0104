@@ -1,4 +1,5 @@
 #include "menuwidget.h"
+#include "mainmenubutton.h"
 #include "deviceoperationlease.h"
 #include "configwindow.h"
 #include "devicecheckwindow.h"
@@ -29,7 +30,6 @@
 #include <QIcon>
 #include <QLabel>
 #include <QEvent>
-#include <QStyle>
 
 
 MenuWidget::MenuWidget(QWidget *parent)
@@ -86,12 +86,6 @@ void MenuWidget::setupUI()
         "设备检测", "配置", "联系作者", "退出", "收起"};
     const QStringList icons = {"monitor-smartphone", "wrench", "package-open", "file-down",
         "smartphone", "sliders-horizontal", "message-circle", "power", "panel-right-close"};
-    setStyleSheet(QStringLiteral(
-        "QPushButton {background:transparent; border:1px solid transparent; border-radius:14px; padding:0;}"
-        "QPushButton:hover {background:rgba(255,255,255,110);}"
-        "QPushButton:pressed {background:rgba(212,230,237,180);}"
-        "QPushButton[menuSelected=true] {background:rgba(255,255,255,210);}"
-        "QPushButton:focus {border:1px solid #83AECA;}"));
     for (int index = 0; index < labels.size(); ++index) {
         if (index == Exit) {
             auto *line = new QWidget(this);
@@ -101,7 +95,7 @@ void MenuWidget::setupUI()
             mainLayout->addWidget(line, 0, Qt::AlignHCenter);
             mainLayout->addSpacing(3);
         }
-        auto *button = new QPushButton(this);
+        auto *button = new MainMenuButton(this);
         button->setFixedSize(UIHelper::MainMenuButtonSize, UIHelper::MainMenuButtonSize);
         button->setIcon(UIHelper::menuIcon(icons[index], devicePixelRatioF()));
         button->setIconSize(QSize(UIHelper::MainMenuIconSize, UIHelper::MainMenuIconSize));
@@ -178,9 +172,6 @@ void MenuWidget::updateMenuSelection()
         const bool selected = entry.second && entry.second->isVisible() && !entry.second->isMinimized();
         auto *button = buttons[entry.first];
         button->setProperty("menuSelected", selected);
-        button->style()->unpolish(button);
-        button->style()->polish(button);
-        button->update();
     }
 }
 

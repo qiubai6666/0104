@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "menuwidget.h"
+#include <QFocusEvent>
 #include "repairwindow.h"
 #include "payloadwindow.h"
 #include "configwindow.h"
@@ -162,6 +163,40 @@ private slots:
                 drawers[i]->render(&painter, QPoint(86 + i * drawerStep, drawerY));
             painter.end();
             QVERIFY(sheet.save(output));
+        }
+    }
+    void closingDrawersWithMouseFocusRestoresButton()
+    {
+        QVERIFY(writeFile(fixturePath + "/download_config.txt", ""));
+        MenuWidget menu;
+        menu.setAttribute(Qt::WA_DontShowOnScreen);
+        menu.show();
+        menu.layout()->activate();
+        menu.repairWindow = new RepairWindow;
+        menu.payloadWindow = new PayloadWindow;
+        menu.deviceCheckWindow = new DeviceCheckWindow;
+        menu.configWindow = new ConfigWindow;
+        const QList<QPair<int, QWidget *>> drawers = {
+            {MenuWidget::RepairTools, menu.repairWindow}, {MenuWidget::Payload, menu.payloadWindow},
+            {MenuWidget::DeviceCheck, menu.deviceCheckWindow}, {MenuWidget::Configuration, menu.configWindow}};
+        for (const auto &entry : drawers) {
+            entry.second->setAttribute(Qt::WA_DontShowOnScreen);
+            auto *button = menu.buttons[entry.first];
+            QEvent leave(QEvent::Leave);
+            QCoreApplication::sendEvent(button, &leave);
+            QTest::qWait(200);
+            const auto resting = button->grab().toImage();
+            QFocusEvent mouseFocus(QEvent::FocusIn, Qt::MouseFocusReason);
+            QCoreApplication::sendEvent(button, &mouseFocus);
+            button->click();
+            QVERIFY(entry.second->isVisible());
+            QVERIFY(button->property("menuSelected").toBool());
+            button->click();
+            QVERIFY(!entry.second->isVisible());
+            QVERIFY(!button->property("menuSelected").toBool());
+            QCoreApplication::sendEvent(button, &leave);
+            QTest::qWait(200);
+            QCOMPARE(button->grab().toImage(), resting);
         }
     }
     void waitingSpinnerAndCancel() {
