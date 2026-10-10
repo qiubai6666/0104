@@ -57,7 +57,17 @@ protected:
         const bool dark = palette().color(QPalette::Window).lightness() < 128;
         const QColor accent = dark ? QColor(63, 140, 242) : QColor(47, 128, 237);
         QColor background = Qt::transparent;
-        if (property("menuSelected").toBool() && isEnabled())
+        const QString cardValue = property("cardBackground").toString();
+        if (!cardValue.isEmpty()) {
+            // 卡片本体模式（预览稿 .cc-scr）：常态即卡片底色，悬停仅描边，按下叠加 accent 淡底。
+            const QStringList parts = cardValue.split(',');
+            if (parts.size() == 4)
+                background = QColor(parts[0].toInt(), parts[1].toInt(), parts[2].toInt(), parts[3].toInt());
+            if (property("menuSelected").toBool() && isEnabled())
+                background = dark ? QColor(63, 140, 242, 34) : QColor(47, 128, 237, 26);
+            else if (isDown())
+                background = dark ? QColor(63, 140, 242, 44) : QColor(47, 128, 237, 34);
+        } else if (property("menuSelected").toBool() && isEnabled())
             background = dark ? QColor(63, 140, 242, 34) : QColor(47, 128, 237, 26);
         else if (isDown()) background = dark ? QColor(66, 97, 110, 200) : QColor(206, 228, 238, 230);
         else if (underMouse()) background = dark ? QColor(74, 98, 114, 128) : QColor(212, 230, 237, 128);
@@ -321,26 +331,30 @@ QWidget *MenuWidget::buildHomePage()
     layout->addSpacing(2);
 
     // 投屏行：点击直接开始/停止投屏（buttons[ScreenCast]）。
-    auto *castCard = new QFrame(page);
-    castCard->setFixedHeight(58);
+    // 按钮即卡片本体：悬停描边与按下淡底覆盖整个外层圆角矩形（预览稿 .cc-scr）。
+    auto *castButton = new RowButton(page);
+    castButton->setObjectName("screenCastButton");
+    castButton->setAccessibleName(QStringLiteral("投屏"));
+    castButton->setCursor(Qt::PointingHandCursor);
+    castButton->setFixedHeight(58);
     // 预览稿 --card：浅色 rgba(238,243,248,.72)，深色 rgba(38,52,66,.5)。
-    castCard->setStyleSheet(QString("QFrame { background:rgba(%1); border-radius:14px; }")
-        .arg(dark ? "38,52,66,128" : "238,243,248,184"));
-    auto *castGrid = new QGridLayout(castCard);
+    castButton->setProperty("cardBackground", dark ? QStringLiteral("38,52,66,128")
+                                                   : QStringLiteral("238,243,248,184"));
+    auto *castGrid = new QGridLayout(castButton);
     castGrid->setContentsMargins(12, 0, 12, 0);
     castGrid->setSpacing(10);
-    screenCastIconLabel = new QLabel(castCard);
+    screenCastIconLabel = new QLabel(castButton);
     screenCastIconLabel->setFixedSize(20, 20);
     screenCastIconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
-    auto *castTitle = new QLabel(QStringLiteral("手机投屏"), castCard);
+    auto *castTitle = new QLabel(QStringLiteral("手机投屏"), castButton);
     castTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
     castTitle->setStyleSheet(QString("font-size:13px; font-weight:600; color:%1;")
                              .arg(dark ? "#e9edf3" : "#22364a"));
-    screenCastSubtitle = new QLabel(castCard);
+    screenCastSubtitle = new QLabel(castButton);
     screenCastSubtitle->setAttribute(Qt::WA_TransparentForMouseEvents);
     screenCastSubtitle->setStyleSheet(QString("font-size:11px; color:%1;")
                                       .arg(dark ? "#93a7b6" : "#647585"));
-    screenCastPill = new QLabel(castCard);
+    screenCastPill = new QLabel(castButton);
     screenCastPill->setObjectName("statusPill");
     screenCastPill->setAttribute(Qt::WA_TransparentForMouseEvents);
     screenCastPill->setProperty("state", "off");
@@ -358,37 +372,39 @@ QWidget *MenuWidget::buildHomePage()
     castGrid->addLayout(castTexts, 0, 1, Qt::AlignVCenter);
     castGrid->setColumnStretch(1, 1);
     castGrid->addWidget(screenCastPill, 0, 2, Qt::AlignVCenter | Qt::AlignRight);
-    auto *castButton = new RowButton(castCard);
-    castButton->setObjectName("screenCastButton");
-    castButton->setAccessibleName(QStringLiteral("投屏"));
-    castButton->setCursor(Qt::PointingHandCursor);
-    castGrid->addWidget(castButton, 0, 0, 1, 3);
-    layout->addWidget(castCard);
+    layout->addWidget(castButton);
     buttons.append(castButton);
     connect(castButton, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
 
-    // 设备行：透明背景（预览稿 devrow），展示连接状态，点击进入设备检测页。
-    auto *deviceCard = new QFrame(page);
-    deviceCard->setFixedHeight(40);
-    auto *deviceGrid = new QGridLayout(deviceCard);
+    // 设备行：按钮即整行（预览稿 devrow），悬停淡底覆盖整行外框，点击进入设备检测页。
+    auto *deviceRow = new QPushButton(page);
+    deviceRow->setObjectName("deviceRowButton");
+    deviceRow->setAccessibleName(QStringLiteral("设备检测"));
+    deviceRow->setCursor(Qt::PointingHandCursor);
+    deviceRow->setToolTip(QStringLiteral("打开设备检测"));
+    deviceRow->setFixedHeight(40);
+    deviceRow->setStyleSheet("QPushButton { background:transparent; border:none; border-radius:12px; }"
+                             "QPushButton:hover { background:rgba(146,166,181,60); }"
+                             "QPushButton:pressed { background:rgba(146,166,181,90); }");
+    auto *deviceGrid = new QGridLayout(deviceRow);
     deviceGrid->setContentsMargins(12, 0, 12, 0);
     deviceGrid->setSpacing(9);
     const QColor inkDim(dark ? "#93a7b6" : "#647585");
-    auto *deviceIcon = new QLabel(page);
+    auto *deviceIcon = new QLabel(deviceRow);
     deviceIcon->setPixmap(UIHelper::menuIcon(QStringLiteral("smartphone"), inkDim,
                                             devicePixelRatioF()).pixmap(15, 15));
     deviceIcon->setFixedSize(15, 15);
     deviceIcon->setScaledContents(true);
     deviceIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
-    auto *deviceTitle = new QLabel(QStringLiteral("设备"), page);
+    auto *deviceTitle = new QLabel(QStringLiteral("设备"), deviceRow);
     deviceTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
     deviceTitle->setStyleSheet(QString("font-size:12px; color:%1;").arg(inkDim.name()));
-    devicePill = new QLabel(page);
+    devicePill = new QLabel(deviceRow);
     devicePill->setObjectName("statusPill");
     devicePill->setAttribute(Qt::WA_TransparentForMouseEvents);
     devicePill->setProperty("state", "off");
     devicePill->setStyleSheet(screenCastPill->styleSheet());
-    auto *deviceChevron = new QLabel(page);
+    auto *deviceChevron = new QLabel(deviceRow);
     deviceChevron->setPixmap(UIHelper::menuIcon(QStringLiteral("chevron-right"), inkDim,
                                                 devicePixelRatioF()).pixmap(14, 14));
     deviceChevron->setFixedSize(14, 14);
@@ -399,16 +415,7 @@ QWidget *MenuWidget::buildHomePage()
     deviceGrid->setColumnStretch(1, 1);
     deviceGrid->addWidget(devicePill, 0, 2, Qt::AlignVCenter | Qt::AlignRight);
     deviceGrid->addWidget(deviceChevron, 0, 3, Qt::AlignVCenter | Qt::AlignRight);
-    auto *deviceRow = new QPushButton(deviceCard);
-    deviceRow->setObjectName("deviceRowButton");
-    deviceRow->setAccessibleName(QStringLiteral("设备检测"));
-    deviceRow->setCursor(Qt::PointingHandCursor);
-    deviceRow->setToolTip(QStringLiteral("打开设备检测"));
-    deviceRow->setStyleSheet("QPushButton { background:transparent; border:none; border-radius:12px; }"
-                             "QPushButton:hover { background:rgba(146,166,181,60); }"
-                             "QPushButton:pressed { background:rgba(146,166,181,90); }");
-    deviceGrid->addWidget(deviceRow, 0, 0, 1, 4);
-    layout->addWidget(deviceCard);
+    layout->addWidget(deviceRow);
     connect(deviceRow, &QPushButton::clicked, this, [this] {
         showSubmenu(DeviceCheck, ensureDeviceCheckWindow());
     });
