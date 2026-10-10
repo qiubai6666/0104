@@ -13,8 +13,14 @@
 #include <QDesktopServices>
 #include <QFileInfo>
 #include <QDir>
-#include <QEventLoop>
 #include <QTimer>
+
+namespace {
+QString configFileUrl()
+{
+    return QStringLiteral("https://gitee.com/qiuabi19/orange-box/raw/master/download_config.txt");
+}
+}  // namespace
 
 bool ConfigWindow::isSafeFileName(const QString &fileName)
 {
@@ -55,19 +61,11 @@ ConfigWindow::ConfigWindow(QWidget *parent)
     QString qiubaiPath = ResourceExtractor::getResourcePath();
     QString configPath = qiubaiPath + "/download_config.txt";
 
+    // 配置文件缺失时触发异步下载（通常启动预热已提前下载好），
+    // 窗口立即显示占位文字，配置到达后自动刷新按钮，不再阻塞 UI。
     if (!QFile::exists(configPath)) {
-        // 配置文件不存在，先下载
         qDebug() << "配置文件不存在，开始下载...";
         downloadConfig();
-
-        // 等待下载完成（最多3秒）
-        QEventLoop loop;
-        QTimer timer;
-        timer.setSingleShot(true);
-        connect(networkManager, &QNetworkAccessManager::finished, &loop, &QEventLoop::quit);
-        connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-        timer.start(3000);
-        loop.exec();
     }
 
     setupUI();
@@ -204,7 +202,7 @@ void ConfigWindow::downloadConfig()
 
     // 文件不存在，开始下载
     qDebug() << "配置文件不存在，开始下载...";
-    QUrl url("https://gitee.com/qiuabi19/orange-box/raw/master/download_config.txt");
+    QUrl url(configFileUrl());
     QNetworkRequest request(url);
 
     // 设置请求头
@@ -255,6 +253,53 @@ void ConfigWindow::loadConfigFile()
 
     file.close();
     qDebug() << "配置文件加载完成，共" << configData.size() << "项";
+}
+
+void ConfigWindow::refreshConfigButtonLabels()
+{
+    for (int id = 1; id <= DownloadOptionCount; ++id) {
+        if (!configData.contains(id) || id > buttons.size()) {
+            continue;
+        }
+        const QString fullName = configData.value(id).fileName;
+        const int dotIndex = fullName.lastIndexOf('.');
+        const QString displayName = (dotIndex > 0) ? fullName.left(dotIndex) : fullName;
+        originalButtonTexts[id] = displayName;
+        // 下载进行中的按钮显示进度，不打扰。
+        if (buttons[id - 1]->isEnabled()) {
+            buttons[id - 1]->setText(displayName);
+        }
+    }
+}
+
+void ConfigWindow::preloadConfigFile()
+{
+    const QString configPath = ResourceExtractor::getResourcePath() + "/download_config.txt";
+    if (QFile::exists(configPath)) {
+        return;
+    }
+
+    // 启动预热：异步下载配置文件，用户首次打开配置窗口时本地已就绪。
+    auto *manager = new QNetworkAccessManager(qApp);
+    QNetworkRequest request(configFileUrl());
+    request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0");
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, reply, [configPath, manager, reply] {
+        if (reply->error() == QNetworkReply::NoError && !QFile::exists(configPath)) {
+            QSaveFile file(configPath);
+            if (file.open(QIODevice::WriteOnly)) {
+                file.write(reply->readAll());
+                file.commit();
+                qDebug() << "配置文件预热下载成功:" << configPath;
+            } else {
+                qDebug() << "无法保存预热配置文件:" << file.errorString();
+            }
+        } else if (reply->error() != QNetworkReply::NoError) {
+            qDebug() << "配置文件预热下载失败:" << reply->errorString();
+        }
+        reply->deleteLater();
+        manager->deleteLater();
+    });
 }
 
 void ConfigWindow::downloadFile(int id)
@@ -733,8 +778,9 @@ void ConfigWindow::onDownloadFinished(QNetworkReply *reply)
             file.close();
             qDebug() << "配置文件下载成功:" << configPath;
 
-            // 重新加载配置文件
+            // 重新加载配置文件并就地刷新按钮文字（窗口可能已显示）。
             loadConfigFile();
+            refreshConfigButtonLabels();
         } else {
             qDebug() << "无法保存配置文件:" << file.errorString();
         }

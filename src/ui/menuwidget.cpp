@@ -213,6 +213,9 @@ MenuWidget::MenuWidget(QWidget *parent)
     updatePosition();
     // 主菜单持续持有 ADB 监控，修复/提取入口不再依赖先打开其他窗口。
     DeviceManager::instance()->ensureAdbOnlyMonitoring();
+
+    // 启动预热：后台预下载配置文件，首次打开配置窗口无需等待网络。
+    QTimer::singleShot(500, this, [] { ConfigWindow::preloadConfigFile(); });
 }
 
 MenuWidget::~MenuWidget()

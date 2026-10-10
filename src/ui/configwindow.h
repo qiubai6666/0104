@@ -23,6 +23,8 @@ public:
     ~ConfigWindow();
 
     void setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight);
+    // 启动预热：异步预下载 download_config.txt，避免首次打开配置窗口时阻塞。
+    static void preloadConfigFile();
 
 private slots:
     void onButtonClicked();
@@ -46,6 +48,7 @@ private:
     void openGeekFlashTool();
     void downloadConfig();
     void loadConfigFile();
+    void refreshConfigButtonLabels();
     void downloadFile(int id);
     void extractZipAndOpen(const QString &zipPath, const QString &exeName);
     void openExecutable(const QString &exePath);
