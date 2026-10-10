@@ -84,11 +84,16 @@ void UIHelper::applyControlCenterSurface(QWidget *panel)
 
 QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
 {
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    return menuIcon(name, QColor(dark ? "#dce8ef" : "#385565"), ratio);
+}
+
+QIcon UIHelper::menuIcon(const QString &name, const QColor &color, qreal ratio)
+{
     QFile file(":/menu-icons/" + name + ".svg");
     if (!file.open(QIODevice::ReadOnly)) return {};
     QByteArray svg = file.readAll();
-    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
-    svg.replace("currentColor", dark ? "#dce8ef" : "#385565");
+    svg.replace("currentColor", color.name(QColor::HexRgb).toLatin1());
 
     // Render the SVG into a DPI-aware pixmap so the icon engine is not
     // required to load the SVG plugin at runtime.
