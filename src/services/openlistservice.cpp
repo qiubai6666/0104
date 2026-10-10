@@ -172,7 +172,7 @@ void OpenListService::pump(bool module, quint64 generation) {
                         if (list.entries.size() < 50000) list.entries.append(folder);
                         else list.error = QStringLiteral("资源过多，列表不完整");
                     }
-                } else if (name.endsWith(module ? ".zip" : ".apk", Qt::CaseInsensitive)) {
+                } else if (module || name.endsWith(".apk", Qt::CaseInsensitive)) {
                     OpenList::Entry entry;
                     entry.name = name; entry.remotePath = full;
                     entry.relativePath = full.mid(remoteRoot(module).size() + 1);
@@ -200,7 +200,9 @@ bool OpenListService::prepareFile() {
     int suffix = 1;
     while (QFileInfo::exists(m_path) || QFileInfo(m_path).isSymLink()) {
         if (suffix > 10000) return false;
-        m_path = QDir(dir).filePath(QFileInfo(name).completeBaseName() + QString(" (%1).").arg(suffix++) + QFileInfo(name).suffix());
+        const QString extension = QFileInfo(name).suffix();
+        m_path = QDir(dir).filePath(QFileInfo(name).completeBaseName() + QString(" (%1)").arg(suffix++) +
+            (extension.isEmpty() ? QString() : '.' + extension));
     }
     m_part = m_path + '.' + QUuid::createUuid().toString(QUuid::Id128) + ".part";
     m_file.setFileName(m_part);

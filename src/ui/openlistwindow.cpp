@@ -51,7 +51,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     connect(m_service,&OpenListService::listingReady,this,[this](bool module,const QList<OpenList::Entry> &entries,const QString &error) {
         m_entries[module] = entries; render(module);
         if (!error.isEmpty()) m_counts[module]->setText(error);
-        if (!error.isEmpty()) log((module ? QStringLiteral("模块：") : QStringLiteral("软件：")) + error);
+        if (!error.isEmpty()) log((module ? QStringLiteral("Tools：") : QStringLiteral("软件：")) + error);
         if (m_pending > 0 && --m_pending == 0 && !m_busy) { m_status->setText(QStringLiteral("资源读取完成；可多选后安装或传输到手机，双击文件直接安装")); m_refresh->setEnabled(true); }
     });
     connect(m_service,&OpenListService::progress,this,[this](qint64 received,qint64 total,double speed) {
@@ -81,7 +81,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
             if (!accepted || m_serial.isEmpty()) { m_mtTask=false; finish(QStringLiteral("未选择手机，未开始安装。")); return; }
             updateDevice();
             QTimer::singleShot(0, this, [this] {
-                if (m_mtTask && m_busy) m_installer->install(m_mtFile,false,m_serial);
+                if (m_mtTask && m_busy) m_installer->install(m_mtFile,m_serial);
             });
             return;
         }
@@ -126,6 +126,7 @@ void OpenListWindow::setupUi() {
     top->addWidget(title); top->addStretch(); m_device = new QLabel(this); top->addWidget(m_device);
     m_refresh = new QPushButton(QStringLiteral("刷新资源"),this); m_refresh->setObjectName("openListRefresh"); top->addWidget(m_refresh);
     m_installSelected = new QPushButton(QStringLiteral("安装选中"),this);
+    m_installSelected->setToolTip(QStringLiteral("安装 APK、模块 ZIP；SH 以 Root 执行，请仅运行信任的脚本。"));
     m_installSelected->setObjectName("openListInstallSelected"); top->addWidget(m_installSelected);
     m_transferSelected = new QPushButton(QStringLiteral("传输到手机"),this);
     m_transferSelected->setObjectName("openListTransferSelected"); top->addWidget(m_transferSelected);
@@ -133,7 +134,8 @@ void OpenListWindow::setupUi() {
     layout->addLayout(top);
     auto *split = new QSplitter(Qt::Horizontal,this); split->setChildrenCollapsible(false); layout->addWidget(split,3);
     for (int i = 0; i < 2; ++i) {
-        auto *card = new QGroupBox(i ? QStringLiteral("模块 · Root 模块 ZIP") : QStringLiteral("软件 · Android APK"),split);
+        auto *card = new QGroupBox(i ? QStringLiteral("Tools") : QStringLiteral("软件 · Android APK"),split);
+        card->setObjectName(i ? "openListToolsCard" : "openListAppsCard");
         auto *inner = new QVBoxLayout(card); inner->setContentsMargins(12,18,12,10);
         m_search[i] = new QLineEdit(card); m_search[i]->setPlaceholderText(QStringLiteral("搜索名称或子目录")); inner->addWidget(m_search[i]);
         auto *navigation = new QHBoxLayout;
@@ -210,7 +212,7 @@ void OpenListWindow::render(bool module) {
         for (int col=1;col<4;++col) table->item(row,col)->setToolTip(table->item(row,col)->text());
     }
     if (table->rowCount() == 0) m_counts[module]->setText(filter.isEmpty() ? QStringLiteral("暂无资源") : QStringLiteral("没有匹配的资源"));
-    else m_counts[module]->setText(QStringLiteral("%1 项 · 选中文件夹后可一键安装其中全部文件").arg(table->rowCount()));
+    else m_counts[module]->setText(QStringLiteral("%1 项 · 选中文件夹后可安装其中 APK / ZIP / SH 或传输全部文件").arg(table->rowCount()));
 }
 void OpenListWindow::activate(bool module,int row) {
     if (m_busy || row < 0 || row >= m_tables[module]->rowCount()) return;
@@ -260,8 +262,18 @@ void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries,bool trans
         folderSelected = folderSelected || entry.directory;
         appendSelection(entry, m_queue, paths);
     }
+    if (!transferOnly) {
+        QList<OpenList::Entry> supported;
+        for (const auto &entry : m_queue) {
+            const QString extension = QFileInfo(entry.name).suffix().toLower();
+            if (extension == "apk" || extension == "zip" || extension == "sh") supported.append(entry);
+            else log(QStringLiteral("已跳过不支持安装或执行的文件：%1；可使用“传输到手机”。").arg(entry.name));
+        }
+        m_queue = supported;
+    }
     if (m_queue.isEmpty()) {
-        if (folderSelected) log(QStringLiteral("所选文件夹内没有可安装的 APK 或模块文件。"));
+        if (folderSelected) log(transferOnly ? QStringLiteral("所选文件夹内没有文件。") :
+            QStringLiteral("所选文件夹内没有可安装或执行的 APK、模块 ZIP 或 SH 文件。"));
         return;
     }
     m_transferOnly = transferOnly;
@@ -287,10 +299,10 @@ void OpenListWindow::advanceBatch() {
     if (m_installIndex < m_downloaded.size()) {
         const auto download = m_downloaded[m_installIndex++];
         m_progress->setRange(0,0);
-        m_status->setText((m_transferOnly ? QStringLiteral("正在传输（%1/%2）：%3；目标手机：%4") : QStringLiteral("正在安装（%1/%2）：%3；目标手机：%4"))
+        m_status->setText((m_transferOnly ? QStringLiteral("正在传输（%1/%2）：%3；目标手机：%4") : (QFileInfo(download.file).suffix().compare("sh",Qt::CaseInsensitive) == 0 ? QStringLiteral("正在执行脚本（%1/%2）：%3；目标手机：%4") : QStringLiteral("正在安装（%1/%2）：%3；目标手机：%4")))
             .arg(m_installIndex).arg(m_downloaded.size()).arg(download.entry.name,m_serial));
         if (m_transferOnly) m_installer->transfer(download.file,m_serial);
-        else m_installer->install(download.file,download.entry.module,m_serial);
+        else m_installer->install(download.file,m_serial);
         return;
     }
     QString summary = QStringLiteral("批量任务完成：成功 %1，失败 %2，共 %3 个文件。")

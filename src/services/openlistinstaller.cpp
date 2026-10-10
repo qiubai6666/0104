@@ -63,7 +63,7 @@ OpenListInstaller::OpenListInstaller(QObject *parent,OugaCommandRunner *runner,c
 }
 void OpenListInstaller::streamLog(const QString &text,bool flush) {
     // Buffer complete lines: process chunks can split UTF-8 text, paths and internal markers.
-    if (m_stage != ApkInstall && m_stage != ModuleInstall && m_stage != ApkRootInstall) return;
+    if (m_stage != ApkInstall && m_stage != ModuleInstall && m_stage != ApkRootInstall && m_stage != ScriptRun) return;
     if (!text.isEmpty()) m_receivedOutput = true;
     m_logPending += text;
     QStringList lines;
@@ -74,7 +74,7 @@ void OpenListInstaller::streamLog(const QString &text,bool flush) {
     if (flush && !m_logPending.isEmpty()) { lines.append(m_logPending); m_logPending.clear(); }
     for (QString line : lines) {
         line = line.trimmed();
-        if (line.isEmpty() || line == "Success" || line == "OL_INSTALL_SUCCESS") continue;
+        if (line.isEmpty() || line == "Success" || line == "OL_INSTALL_SUCCESS" || line == m_scriptSuccessMarker) continue;
         const bool extraction = line.startsWith("Archive:") || line.startsWith("inflating:") || line.startsWith("creating:");
         if (extraction && success(0,true,line,false)) continue;
         line.replace(m_file,QStringLiteral("[本次安装包]"));
@@ -146,25 +146,32 @@ void OpenListInstaller::startDeviceDiscovery() {
         emit log(QStringLiteral("正在等待设备通道空闲…")); m_deviceWait.start();
     }
 }
-bool OpenListInstaller::install(const QString &file,bool module,const QString &serial) {
+bool OpenListInstaller::install(const QString &file,const QString &serial) {
     if (busy()) return false;
     if (serial.isEmpty() || serial.contains(QRegularExpression("\\s")) || !DeviceOperationLease::acquire(this)) {
         emit completed(false,QStringLiteral("目标设备无效或设备操作被占用，文件已保留：%1").arg(file)); return false;
     }
     m_transferOnly = false;
     m_apkRootMode = ShellRoot;
-    m_file = file; m_serial = serial; m_module = module; m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_managers.clear();
+    m_file = file; m_serial = serial; m_module = false; m_script = false; m_scriptSuccessMarker.clear(); m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_managers.clear();
     const QFileInfo info(file);
     if (!info.isFile() || info.isSymLink() || !OpenList::safeDirectory(info.absolutePath(),false)) {
         end(false,QStringLiteral("安装包不可用或路径不安全。")); return false;
     }
-    if (module) {
+    const QString extension = info.suffix().toLower();
+    m_module = extension == "zip"; m_script = extension == "sh";
+    if (!m_module && !m_script && extension != "apk") {
+        end(false,QStringLiteral("此格式不支持安装或执行，请使用“传输到手机”。")); return false;
+    }
+    if (m_module) {
         QFile archive(file);
         if (!archive.open(QIODevice::ReadOnly) || archive.read(4) != QByteArray("PK\x03\x04",4)) {
             end(false,QStringLiteral("不是有效的 ZIP 模块文件。")); return false;
         }
     }
-    m_remote = "/data/local/tmp/orange-openlist-" + QUuid::createUuid().toString(QUuid::Id128) + (module ? ".zip" : ".apk");
+    const QString taskId = QUuid::createUuid().toString(QUuid::Id128);
+    m_remote = "/data/local/tmp/orange-openlist-" + taskId + '.' + extension;
+    if (m_script) m_scriptSuccessMarker = "OL_SCRIPT_SUCCESS_" + taskId;
     command(Verify,m_adb,{"devices"},5000); return true;
 }
 bool OpenListInstaller::transfer(const QString &file,const QString &serial) {
@@ -172,7 +179,7 @@ bool OpenListInstaller::transfer(const QString &file,const QString &serial) {
     if (serial.isEmpty() || serial.contains(QRegularExpression("\\s")) || !DeviceOperationLease::acquire(this)) {
         emit completed(false,QStringLiteral("目标设备无效或设备操作被占用，文件已保留：%1").arg(file)); return false;
     }
-    m_transferOnly = true; m_file = file; m_serial = serial;
+    m_transferOnly = true; m_script = false; m_scriptSuccessMarker.clear(); m_file = file; m_serial = serial;
     m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_result.clear();
     const QFileInfo info(file);
     if (!info.isFile() || info.isSymLink() || !OpenList::safeDirectory(info.absolutePath(),false)) {
@@ -199,9 +206,9 @@ void OpenListInstaller::onCompleted(int code,bool normal,const QString &out) {
         else emit devicesReady(serials);
         return;
     }
-    if (handleTransfer(code,normal,out) || handleApkRoot(code,normal,out)) return;
+    if (handleTransfer(code,normal,out) || handleScript(code,normal,out) || handleApkRoot(code,normal,out)) return;
     if (m_stage == RemoteCleanup) {
-        if (code != 0 || !normal) emit log(QStringLiteral("手机临时文件清理失败，请检查连接；不会改变已确认的安装结果。"));
+        if (!success(code,normal,out,false)) emit log(QStringLiteral("手机临时文件清理失败，请检查连接；不会改变已确认的安装结果。"));
         end(m_installSuccess,m_result); return;
     }
     if (!success(code,normal,out,m_stage == ApkInstall)) {
@@ -271,12 +278,14 @@ void OpenListInstaller::probeApkRoot() {
 bool OpenListInstaller::handleApkRoot(int code,bool normal,const QString &out) {
     if (m_stage == ApkRootProbe) {
         if (success(code,normal,out,false) && out.split(QRegularExpression("[\\r\\n]+"),Qt::SkipEmptyParts).contains("0")) {
-            m_canTransferFailure = true;
+            m_canTransferFailure = !m_script;
             m_remoteTouched = true;
-            adb(ApkRootPush,{"push",m_file,m_remote});
+            adb(m_script ? ScriptPush : ApkRootPush,{"push",m_file,m_remote});
         } else if (m_apkRootMode != SuS) {
             m_apkRootMode = m_apkRootMode == ShellRoot ? SuC : SuS;
             probeApkRoot();
+        } else if (m_script) {
+            end(false,QStringLiteral("未获得 Root 授权，禁止执行 SH 脚本。"));
         } else {
             m_canTransferFailure = true;
             emit log(QStringLiteral("未获得 Shell Root 权限，使用普通 ADB 安装 APK。"));
@@ -305,6 +314,31 @@ bool OpenListInstaller::handleApkRoot(int code,bool normal,const QString &out) {
         } else {
             cleanRemote(false,QStringLiteral("Root APK 安装失败或结果无法确认。"));
         }
+        return true;
+    }
+    return false;
+}
+bool OpenListInstaller::handleScript(int code,bool normal,const QString &out) {
+    if (m_stage == ScriptPush) {
+        if (!success(code,normal,out,false)) {
+            cleanRemote(false,QStringLiteral("脚本上传失败，未执行。"));
+        } else {
+            emit log(QStringLiteral("正在以 Root 执行 SH 脚本。"));
+            // Check authorization again inside the same root shell. Never retry script execution:
+            // a failed/unknown result may already have changed the device.
+            const QString script = "if [ \"$(id -u)\" != 0 ]; then echo 'ERROR: Root authorization lost'; exit 1; fi; "
+                "/system/bin/sh " + ShellCommand::quote(m_remote) +
+                "; rc=$?; if [ \"$rc\" -eq 0 ]; then printf '\\n" + m_scriptSuccessMarker +
+                "\\n'; fi; exit \"$rc\"";
+            adb(ScriptRun,{"shell",apkRootCommand(script)});
+        }
+        return true;
+    }
+    if (m_stage == ScriptRun) {
+        const bool confirmed = success(code,normal,out,false) &&
+            out.split(QRegularExpression("[\\r\\n]+"),Qt::SkipEmptyParts).contains(m_scriptSuccessMarker);
+        cleanRemote(confirmed,confirmed ? QStringLiteral("SH 脚本执行完成。") :
+            QStringLiteral("SH 脚本执行失败或结果无法确认；不会自动重试。"));
         return true;
     }
     return false;
@@ -377,8 +411,8 @@ void OpenListInstaller::finish(bool ok,const QString &message) {
     QString result = message;
     if (ok && !m_transferOnly) {
         if (!cleanupDownloadedFile(m_file))
-            result += QStringLiteral(" 安装成功，但下载文件清理失败：%1").arg(m_file);
-    } else if (!m_file.isEmpty()) result += (m_transferOnly ? QStringLiteral(" 下载文件保留在：%1") : QStringLiteral(" 安装包保留在：%1")).arg(m_file);
-    m_stage = Idle; DeviceOperationLease::release(this); m_file.clear(); m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_transferOnly = false;
+            result += (m_script ? QStringLiteral(" 脚本执行成功，但下载文件清理失败：%1") : QStringLiteral(" 安装成功，但下载文件清理失败：%1")).arg(m_file);
+    } else if (!m_file.isEmpty()) result += (m_transferOnly ? QStringLiteral(" 下载文件保留在：%1") : m_script ? QStringLiteral(" 脚本保留在：%1") : QStringLiteral(" 安装包保留在：%1")).arg(m_file);
+    m_stage = Idle; DeviceOperationLease::release(this); m_file.clear(); m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_transferOnly = false; m_script = false; m_scriptSuccessMarker.clear();
     emit completed(ok,result);
 }

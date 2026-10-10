@@ -30,7 +30,9 @@ public:
     explicit OpenListInstaller(QObject *parent = nullptr, OugaCommandRunner *runner = nullptr,
                                const QString &adb = QString(), const QString &sevenZip = QString());
     bool inspectDevices();
-    bool install(const QString &file, bool module, const QString &serial);
+    bool install(const QString &file, const QString &serial);
+    // Compatibility for callers using the old category flag; dispatch by actual extension.
+    bool install(const QString &file, bool, const QString &serial) { return install(file, serial); }
     bool transfer(const QString &file, const QString &serial);
     void chooseRoot(const QString &manager);
     bool busy() const { return m_stage != Idle; }
@@ -48,7 +50,7 @@ private:
     enum Stage { Idle, WaitingDevice, Discover, Verify, ZipList, ZipTest, ZipProperties, RootAccess,
                  Managers, RootChoice, Push, ModuleInstall, RemoteCleanup, ApkInstall,
                  TransferVerify, TransferDestination, TransferPush, TransferCleanup,
-                 ApkRootProbe, ApkRootPush, ApkRootInstall };
+                 ApkRootProbe, ApkRootPush, ApkRootInstall, ScriptPush, ScriptRun };
     Stage m_stage = Idle;
     QTimer m_deviceWait;
     int m_deviceWaitAttempts = 0;
@@ -57,6 +59,8 @@ private:
     QString m_adb, m_sevenZip, m_file, m_serial, m_remote, m_selectedManager;
     QMap<QString,QString> m_managers;
     bool m_transferOnly = false;
+    bool m_script = false;
+    QString m_scriptSuccessMarker;
     bool m_module = false, m_installSuccess = false, m_remoteTouched = false;
     QString m_result, m_fallbackRemote, m_logPending;
     void streamLog(const QString &, bool flush = false);
@@ -72,6 +76,7 @@ private:
     void finish(bool, const QString &);
     bool handleTransfer(int, bool, const QString &);
     bool handleApkRoot(int, bool, const QString &);
+    bool handleScript(int, bool, const QString &);
     void probeApkRoot();
     QString apkRootCommand(const QString &) const;
 };
