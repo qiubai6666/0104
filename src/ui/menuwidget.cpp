@@ -456,6 +456,13 @@ QWidget *MenuWidget::buildHomePage()
     layout->addLayout(tileGrid);
     layout->addStretch(1);
 
+    // footer 上方分隔线（与子页组间分隔线同色）。
+    auto *footerLine = new QWidget(page);
+    footerLine->setFixedHeight(1);
+    footerLine->setStyleSheet("background:rgba(146,166,181,42);");
+    layout->addWidget(footerLine);
+    layout->addSpacing(8);
+
     // 底部：收起（buttons[Minimize]）与退出（buttons[Exit]）。
     // 预览稿 footer：透明底 + 1px 线框，图标与文字均为 ink-dim。
     const QString footerStyle = QString(

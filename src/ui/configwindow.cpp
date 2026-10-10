@@ -114,7 +114,8 @@ void ConfigWindow::setupUI()
         6, QStringLiteral("下载资源"), QStringLiteral("外部工具"),
         parentWidget() == nullptr,
         QStringList{"hard-drive", "smartphone", "cpu", "shield", "wrench", "zap",
-                    "wrench", "cloud", "external"});
+                    "wrench", "cloud", "external"},
+        buttonTexts.size() - 1);
     for (QPushButton *button : buttons) {
         connect(button, &QPushButton::clicked, this, &ConfigWindow::onButtonClicked);
     }

@@ -45,7 +45,7 @@ public:
     static QVector<QPushButton *> createDrawerButtons(QWidget *parent, QVBoxLayout *layout,
         const QString &title, const QString &subtitle, const QStringList &texts,
         int splitIndex, const QString &firstGroup, const QString &secondGroup,
-        bool floating = true, const QStringList &icons = {});
+        bool floating = true, const QStringList &icons = {}, int spanIndex = -1);
     static void positionDrawer(QWidget *window, const QRect &menuGeometry);
 
     // 显示居中的消息框

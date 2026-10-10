@@ -130,7 +130,7 @@ QString UIHelper::textButtonStyle()
 QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayout *layout,
     const QString &title, const QString &subtitle, const QStringList &texts,
     int splitIndex, const QString &firstGroup, const QString &secondGroup,
-    bool floating, const QStringList &icons)
+    bool floating, const QStringList &icons, int spanIndex)
 {
     // 嵌入控制中心时按预览稿子页渲染：标题由面板头部承担，页内仅保留
     // 分组标签与带图标的行按钮；独立抽屉（回归测试替身）维持原样。
@@ -199,7 +199,12 @@ QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayou
             } else {
                 button->setStyleSheet(textButtonStyle());
             }
-            grid->addWidget(button, (index - begin) / 2, (index - begin) % 2);
+            // spanIndex：嵌入态中占满整行（跨两列）的按钮，如配置页的「打开NDM」。
+            const int offset = index - begin;
+            if (embedded && index == spanIndex)
+                grid->addWidget(button, offset / 2 + (offset % 2), 0, 1, 2);
+            else
+                grid->addWidget(button, offset / 2, offset % 2);
             result.append(button);
         }
         layout->addLayout(grid);
