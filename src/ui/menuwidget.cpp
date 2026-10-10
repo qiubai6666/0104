@@ -706,7 +706,20 @@ bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
         if (widget && isVisible()) {
             const bool insidePanel = widget == this || isAncestorOf(widget);
             const bool insideBall = ball && (widget == ball || ball->isAncestorOf(widget));
-            if (!insidePanel && !insideBall) collapsePanel();
+            // 下拉列表、对话框等独立顶层窗口不在 isAncestorOf 判定链内，
+            // 其宿主控件属于面板/悬浮球时视为内部点击，不收起面板。
+            bool insideOwnedWindow = false;
+            if (!insidePanel && !insideBall && widget->window() != widget) {
+                for (const QWidget *owner = widget->window()->parentWidget();
+                     owner; owner = owner->parentWidget()) {
+                    if (owner == this || (ball && owner == ball) ||
+                        isAncestorOf(owner) || (ball && ball->isAncestorOf(owner))) {
+                        insideOwnedWindow = true;
+                        break;
+                    }
+                }
+            }
+            if (!insidePanel && !insideBall && !insideOwnedWindow) collapsePanel();
         }
         return QWidget::eventFilter(watched, event);
     }
