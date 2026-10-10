@@ -62,9 +62,9 @@ int main(int argc, char *argv[])
 
     qDebug() << OrangeSecrets::passwordAccepted();
 
-    // 密码验证通过后，直接显示主菜单
+    // 密码验证通过后，仅显示悬浮球；控制中心面板由悬浮球唤起。
     MenuWidget menu;
-    menu.show();
+    menu.showBall();
 
     return application.exec();
 }

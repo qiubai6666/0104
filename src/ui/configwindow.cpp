@@ -34,9 +34,11 @@ ConfigWindow::ConfigWindow(QWidget *parent)
     : QWidget(parent)
     , extractProcess(nullptr)
 {
-    // 设置窗口标志：无边框、置顶
-    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    setAttribute(Qt::WA_TranslucentBackground);
+    if (!parentWidget()) {
+        // 独立窗口：无边框、置顶；嵌入控制中心面板时保持普通子控件。
+        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+    }
 
     // 设置窗口标题
     setWindowTitle("配置");
@@ -109,7 +111,8 @@ void ConfigWindow::setupUI()
 
     buttons = UIHelper::createDrawerButtons(this, mainLayout,
         QStringLiteral("配置与工具"), QStringLiteral(""), buttonTexts,
-        6, QStringLiteral("下载资源"), QStringLiteral("外部工具"));
+        6, QStringLiteral("下载资源"), QStringLiteral("外部工具"),
+        parentWidget() == nullptr);
     for (QPushButton *button : buttons) {
         connect(button, &QPushButton::clicked, this, &ConfigWindow::onButtonClicked);
     }

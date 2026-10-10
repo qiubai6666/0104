@@ -85,13 +85,12 @@ private slots:
         menu.setAttribute(Qt::WA_DontShowOnScreen);
         menu.show();
         menu.layout()->activate();
-        QCOMPARE(menu.width(), int(UIHelper::MainMenuWidth));
-        QVERIFY(menu.height() < 390);
+        QCOMPARE(menu.width(), int(UIHelper::ControlCenterWidth));
+        QCOMPARE(menu.height(), int(UIHelper::ControlCenterHeight));
         for (auto *button : menu.buttons) {
-            QCOMPARE(button->size(), QSize(38, 38));
-            QCOMPARE(button->iconSize(), QSize(24, 24));
             QVERIFY(!button->icon().isNull());
-            QVERIFY(button->text().isEmpty());
+            QVERIFY2(!button->accessibleName().isEmpty(),
+                     qPrintable(QString("missing accessible name at %1,%2").arg(button->x()).arg(button->y())));
             const QString bounds = QString("menu=%1x%2 button=%3,%4 %5x%6")
                 .arg(menu.width()).arg(menu.height()).arg(button->x()).arg(button->y())
                 .arg(button->width()).arg(button->height());
@@ -149,18 +148,20 @@ private slots:
         const QString output = qEnvironmentVariable("COMPACT_MENU_PREVIEW");
         if (!output.isEmpty()) {
             const int menuY = 48;
+            const int menuX = 16;
             const int drawerY = menuY + (menu.height() - UIHelper::DrawerHeight) / 2;
             const int drawerStep = UIHelper::DrawerWidth + 18;
-            QImage sheet(86 + drawers.size() * drawerStep, menuY + menu.height() + 20,
+            const int drawerX = menuX + menu.width() + 18;
+            QImage sheet(drawerX + drawers.size() * drawerStep, menuY + menu.height() + 20,
                          QImage::Format_ARGB32_Premultiplied);
             sheet.fill(QColor("#dce8ed"));
             QPainter painter(&sheet);
             painter.setPen(QColor("#385565"));
             painter.setFont(QFont("Microsoft YaHei", 10));
-            painter.drawText(16, 26, QStringLiteral("主菜单 48 × 372px / 次菜单统一 296 × 336px"));
-            menu.render(&painter, QPoint(16, menuY));
+            painter.drawText(16, 26, QStringLiteral("控制中心 296 × 452px / 次菜单统一 296 × 336px"));
+            menu.render(&painter, QPoint(menuX, menuY));
             for (int i = 0; i < drawers.size(); ++i)
-                drawers[i]->render(&painter, QPoint(86 + i * drawerStep, drawerY));
+                drawers[i]->render(&painter, QPoint(drawerX + i * drawerStep, drawerY));
             painter.end();
             QVERIFY(sheet.save(output));
         }
@@ -212,7 +213,6 @@ private slots:
         castButton->click();
         QCOMPARE(menu.screenCastController->state(), ScreenCastController::WaitingForDevice);
         QVERIFY(castButton->property("menuSelected").toBool());
-        QVERIFY(!menu.screenCastWindow->isVisible());
         drawerButton->click();
         QVERIFY(menu.repairWindow->isVisible());
         QVERIFY(drawerButton->property("menuSelected").toBool());
@@ -224,7 +224,6 @@ private slots:
         castButton->click();
         QCOMPARE(menu.screenCastController->state(), ScreenCastController::Idle);
         QVERIFY(!castButton->property("menuSelected").toBool());
-        QVERIFY(!menu.screenCastWindow->isVisible());
     }
     void waitingSpinnerAndCancel() {
         MenuWidget menu;

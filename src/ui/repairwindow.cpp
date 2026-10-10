@@ -34,9 +34,11 @@ RepairWindow::RepairWindow(QWidget *parent)
     , moduleInstallStep(ModuleInstallStep::Push)
     , rootManagerType(RootManager::Magisk)
 {
-    // 设置窗口标志：无边框、置顶
-    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    setAttribute(Qt::WA_TranslucentBackground);
+    if (!parentWidget()) {
+        // 独立窗口：无边框、置顶；嵌入控制中心面板时保持普通子控件。
+        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+    }
     // The main menu owns this persistent submenu. Closing only hides it;
     // never destroy child QProcesses or trigger application exit here.
     setAttribute(Qt::WA_DeleteOnClose, false);
@@ -77,7 +79,8 @@ void RepairWindow::setupUI()
 
     buttons = UIHelper::createDrawerButtons(this, mainLayout,
         QStringLiteral("修复工具"), QStringLiteral("秋白工作室"), buttonTexts,
-        4, QStringLiteral("维护"), QStringLiteral("线刷与资源"));
+        4, QStringLiteral("维护"), QStringLiteral("线刷与资源"),
+        parentWidget() == nullptr);
     for (QPushButton *button : buttons) {
         connect(button, &QPushButton::clicked, this, &RepairWindow::onButtonClicked);
     }

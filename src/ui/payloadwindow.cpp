@@ -13,10 +13,15 @@ PayloadWindow::PayloadWindow(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Payload 提取");
-    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    UIHelper::applyFloatingSurface(this);
+    if (!parentWidget()) {
+        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        UIHelper::applyFloatingSurface(this);
+    } else {
+        // 嵌入控制中心面板：作为普通子页翻页展示。
+        setWindowFlags(Qt::Widget);
+    }
     setupUI();
-    adjustSize();
+    if (!parentWidget()) adjustSize();
 }
 
 PayloadWindow::~PayloadWindow()

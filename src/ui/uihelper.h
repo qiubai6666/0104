@@ -16,8 +16,9 @@ class UIHelper
 public:
     // 统一菜单密度，不改变文字样式和横向布局。
     enum { MenuButtonHeight = 40 };
-    // Shared logical-pixel dimensions for the capsule and its first-level drawers.
+    // Shared logical-pixel dimensions for the capsule, control center and first-level drawers.
     enum { MainMenuWidth = 48, MainMenuButtonSize = 38, MainMenuIconSize = 24,
+           ControlCenterWidth = 296, ControlCenterHeight = 452,
            DrawerWidth = 296, DrawerHeight = 336,
            DrawerHorizontalMargin = 20, DrawerVerticalMargin = 18, DrawerButtonHeight = 34 };
 
@@ -34,11 +35,15 @@ public:
 
     // Paint only the background alpha; text and controls remain fully readable.
     static void applyFloatingSurface(QWidget *window, bool capsule = false);
+    // Control-center panel: same translucent glass as drawers, but 24px radius
+    // and no forced size (the panel manages its own fixed size).
+    static void applyControlCenterSurface(QWidget *panel);
     static QIcon menuIcon(const QString &name, qreal devicePixelRatio = 1.0);
     static QString textButtonStyle();
     static QVector<QPushButton *> createDrawerButtons(QWidget *parent, QVBoxLayout *layout,
         const QString &title, const QString &subtitle, const QStringList &texts,
-        int splitIndex, const QString &firstGroup, const QString &secondGroup);
+        int splitIndex, const QString &firstGroup, const QString &secondGroup,
+        bool floating = true);
     static void positionDrawer(QWidget *window, const QRect &menuGeometry);
 
     // 显示居中的消息框

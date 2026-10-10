@@ -1,5 +1,4 @@
 #include "menuwidget.h"
-#include "mainmenubutton.h"
 #include "deviceoperationlease.h"
 #include "configwindow.h"
 #include "devicecheckwindow.h"
@@ -18,9 +17,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFont>
 #include <QGuiApplication>
+#include <QGridLayout>
+#include <QKeyEvent>
 #include <QList>
+#include <QMouseEvent>
 #include <QPushButton>
+#include <QStackedWidget>
 #include <QVBoxLayout>
 #include <QScreen>
 #include <QStandardPaths>
@@ -34,7 +38,142 @@
 #include <QDialog>
 #include <QDropEvent>
 #include <QMimeData>
+#include <QDynamicPropertyChangeEvent>
+#include <algorithm>
+#include <functional>
 
+namespace {
+// 控制中心行按钮：图标与文字由兄弟 QLabel 渲染（投屏 spinner/状态需要独立刷新），
+// 按钮本体只负责点击区域、底色与选中描边，因此不绘制 QIcon 内容。
+class RowButton : public QPushButton
+{
+public:
+    using QPushButton::QPushButton;
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool dark = palette().color(QPalette::Window).lightness() < 128;
+        QColor background = Qt::transparent;
+        if (isDown()) background = dark ? QColor(66, 97, 110, 200) : QColor(206, 228, 238, 230);
+        else if (underMouse()) background = dark ? QColor(52, 73, 80, 170) : QColor(224, 238, 244, 170);
+        if (background.alpha()) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(background);
+            painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 12, 12);
+        }
+        if (property("menuSelected").toBool() && isEnabled()) {
+            painter.setPen(QPen(QColor(131, 174, 202), 1.2));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 12, 12);
+        }
+    }
+};
+
+// 功能 tile：把图标与文字合成为一张 DPI 感知位图，保持预览稿“图标在上、文字在下”的观感，
+// 同时按钮仍保留 tooltip/accessibleName 与原 objectName。
+QIcon tileIcon(const QString &iconName, const QString &label, qreal ratio)
+{
+    const qreal dpr = qMax<qreal>(1.0, ratio);
+    const int width = 124, height = 52;
+    QPixmap pixmap(qRound(width * dpr), qRound(height * dpr));
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QIcon glyph = UIHelper::menuIcon(iconName, dpr);
+    glyph.paint(&painter, QRect(12, 7, 19, 19));
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    painter.setPen(QColor(dark ? "#dce8ef" : "#385565"));
+    QFont font(QStringLiteral("Microsoft YaHei"));
+    font.setPixelSize(12);
+    painter.setFont(font);
+    painter.drawText(QRect(12, 30, width - 20, 16), Qt::AlignLeft | Qt::AlignVCenter, label);
+    painter.end();
+    return QIcon(pixmap);
+}
+
+} // namespace
+
+// 主入口悬浮球：空闲固定 command 图标，投屏启动中显示 spinner，
+// 流式中切换为投屏图标并叠加绿色徽标。点击由 MenuWidget 接管面板显隐。
+// 定义在全局作用域，与 menuwidget.h 中的前置声明（成员 ball）保持同一类型。
+class FloatingBall : public QWidget
+{
+public:
+    enum CastState { Idle, Loading, Streaming };
+
+    FloatingBall()
+    {
+        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+        // 应用存活锚点：面板不承担 QuitOnClose，由悬浮球保持事件循环。
+        setAttribute(Qt::WA_QuitOnClose);
+        setFixedSize(46, 46);
+        setWindowTitle(APP_NAME);
+        setCursor(Qt::PointingHandCursor);
+    }
+
+    void setCastState(CastState value)
+    {
+        if (castState == value) return;
+        castState = value;
+        update();
+    }
+
+    int spinnerAngle = 0;
+    std::function<void()> activated;
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        pressed = event->button() == Qt::LeftButton;
+        event->accept();
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (pressed && event->button() == Qt::LeftButton && rect().contains(event->pos()) && activated)
+            activated();
+        pressed = false;
+        event->accept();
+    }
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+        QColor fill = dark ? QColor(39, 56, 64) : QColor(195, 219, 228);
+        fill.setAlpha(102);
+        painter.setPen(QPen(dark ? QColor(255, 255, 255, 32) : QColor(255, 255, 255, 180), 1.0));
+        painter.setBrush(fill);
+        painter.drawEllipse(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5));
+        const QRectF iconRect((width() - 22) / 2.0, (height() - 22) / 2.0, 22, 22);
+        if (castState == Loading) {
+            painter.setPen(QPen(dark ? QColor("#dce8ef") : QColor("#385565"), 2.5, Qt::SolidLine, Qt::RoundCap));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawArc(iconRect, spinnerAngle * 16, 260 * 16);
+        } else {
+            const QIcon icon = UIHelper::menuIcon(
+                castState == Streaming ? QStringLiteral("monitor-smartphone") : QStringLiteral("command"),
+                devicePixelRatioF());
+            icon.paint(&painter, iconRect.toRect());
+        }
+        if (castState == Streaming) {
+            const QRectF badge(width() - 16, 4, 12, 12);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor("#3fbf6f"));
+            painter.drawEllipse(badge);
+            painter.setPen(QPen(dark ? QColor(35, 42, 48) : QColor(255, 255, 255), 1.5));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(badge);
+        }
+    }
+
+private:
+    CastState castState = Idle;
+    bool pressed = false;
+};
 
 MenuWidget::MenuWidget(QWidget *parent)
     : QWidget(parent)
@@ -46,11 +185,8 @@ MenuWidget::MenuWidget(QWidget *parent)
     , configWindow(nullptr)
     , imgProcess(nullptr)
 {
-    // 设置窗口标志：无边框、置顶（不使用Tool，这样可以显示在任务栏）
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setAttribute(Qt::WA_TranslucentBackground);
-
-    // 设置窗口标题
     setWindowTitle(APP_NAME);
 
     setupUI();
@@ -68,9 +204,7 @@ MenuWidget::~MenuWidget()
     screenCastSpinnerTimer->stop();
     delete screenCastController;
     DeviceManager::instance()->releaseAdbOnlyMonitoring();
-    const QList<QWidget *> windows = {
-        screenCastWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow
-    };
+    const QList<QWidget *> windows = {ball, repairWindow, payloadWindow, deviceCheckWindow, configWindow};
     for (QWidget *window : windows) {
         if (window) {
             window->hide();
@@ -85,80 +219,270 @@ MenuWidget::~MenuWidget()
 
 void MenuWidget::setupUI()
 {
+    setFixedSize(UIHelper::ControlCenterWidth, UIHelper::ControlCenterHeight);
+    UIHelper::applyControlCenterSurface(this);
+    setAcceptDrops(true);
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    setStyleSheet(QString("QLabel {background:transparent; color:%1; font-family:'Segoe UI','Microsoft YaHei';}")
+                  .arg(dark ? "#e9edf3" : "#2c3e50"));
+
     mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(1);
-    mainLayout->setContentsMargins(5, 7, 5, 7);
-    setFixedWidth(UIHelper::MainMenuWidth);
-    UIHelper::applyFloatingSurface(this, true);
-    const QStringList labels = {"投屏", "秋白工作室", "PAYLOAD", "提取IMG",
-        "设备检测", "配置", "联系作者", "退出", "收起"};
-    const QStringList icons = {"monitor-smartphone", "wrench", "package-open", "file-down",
-        "smartphone", "sliders-horizontal", "message-circle", "power", "panel-right-close"};
-    for (int index = 0; index < labels.size(); ++index) {
-        if (index == Exit) {
-            auto *line = new QWidget(this);
-            line->setFixedSize(20, 1);
-            line->setStyleSheet("background:rgba(146,166,181,100);");
-            mainLayout->addSpacing(3);
-            mainLayout->addWidget(line, 0, Qt::AlignHCenter);
-            mainLayout->addSpacing(3);
-        }
-        auto *button = new MainMenuButton(this);
-        button->setFixedSize(UIHelper::MainMenuButtonSize, UIHelper::MainMenuButtonSize);
-        button->setIcon(UIHelper::menuIcon(icons[index], devicePixelRatioF()));
-        button->setIconSize(QSize(UIHelper::MainMenuIconSize, UIHelper::MainMenuIconSize));
-        button->setToolTip(labels[index]);
-        button->setAccessibleName(labels[index]);
-        button->setObjectName(QString("menuAction%1").arg(index));
-        button->setCursor(Qt::PointingHandCursor);
-        button->setProperty("menuDirectAction", index == ExtractImg || index == ContactAuthor);
-        mainLayout->addWidget(button, 0, Qt::AlignHCenter);
-        buttons.append(button);
-        connect(button, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
-    }
-    setupScreenCastWindow();
-    buttons[ScreenCast]->setObjectName("screenCastButton");
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setSpacing(0);
+
+    // 共享子页头部：主页隐藏，仅翻页显示。
+    header = new QWidget(this);
+    header->setFixedHeight(46);
+    auto *headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(12, 8, 14, 6);
+    headerLayout->setSpacing(8);
+    backButton = new QPushButton(header);
+    backButton->setObjectName("panelBackButton");
+    backButton->setFixedSize(28, 28);
+    backButton->setIcon(UIHelper::menuIcon(QStringLiteral("chevron-left"), devicePixelRatioF()));
+    backButton->setIconSize(QSize(20, 20));
+    backButton->setCursor(Qt::PointingHandCursor);
+    backButton->setAccessibleName(QStringLiteral("返回"));
+    backButton->setStyleSheet("QPushButton { background:transparent; border:none; border-radius:8px; }"
+                              "QPushButton:hover { background:rgba(212,230,237,120); }"
+                              "QPushButton:pressed { background:rgba(212,230,237,220); }");
+    headerLayout->addWidget(backButton);
+    pageTitle = new QLabel(header);
+    pageTitle->setStyleSheet("background:transparent; font-size:15px; font-weight:normal;");
+    headerLayout->addWidget(pageTitle);
+    headerLayout->addStretch(1);
+    mainLayout->addWidget(header);
+    connect(backButton, &QPushButton::clicked, this, &MenuWidget::showHome);
+
+    pages = new QStackedWidget(this);
+    mainLayout->addWidget(pages, 1);
+
+    homePage = buildHomePage();
+    pages->addWidget(homePage);
+    pageTitles.insert(homePage, QString());
+
+    // 悬浮球：点击在面板显隐之间切换。
+    ball = new FloatingBall;
+    ball->activated = [this] { togglePanel(); };
+
     screenCastSpinnerTimer->setInterval(40);
     connect(screenCastSpinnerTimer, &QTimer::timeout, this, [this] {
         screenCastSpinnerAngle = (screenCastSpinnerAngle + 16) % 360;
         paintScreenCastSpinner();
+        if (ball) {
+            ball->spinnerAngle = screenCastSpinnerAngle;
+            ball->update();
+        }
     });
     connect(screenCastController, &ScreenCastController::stateChanged,
             this, &MenuWidget::updateScreenCastButton);
+    connect(DeviceManager::instance(), &DeviceManager::deviceModeChanged,
+            this, &MenuWidget::updateDeviceRow);
+    updateDeviceRow();
     updateScreenCastButton();
+    // 主页不显示返回头部，仅进入子页时展示。
+    showHome();
 }
 
-void MenuWidget::setupScreenCastWindow()
+QWidget *MenuWidget::buildHomePage()
 {
-    screenCastWindow = new QWidget;
-    screenCastWindow->setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    screenCastWindow->setWindowTitle(QStringLiteral("手机投屏"));
-    UIHelper::applyFloatingSurface(screenCastWindow);
-    auto *layout = new QVBoxLayout(screenCastWindow);
-    layout->setContentsMargins(22, 20, 22, 20);
-    layout->setSpacing(12);
-    auto *title = new QLabel(QStringLiteral("手机投屏"), screenCastWindow);
-    title->setStyleSheet("background:transparent; color:#2c3e50; font-size:17px;");
-    layout->addWidget(title);
-    screenCastStatusLabel = new QLabel(screenCastWindow);
-    screenCastStatusLabel->setWordWrap(true);
-    screenCastStatusLabel->setStyleSheet("background:transparent; color:#71808d; font-size:12px;");
-    layout->addWidget(screenCastStatusLabel);
-    screenCastActionButton = new QPushButton(screenCastWindow);
-    screenCastActionButton->setObjectName("screenCastActionButton");
-    screenCastActionButton->setStyleSheet(UIHelper::getStandardButtonStyle());
-    screenCastActionButton->setMinimumHeight(36);
-    screenCastActionButton->setCursor(Qt::PointingHandCursor);
-    layout->addWidget(screenCastActionButton, 0, Qt::AlignLeft);
-    connect(screenCastActionButton, &QPushButton::clicked, screenCastController, &ScreenCastController::toggle);
-    screenCastWindow->adjustSize();
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(16, 14, 16, 14);
+    layout->setSpacing(8);
+
+    // 品牌行
+    auto *brandRow = new QHBoxLayout;
+    brandRow->setSpacing(6);
+    auto *brandIcon = new QLabel(page);
+    brandIcon->setPixmap(UIHelper::menuIcon(QStringLiteral("command"), devicePixelRatioF()).pixmap(14, 14));
+    brandIcon->setFixedSize(14, 14);
+    brandIcon->setScaledContents(true);
+    auto *brandText = new QLabel(QStringLiteral("ORANGETOOLS"), page);
+    brandText->setStyleSheet("font-size:11px; font-weight:bold; letter-spacing:2px; color:#68818e;");
+    brandRow->addSpacing(2);
+    brandRow->addWidget(brandIcon);
+    brandRow->addWidget(brandText);
+    brandRow->addStretch(1);
+    layout->addLayout(brandRow);
+    layout->addSpacing(2);
+
+    // 投屏行：点击直接开始/停止投屏（buttons[ScreenCast]）。
+    auto *castCard = new QFrame(page);
+    castCard->setFixedHeight(58);
+    auto *castGrid = new QGridLayout(castCard);
+    castGrid->setContentsMargins(10, 0, 10, 0);
+    castGrid->setSpacing(8);
+    screenCastIconLabel = new QLabel(castCard);
+    screenCastIconLabel->setFixedSize(24, 24);
+    screenCastIconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    auto *castTitle = new QLabel(QStringLiteral("手机投屏"), castCard);
+    castTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
+    castTitle->setStyleSheet("font-size:13px;");
+    screenCastSubtitle = new QLabel(castCard);
+    screenCastSubtitle->setAttribute(Qt::WA_TransparentForMouseEvents);
+    screenCastSubtitle->setStyleSheet("font-size:11px; color:#71808d;");
+    screenCastPill = new QLabel(castCard);
+    screenCastPill->setObjectName("statusPill");
+    screenCastPill->setAttribute(Qt::WA_TransparentForMouseEvents);
+    screenCastPill->setProperty("state", "off");
+    screenCastPill->setStyleSheet(
+        "QLabel#statusPill { border-radius:8px; padding:2px 8px; font-size:10px; }"
+        "QLabel#statusPill[state=\"off\"] { background:rgba(146,166,181,60); color:#71808d; }"
+        "QLabel#statusPill[state=\"ok\"] { background:rgba(63,191,111,60); color:#1d7a43; }"
+        "QLabel#statusPill[state=\"loading\"] { background:rgba(230,162,60,70); color:#a3661a; }");
+    auto *castTexts = new QVBoxLayout;
+    castTexts->setSpacing(1);
+    castTexts->addWidget(castTitle);
+    castTexts->addWidget(screenCastSubtitle);
+    castGrid->addWidget(screenCastIconLabel, 0, 0, Qt::AlignVCenter);
+    castGrid->addLayout(castTexts, 0, 1, Qt::AlignVCenter);
+    castGrid->setColumnStretch(1, 1);
+    castGrid->addWidget(screenCastPill, 0, 2, Qt::AlignVCenter | Qt::AlignRight);
+    auto *castButton = new RowButton(castCard);
+    castButton->setObjectName("screenCastButton");
+    castButton->setAccessibleName(QStringLiteral("投屏"));
+    castButton->setCursor(Qt::PointingHandCursor);
+    castGrid->addWidget(castButton, 0, 0, 1, 3);
+    layout->addWidget(castCard);
+    buttons.append(castButton);
+    connect(castButton, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
+
+    // 设备行：展示连接状态，点击进入设备检测页。
+    auto *deviceCard = new QFrame(page);
+    deviceCard->setFixedHeight(46);
+    auto *deviceGrid = new QGridLayout(deviceCard);
+    deviceGrid->setContentsMargins(10, 0, 10, 0);
+    deviceGrid->setSpacing(8);
+    auto *deviceIcon = new QLabel(page);
+    deviceIcon->setPixmap(UIHelper::menuIcon(QStringLiteral("smartphone"), devicePixelRatioF()).pixmap(20, 20));
+    deviceIcon->setFixedSize(20, 20);
+    deviceIcon->setScaledContents(true);
+    deviceIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
+    auto *deviceTitle = new QLabel(QStringLiteral("设备"), page);
+    deviceTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
+    deviceTitle->setStyleSheet("font-size:13px;");
+    devicePill = new QLabel(page);
+    devicePill->setObjectName("statusPill");
+    devicePill->setAttribute(Qt::WA_TransparentForMouseEvents);
+    devicePill->setProperty("state", "off");
+    devicePill->setStyleSheet(screenCastPill->styleSheet());
+    deviceGrid->addWidget(deviceIcon, 0, 0, Qt::AlignVCenter);
+    deviceGrid->addWidget(deviceTitle, 0, 1, Qt::AlignVCenter);
+    deviceGrid->setColumnStretch(1, 1);
+    deviceGrid->addWidget(devicePill, 0, 2, Qt::AlignVCenter | Qt::AlignRight);
+    auto *deviceRow = new QPushButton(deviceCard);
+    deviceRow->setObjectName("deviceRowButton");
+    deviceRow->setAccessibleName(QStringLiteral("设备检测"));
+    deviceRow->setCursor(Qt::PointingHandCursor);
+    deviceRow->setToolTip(QStringLiteral("打开设备检测"));
+    deviceGrid->addWidget(deviceRow, 0, 0, 1, 3);
+    layout->addWidget(deviceCard);
+    connect(deviceRow, &QPushButton::clicked, this, [this] {
+        showSubmenu(DeviceCheck, ensureDeviceCheckWindow());
+    });
+
+    // 功能 tile 2×3（buttons[RepairTools..ContactAuthor]）。
+    auto *tileGrid = new QGridLayout;
+    tileGrid->setHorizontalSpacing(8);
+    tileGrid->setVerticalSpacing(8);
+    const QVector<QPair<int, QString>> tiles = {
+        {RepairTools, QStringLiteral("秋白工作室")}, {Payload, QStringLiteral("PAYLOAD")},
+        {ExtractImg, QStringLiteral("提取IMG")}, {DeviceCheck, QStringLiteral("设备检测")},
+        {Configuration, QStringLiteral("配置")}, {ContactAuthor, QStringLiteral("联系作者")}};
+    const QStringList tileIcons = {QStringLiteral("wrench"), QStringLiteral("package-open"),
+        QStringLiteral("file-down"), QStringLiteral("smartphone"), QStringLiteral("sliders-horizontal"),
+        QStringLiteral("heart")};
+    const QString tileStyle = QStringLiteral(
+        "QPushButton { background:rgba(146,166,181,30); border:1px solid rgba(146,166,181,60);"
+        " border-radius:12px; }"
+        "QPushButton:hover { background:rgba(212,230,237,110); border-color:rgba(131,174,202,140); }"
+        "QPushButton:pressed { background:rgba(195,219,228,200); }");
+    for (int index = 0; index < tiles.size(); ++index) {
+        auto *tile = new QPushButton(page);
+        tile->setObjectName(QString("menuAction%1").arg(tiles[index].first));
+        tile->setFixedHeight(58);
+        tile->setIconSize(QSize(124, 52));
+        tile->setIcon(tileIcon(tileIcons[index], tiles[index].second, devicePixelRatioF()));
+        tile->setToolTip(tiles[index].second);
+        tile->setAccessibleName(tiles[index].second);
+        tile->setCursor(Qt::PointingHandCursor);
+        tile->setStyleSheet(tileStyle);
+        tile->setProperty("menuDirectAction", tiles[index].first == ExtractImg ||
+                                              tiles[index].first == ContactAuthor);
+        tileGrid->addWidget(tile, index / 2, index % 2);
+        buttons.append(tile);
+        connect(tile, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
+    }
+    layout->addLayout(tileGrid);
+    layout->addStretch(1);
+
+    // 底部：收起（buttons[Minimize]）与退出（buttons[Exit]）。
+    const QString footerStyle = QString(
+        "QPushButton { background:rgba(146,166,181,30); border:none; border-radius:10px;"
+        " color:%1; font-size:12px; padding:8px; }"
+        "QPushButton:hover { background:rgba(146,166,181,60); }"
+        "QPushButton:pressed { background:rgba(146,166,181,90); }")
+        .arg(dark ? "#e9edf3" : "#2c3e50");
+    auto *footerRow = new QHBoxLayout;
+    footerRow->setSpacing(8);
+    const struct { MenuAction action; const char *label; const char *icon; } footer[] = {
+        {Minimize, "收起", "panel-right-close"}, {Exit, "退出", "power"}};
+    QPushButton *footerButtons[2] = {nullptr, nullptr};
+    for (int index = 0; index < 2; ++index) {
+        const auto &entry = footer[index];
+        auto *button = new QPushButton(QString::fromUtf8(entry.label), page);
+        button->setObjectName(QString("menuAction%1").arg(int(entry.action)));
+        button->setFixedHeight(36);
+        button->setIcon(UIHelper::menuIcon(QString::fromLatin1(entry.icon), devicePixelRatioF()));
+        button->setIconSize(QSize(15, 15));
+        button->setCursor(Qt::PointingHandCursor);
+        button->setAccessibleName(QString::fromUtf8(entry.label));
+        button->setStyleSheet(footerStyle);
+        footerRow->addWidget(button);
+        connect(button, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
+        footerButtons[index] = button;
+    }
+    // 视觉顺序为「收起、退出」，buttons 向量下标必须与 MenuAction 枚举一致
+    // （Exit=7、Minimize=8），故按枚举顺序补入向量。
+    buttons.append(footerButtons[1]);
+    buttons.append(footerButtons[0]);
+    layout->addLayout(footerRow);
+    return page;
+}
+
+void MenuWidget::showSubmenu(MenuAction action, QWidget *window)
+{
+    if (window->isWindow()) {
+        // 独立窗口（回归测试替身或旧用法）保持抽屉显隐路径。
+        toggleSubmenu(action, window);
+        return;
+    }
+    // 面板内嵌页：同页再点返回主页。
+    if (pages->currentWidget() == window && isVisible()) {
+        showHome();
+        return;
+    }
+    pages->setCurrentWidget(window);
+    pageTitle->setText(pageTitles.value(window));
+    header->setVisible(true);
+    if (!isVisible()) {
+        positionPanel();
+        show();
+        raise();
+        activateWindow();
+    }
+    Q_UNUSED(action);
+    updateMenuSelection();
 }
 
 void MenuWidget::toggleSubmenu(MenuAction action, QWidget *window)
 {
     const bool wasVisible = window->isVisible() && !window->isMinimized();
-    const QList<QWidget *> windows = {screenCastWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow};
-    for (QWidget *other : windows) if (other && other != window) other->hide();
+    const QList<QWidget *> windows = {repairWindow, payloadWindow, deviceCheckWindow, configWindow};
+    for (QWidget *other : windows)
+        if (other && other != window && other->isWindow()) other->hide();
     if (wasVisible) window->hide();
     else {
         UIHelper::positionDrawer(window, geometry());
@@ -170,28 +494,106 @@ void MenuWidget::toggleSubmenu(MenuAction action, QWidget *window)
     updateMenuSelection();
 }
 
+void MenuWidget::showHome()
+{
+    pages->setCurrentWidget(homePage);
+    header->setVisible(false);
+    updateMenuSelection();
+}
+
+void MenuWidget::collapsePanel()
+{
+    showHome();
+    hide();
+}
+
+void MenuWidget::togglePanel()
+{
+    if (isVisible()) {
+        collapsePanel();
+        return;
+    }
+    positionPanel();
+    show();
+    raise();
+    activateWindow();
+}
+
+RepairWindow *MenuWidget::ensureRepairWindow()
+{
+    if (!repairWindow) {
+        repairWindow = new RepairWindow(pages);
+        pages->addWidget(repairWindow);
+        pageTitles.insert(repairWindow, QStringLiteral("秋白工作室"));
+        repairWindow->setAcceptDrops(true);
+    }
+    return repairWindow;
+}
+
+PayloadWindow *MenuWidget::ensurePayloadWindow()
+{
+    if (!payloadWindow) {
+        payloadWindow = new PayloadWindow(pages);
+        pages->addWidget(payloadWindow);
+        pageTitles.insert(payloadWindow, QStringLiteral("Payload 分区提取"));
+        payloadWindow->setAcceptDrops(true);
+        connect(payloadWindow, &QDialog::finished, this, [this](int) { showHome(); });
+    }
+    return payloadWindow;
+}
+
+DeviceCheckWindow *MenuWidget::ensureDeviceCheckWindow()
+{
+    if (!deviceCheckWindow) {
+        deviceCheckWindow = new DeviceCheckWindow(pages);
+        pages->addWidget(deviceCheckWindow);
+        pageTitles.insert(deviceCheckWindow, QStringLiteral("设备检测"));
+        deviceCheckWindow->setAcceptDrops(true);
+    }
+    return deviceCheckWindow;
+}
+
+ConfigWindow *MenuWidget::ensureConfigWindow()
+{
+    if (!configWindow) {
+        configWindow = new ConfigWindow(pages);
+        pages->addWidget(configWindow);
+        pageTitles.insert(configWindow, QStringLiteral("配置与工具"));
+        configWindow->setAcceptDrops(true);
+    }
+    return configWindow;
+}
+
 void MenuWidget::updateMenuSelection()
 {
     const QList<QPair<MenuAction, QWidget *>> windows = {
         {RepairTools, repairWindow}, {Payload, payloadWindow},
         {DeviceCheck, deviceCheckWindow}, {Configuration, configWindow}};
     for (const auto &entry : windows) {
-        const bool selected = entry.second && entry.second->isVisible() && !entry.second->isMinimized();
+        bool selected = false;
+        if (entry.second) {
+            if (entry.second->isWindow())
+                selected = entry.second->isVisible() && !entry.second->isMinimized();
+            else
+                selected = isVisible() && pages->currentWidget() == entry.second;
+        }
         auto *button = buttons[entry.first];
         button->setProperty("menuSelected", selected);
     }
 }
 
-QWidget *MenuWidget::fileDropSurface(QWidget *widget) const
+QWidget *MenuWidget::fileDropSurface(QWidget *widget)
 {
     // Message boxes and file pickers keep their own interaction semantics.
     if (!widget) return nullptr;
     if (qobject_cast<QDialog *>(widget->window()) && widget->window() != payloadWindow) return nullptr;
     if (repairWindow && repairWindow->ownsToolWindow(widget->window())) return widget->window();
-    const QList<QWidget *> roots = {screenCastWindow, repairWindow, payloadWindow,
-                                   deviceCheckWindow, configWindow};
+    // 从最具体到最泛匹配：面板是各嵌入页的祖先，必须放在最后，
+    // 否则子页内的拖放会被误归到面板本体。
+    const QList<QWidget *> roots = {repairWindow, payloadWindow,
+                                   deviceCheckWindow, configWindow, this};
     for (QWidget *root : roots) {
-        if (root && (widget == root || root->isAncestorOf(widget))) return widget->window();
+        if (root && (widget == root || root->isAncestorOf(widget))) return root;
     }
     return nullptr;
 }
@@ -225,7 +627,7 @@ bool MenuWidget::handleFileDrop(QWidget *surface, QEvent *event)
         return true;
     }
     if (event->type() == QEvent::Drop) {
-        if (!deviceCheckWindow) deviceCheckWindow = new DeviceCheckWindow();
+        ensureDeviceCheckWindow();
         if (!deviceCheckWindow->transferFiles(files, surface)) {
             drop->ignore();
             return true;
@@ -239,8 +641,36 @@ bool MenuWidget::handleFileDrop(QWidget *surface, QEvent *event)
 
 bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
 {
-    // Do not walk widget ancestry for paint, timer or ordinary input events.
     const auto type = event->type();
+    if (type == QEvent::DynamicPropertyChange) {
+        // 样式表驱动的状态（tile 选中、状态 pill）需要重新求值选择器。
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && isAncestorOf(widget)) {
+            widget->style()->unpolish(widget);
+            widget->style()->polish(widget);
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+    if (type == QEvent::MouseButtonPress) {
+        // 面板可见时，点击面板与悬浮球之外的区域收起面板。
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && isVisible()) {
+            const bool insidePanel = widget == this || isAncestorOf(widget);
+            const bool insideBall = ball && (widget == ball || ball->isAncestorOf(widget));
+            if (!insidePanel && !insideBall) collapsePanel();
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+    if (type == QEvent::KeyPress) {
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && isVisible() && widget->window() == this &&
+            static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
+            collapsePanel();
+            return true;
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+    // Do not walk widget ancestry for paint, timer or ordinary input events.
     if (type != QEvent::Show && type != QEvent::Hide && type != QEvent::WindowStateChange &&
         type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::Drop)
         return QWidget::eventFilter(watched, event);
@@ -261,9 +691,13 @@ bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
         }
         if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
             event->type() == QEvent::WindowStateChange) {
-            const QList<QWidget *> roots = {screenCastWindow, repairWindow, payloadWindow,
+            const QList<QWidget *> roots = {this, repairWindow, payloadWindow,
                                            deviceCheckWindow, configWindow};
             if (roots.contains(widget)) updateMenuSelection();
+            // 子页被关闭或隐藏时面板回主页，避免停留在空页。
+            if (type == QEvent::Hide && widget != homePage && pageTitles.contains(widget) &&
+                pages->currentWidget() == widget && isVisible())
+                showHome();
         }
     }
     return QWidget::eventFilter(watched, event);
@@ -273,6 +707,12 @@ void MenuWidget::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
     if (event->type() == QEvent::WindowStateChange && !isMinimized()) updateMenuSelection();
+}
+
+void MenuWidget::setVisible(bool visible)
+{
+    QWidget::setVisible(visible);
+    updateMenuSelection();
 }
 
 void MenuWidget::updateScreenCastButton()
@@ -289,22 +729,37 @@ void MenuWidget::updateScreenCastButton()
     button->setEnabled(true);
     button->setAccessibleName(QStringLiteral("投屏"));
     button->setAccessibleDescription(screenCastController->statusText());
-    screenCastStatusLabel->setText(screenCastController->statusText());
-    const QString action = state == ScreenCastController::WaitingForDevice ? QStringLiteral("取消等待")
-        : state == ScreenCastController::Starting ? QStringLiteral("取消启动")
-        : state == ScreenCastController::Streaming || state == ScreenCastController::Stopping ? QStringLiteral("停止投屏")
-        : QStringLiteral("开始投屏");
-    screenCastActionButton->setText(action);
-    if (screenCastWindow->isVisible()) UIHelper::positionDrawer(screenCastWindow, geometry());
+    screenCastSubtitle->setText(screenCastController->statusText());
+    const bool streaming = state == ScreenCastController::Streaming || state == ScreenCastController::Stopping;
+    screenCastPill->setText(loading ? QStringLiteral("启动中")
+                          : streaming ? QStringLiteral("流式中") : QStringLiteral("未连接"));
+    screenCastPill->setProperty("state", loading ? "loading" : streaming ? "ok" : "off");
+    if (ball) {
+        ball->setCastState(loading ? FloatingBall::Loading
+                         : streaming ? FloatingBall::Streaming : FloatingBall::Idle);
+    }
     if (loading) {
         button->setText(QString());
         paintScreenCastSpinner();
         screenCastSpinnerTimer->start();
     } else {
         screenCastSpinnerTimer->stop();
-        button->setIcon(UIHelper::menuIcon(QStringLiteral("monitor-smartphone"), devicePixelRatioF()));
         button->setText(QString());
+        const QPixmap pixmap = UIHelper::menuIcon(QStringLiteral("monitor-smartphone"),
+                                                  devicePixelRatioF()).pixmap(24, 24);
+        button->setIcon(pixmap);
+        screenCastIconLabel->setPixmap(pixmap);
     }
+}
+
+void MenuWidget::updateDeviceRow()
+{
+    const auto mode = DeviceManager::instance()->currentMode();
+    const bool adb = mode == DeviceManager::ADB;
+    const bool fastboot = mode == DeviceManager::Fastboot;
+    devicePill->setText(adb ? QStringLiteral("已连接 · ADB")
+                      : fastboot ? QStringLiteral("已连接 · Fastboot") : QStringLiteral("未连接"));
+    devicePill->setProperty("state", adb ? "ok" : fastboot ? "loading" : "off");
 }
 
 void MenuWidget::paintScreenCastSpinner()
@@ -322,15 +777,37 @@ void MenuWidget::paintScreenCastSpinner()
     painter.drawArc(QRectF(3, 3, 18, 18), screenCastSpinnerAngle * 16, 260 * 16);
     painter.end();
     button->setIcon(QIcon(pixmap));
+    screenCastIconLabel->setPixmap(pixmap);
 }
 
 void MenuWidget::updatePosition()
 {
     QScreen *screen = QGuiApplication::primaryScreen();
-    if (!screen) return;
-    adjustSize();
+    if (!screen || !ball) return;
     const QRect area = screen->availableGeometry();
-    move(area.right() - width() - 15, area.center().y() - height() / 2);
+    ball->move(area.right() - ball->width() - 15, area.center().y() - ball->height() / 2);
+    positionPanel();
+}
+
+void MenuWidget::positionPanel()
+{
+    if (!ball) return;
+    QScreen *screen = QGuiApplication::screenAt(ball->geometry().center());
+    if (!screen) screen = QGuiApplication::primaryScreen();
+    if (!screen) return;
+    const QRect area = screen->availableGeometry();
+    int x = ball->geometry().left() - 10 - width();
+    x = std::max(area.left(), std::min(x, area.right() - width() + 1));
+    const int y = std::max(area.top(), std::min(ball->geometry().center().y() - height() / 2,
+                                                area.bottom() - height() + 1));
+    move(x, y);
+}
+
+void MenuWidget::showBall()
+{
+    if (!ball) return;
+    updatePosition();
+    ball->show();
 }
 
 void MenuWidget::onButtonClicked()
@@ -346,23 +823,19 @@ void MenuWidget::onButtonClicked()
         screenCastController->toggle();
         break;
     case RepairTools:
-        if (!repairWindow) repairWindow = new RepairWindow();
-        toggleSubmenu(RepairTools, repairWindow);
+        showSubmenu(RepairTools, ensureRepairWindow());
         break;
     case Payload:
-        if (!payloadWindow) payloadWindow = new PayloadWindow();
-        toggleSubmenu(Payload, payloadWindow);
+        showSubmenu(Payload, ensurePayloadWindow());
         break;
     case ExtractImg:
         extractImg();
         break;
     case DeviceCheck:
-        if (!deviceCheckWindow) deviceCheckWindow = new DeviceCheckWindow();
-        toggleSubmenu(DeviceCheck, deviceCheckWindow);
+        showSubmenu(DeviceCheck, ensureDeviceCheckWindow());
         break;
     case Configuration:
-        if (!configWindow) configWindow = new ConfigWindow();
-        toggleSubmenu(Configuration, configWindow);
+        showSubmenu(Configuration, ensureConfigWindow());
         break;
     case ContactAuthor:
         openAuthorImage();
@@ -371,7 +844,7 @@ void MenuWidget::onButtonClicked()
         cleanupAndExit();
         break;
     case Minimize:
-        minimizeWindows();
+        collapsePanel();
         break;
     }
 }
@@ -400,19 +873,6 @@ void MenuWidget::openAuthorImage()
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
             "找不到作者图片文件！\n路径: " + neilImagePath);
     }
-}
-
-void MenuWidget::minimizeWindows()
-{
-    const QList<QWidget *> windows = {
-        screenCastWindow, repairWindow, payloadWindow, deviceCheckWindow, configWindow
-    };
-    for (QWidget *window : windows) {
-        if (window && window->isVisible()) {
-            window->showMinimized();
-        }
-    }
-    showMinimized();
 }
 
 void MenuWidget::extractImg()
@@ -548,4 +1008,3 @@ void MenuWidget::onCleanupProcessFinished()
     qDebug() << "退出应用程序";
     QApplication::quit();
 }
-

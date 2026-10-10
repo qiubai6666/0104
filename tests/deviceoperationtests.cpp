@@ -418,8 +418,8 @@ void DeviceOperationTests::allSubmenusAcceptFiles()
     menu.show();
     QWidget *target = nullptr;
     if (submenu == -1) {
-        menu.screenCastWindow->show();
-        target = menu.screenCastWindow;
+        // 主页（面板本体）同样是合法拖放目标。
+        target = &menu;
     } else if (submenu >= 100) {
         menu.buttons[MenuWidget::RepairTools]->click();
         const int action = submenu == 100 ? RepairWindow::OugaFlash :

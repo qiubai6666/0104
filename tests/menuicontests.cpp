@@ -10,7 +10,8 @@
 
 namespace {
 const QStringList names = {"monitor-smartphone", "wrench", "package-open", "file-down",
-    "smartphone", "sliders-horizontal", "message-circle", "power", "panel-right-close"};
+    "smartphone", "sliders-horizontal", "message-circle", "power", "panel-right-close",
+    "command", "heart", "chevron-left"};
 const QList<qreal> scales = {1.0, 1.25, 1.5, 1.5625, 1.75, 2.0, 2.5, 3.0};
 QImage renderButton(MainMenuButton &button, qreal ratio = 1.0)
 {
@@ -377,7 +378,7 @@ private slots:
         QPainter painter(&sheet);
         painter.setFont(QFont(QStringLiteral("Segoe UI"), 11));
         painter.setPen(QColor("#385565"));
-        painter.drawText(18, 24, "OrangeTools: actual menuIcon output / 9 icons / 8 DPI scales");
+        painter.drawText(18, 24, "OrangeTools: actual menuIcon output / 12 icons / 8 DPI scales");
         for (int row = 0; row < scales.size(); ++row) {
             const qreal ratio = scales[row];
             painter.drawText(18, 60 + row * 112, QString::number(ratio * 100) + "%");

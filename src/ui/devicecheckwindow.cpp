@@ -129,9 +129,11 @@ DeviceCheckWindow::DeviceCheckWindow(QWidget *parent)
 {
     setAcceptDrops(true);
 
-    // 设置窗口标志：无边框、置顶
-    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    setAttribute(Qt::WA_TranslucentBackground);
+    if (!parentWidget()) {
+        // 独立窗口：无边框、置顶；嵌入控制中心面板时保持普通子控件。
+        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+    }
     // The main menu owns this persistent submenu. Closing only hides it;
     // never destroy child QProcesses or trigger application exit here.
     setAttribute(Qt::WA_DeleteOnClose, false);
@@ -393,7 +395,7 @@ void DeviceCheckWindow::finishFileTransfer(const QString &interruption)
 
 void DeviceCheckWindow::setupUI()
 {
-    UIHelper::applyFloatingSurface(this);
+    if (isWindow()) UIHelper::applyFloatingSurface(this);
     QWidget *container = this;
     mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(4);
@@ -904,6 +906,11 @@ void DeviceCheckWindow::performFlash(const QString &partition, const QString &im
 
 void DeviceCheckWindow::mousePressEvent(QMouseEvent *event)
 {
+    if (!isWindow()) {
+        // 面板内嵌页不支持拖动窗口。
+        event->ignore();
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         // 拖动时设置不透明，提高流畅度
         setWindowOpacity(1.0);

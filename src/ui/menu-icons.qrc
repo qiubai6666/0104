@@ -9,5 +9,8 @@
     <file alias="message-circle.svg">../../assets/menu/message-circle.svg</file>
     <file alias="power.svg">../../assets/menu/power.svg</file>
     <file alias="panel-right-close.svg">../../assets/menu/panel-right-close.svg</file>
+    <file alias="command.svg">../../assets/menu/command.svg</file>
+    <file alias="heart.svg">../../assets/menu/heart.svg</file>
+    <file alias="chevron-left.svg">../../assets/menu/chevron-left.svg</file>
   </qresource>
 </RCC>

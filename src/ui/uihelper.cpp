@@ -24,19 +24,23 @@ protected:
         auto *window = qobject_cast<QWidget *>(object);
         if (!window) return false;
         const bool capsule = window->property("floatingCapsule").toBool();
+        const bool controlCenter = window->property("controlCenterSurface").toBool();
         const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
-        QColor fill = capsule ? (dark ? QColor(39, 56, 64) : QColor(195, 219, 228))
-                              : (dark ? QColor(35, 42, 48) : QColor(255, 255, 255));
-        fill.setAlpha(capsule ? 102 : 184);
+        QColor fill = controlCenter ? (dark ? QColor(35, 42, 48) : QColor(255, 255, 255))
+                                  : capsule ? (dark ? QColor(39, 56, 64) : QColor(195, 219, 228))
+                                  : (dark ? QColor(35, 42, 48) : QColor(255, 255, 255));
+        fill.setAlpha(controlCenter ? 216 : capsule ? 102 : 184);
         QPainter painter(window);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setBrush(fill);
-        const qreal borderWidth = capsule ? 1.0 : 1.5;
-        const QColor border = capsule
+        const qreal borderWidth = controlCenter || !capsule ? 1.5 : 1.0;
+        const QColor border = controlCenter
+            ? (dark ? QColor(156, 193, 214, 160) : QColor(105, 142, 162, 180))
+            : capsule
             ? (dark ? QColor(255, 255, 255, 32) : QColor(255, 255, 255, 180))
             : (dark ? QColor(156, 193, 214, 160) : QColor(105, 142, 162, 180));
         painter.setPen(QPen(border, borderWidth));
-        const qreal radius = capsule ? window->width() / 2.0 : 28;
+        const qreal radius = controlCenter ? 24 : capsule ? window->width() / 2.0 : 28;
         // Keep the full antialiased outline inside the translucent window.
         const qreal inset = borderWidth / 2.0;
         painter.drawRoundedRect(QRectF(window->rect()).adjusted(inset, inset, -inset, -inset), radius, radius);
@@ -65,6 +69,17 @@ void UIHelper::applyFloatingSurface(QWidget *window, bool capsule)
     window->setProperty("surfaceRadius", capsule ? MainMenuWidth / 2 : 28);
     if (!capsule) window->setFixedSize(DrawerWidth, DrawerHeight);
     window->installEventFilter(new FloatingSurfacePainter(window));
+}
+
+void UIHelper::applyControlCenterSurface(QWidget *panel)
+{
+    panel->setAttribute(Qt::WA_TranslucentBackground);
+    panel->setAttribute(Qt::WA_QuitOnClose, false);
+    panel->setProperty("floatingCapsule", false);
+    panel->setProperty("controlCenterSurface", true);
+    panel->setProperty("surfaceOpacity", .85);
+    panel->setProperty("surfaceRadius", 24);
+    panel->installEventFilter(new FloatingSurfacePainter(panel));
 }
 
 QIcon UIHelper::menuIcon(const QString &name, qreal ratio)
@@ -109,9 +124,10 @@ QString UIHelper::textButtonStyle()
 
 QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayout *layout,
     const QString &title, const QString &subtitle, const QStringList &texts,
-    int splitIndex, const QString &firstGroup, const QString &secondGroup)
+    int splitIndex, const QString &firstGroup, const QString &secondGroup,
+    bool floating)
 {
-    applyFloatingSurface(parent);
+    if (floating) applyFloatingSurface(parent);
     layout->setContentsMargins(DrawerHorizontalMargin, DrawerVerticalMargin,
                               DrawerHorizontalMargin, DrawerVerticalMargin);
     layout->setSpacing(4);
@@ -161,7 +177,7 @@ QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayou
         layout->addLayout(grid);
     }
     layout->addStretch(1);
-    parent->adjustSize();
+    if (floating) parent->adjustSize();
     return result;
 }
 
