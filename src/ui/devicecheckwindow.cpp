@@ -222,6 +222,7 @@ void DeviceCheckWindow::finishOperation()
         waitTimer = nullptr;
     }
     fileTransfer = FileTransfer();
+    fileTransferSource.clear();
     pendingFlashPartition.clear();
     pendingFlashImage.clear();
     DeviceOperationLease::release(this);
@@ -273,7 +274,7 @@ bool DeviceCheckWindow::canAcceptFileTransfer() const
            && !operationInProgress && (!owner || owner == this);
 }
 
-QStringList DeviceCheckWindow::droppedFiles(const QMimeData *mime) const
+QStringList DeviceCheckWindow::droppedFiles(const QMimeData *mime)
 {
     QStringList files;
     if (!mime || !mime->hasUrls()) return files;
@@ -315,9 +316,10 @@ void DeviceCheckWindow::dropEvent(QDropEvent *event)
     }
 }
 
-bool DeviceCheckWindow::transferFiles(const QStringList &files)
+bool DeviceCheckWindow::transferFiles(const QStringList &files, QWidget *source)
 {
     if (files.isEmpty() || !canAcceptFileTransfer() || !beginOperation()) return false;
+    fileTransferSource = source ? source : this;
     fileTransfer.files = files;
     fileTransfer.serial = DeviceManager::instance()->deviceSerial();
     transferNextFile();
@@ -381,9 +383,12 @@ void DeviceCheckWindow::finishFileTransfer(const QString &interruption)
     // Bound the dialog size even when a large batch fails.
     for (const QString &error : fileTransfer.failures.mid(0, 5)) message += "\n" + error;
     if (fileTransfer.failures.size() > 5) message += QStringLiteral("\n其余失败文件未展开。");
+    // The persistent device window owns the queue, but feedback belongs to the
+    // submenu where the drop happened. A hidden/destroyed source cannot stop it.
+    const QPointer<QWidget> source = fileTransferSource;
     finishOperation();
     UIHelper::showCenteredMessageBox(success ? QMessageBox::Information : QMessageBox::Warning,
-                                    success ? "文件传输完成" : "文件传输未全部完成", message, this);
+                                    success ? "文件传输完成" : "文件传输未全部完成", message, source.data());
 }
 
 void DeviceCheckWindow::setupUI()

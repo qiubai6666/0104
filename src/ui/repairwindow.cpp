@@ -135,6 +135,12 @@ void RepairWindow::onButtonClicked()
     }
 }
 
+bool RepairWindow::ownsToolWindow(const QWidget *window) const
+{
+    // Tool windows intentionally have no native parent for their taskbar entry.
+    return window && (window == ougaWindow || window == xiaomiWindow || window == openListWindow);
+}
+
 bool RepairWindow::setButtonsEnabled(bool enabled)
 {
     if (!enabled && !DeviceOperationLease::acquire(this)) return false;

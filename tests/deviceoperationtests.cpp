@@ -14,6 +14,9 @@
 #include "menuwidget.h"
 #include "repairwindow.h"
 #include "payloadwindow.h"
+#include "configwindow.h"
+#include <QLineEdit>
+#include <QDragMoveEvent>
 #include <QCheckBox>
 #include <QLabel>
 #include "devicemanager.h"
@@ -91,6 +94,13 @@ private slots:
     void menuStartsMonitoringWithoutOtherWindows();
     void repairStartsMonitoringWithoutOtherWindows();
     void droppedFilesReachSharedStorage();
+    void allSubmenusAcceptFiles_data();
+    void allSubmenusAcceptFiles();
+    void submenuDropOverEditorCopiesFile();
+    void submenuTransferSurvivesSwitchAndRejectsSecondDrop();
+    void submenuDropRechecksModeAndLease_data();
+    void submenuDropRechecksModeAndLease();
+    void unrelatedWindowsAndFoldersDoNotTransfer();
     void invalidDropsAreRejected_data();
     void invalidDropsAreRejected();
     void dropRechecksModeAndLease();
@@ -109,7 +119,7 @@ private slots:
 private:
     void awaitFastboot(DeviceCheckWindow &window);
     void awaitAdb(DeviceCheckWindow &window);
-    bool dropFiles(DeviceCheckWindow &window, const QList<QUrl> &urls);
+    bool dropFiles(QWidget &window, const QList<QUrl> &urls);
     QList<QJsonArray> pushes() const;
     QString lastMessage;
     QString audit() const {
@@ -125,6 +135,8 @@ private:
 
 void DeviceOperationTests::initTestCase()
 {
+    // All UI tests are offline, including lazily-opened Openlist pages.
+    QNetworkProxy::setApplicationProxy(QNetworkProxy(QNetworkProxy::HttpProxy, QStringLiteral("127.0.0.1"), 1));
     QCoreApplication::setOrganizationName("OrangeToolsTests");
     QCoreApplication::setApplicationName("DeviceOperationTests");
     QSettings::setDefaultFormat(QSettings::IniFormat);
@@ -333,7 +345,8 @@ void DeviceOperationTests::cleanup()
     ProcessManager::stopAllProcesses();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     QCOMPARE(manager->m_fullModeRefCount, 0);
-    QCOMPARE(manager->m_adbOnlyRefCount, 0);
+    // Native tool windows are released after their retained launcher is deleted.
+    QTRY_COMPARE(manager->m_adbOnlyRefCount, 0);
     manager->m_isPaused = false;
     manager->m_isChecking = false;
     manager->m_currentMode = DeviceManager::None;
@@ -360,7 +373,7 @@ void DeviceOperationTests::awaitAdb(DeviceCheckWindow &window)
     window.updateUIForMode(DeviceManager::ADB);
 }
 
-bool DeviceOperationTests::dropFiles(DeviceCheckWindow &window, const QList<QUrl> &urls)
+bool DeviceOperationTests::dropFiles(QWidget &window, const QList<QUrl> &urls)
 {
     QMimeData mime;
     mime.setUrls(urls);
@@ -383,6 +396,202 @@ QList<QJsonArray> DeviceOperationTests::pushes() const
         if (command.contains("push")) result.append(command);
     }
     return result;
+}
+
+void DeviceOperationTests::allSubmenusAcceptFiles_data()
+{
+    QTest::addColumn<int>("submenu");
+    QTest::newRow("screen-cast") << -1;
+    QTest::newRow("repair") << int(MenuWidget::RepairTools);
+    QTest::newRow("payload") << int(MenuWidget::Payload);
+    QTest::newRow("device-check") << int(MenuWidget::DeviceCheck);
+    QTest::newRow("configuration") << int(MenuWidget::Configuration);
+    QTest::newRow("ouga-flash") << 100;
+    QTest::newRow("xiaomi-flash") << 101;
+    QTest::newRow("openlist") << 102;
+}
+
+void DeviceOperationTests::allSubmenusAcceptFiles()
+{
+    QFETCH(int, submenu);
+    MenuWidget menu;
+    menu.show();
+    QWidget *target = nullptr;
+    if (submenu == -1) {
+        menu.screenCastWindow->show();
+        target = menu.screenCastWindow;
+    } else if (submenu >= 100) {
+        menu.buttons[MenuWidget::RepairTools]->click();
+        const int action = submenu == 100 ? RepairWindow::OugaFlash :
+                           submenu == 101 ? RepairWindow::XiaomiFlash : RepairWindow::OpenList;
+        menu.repairWindow->buttons[action]->click();
+        target = submenu == 100 ? static_cast<QWidget *>(menu.repairWindow->ougaWindow) :
+                 submenu == 101 ? static_cast<QWidget *>(menu.repairWindow->xiaomiWindow) :
+                                  static_cast<QWidget *>(menu.repairWindow->openListWindow);
+    } else {
+        menu.buttons[submenu]->click();
+        target = submenu == MenuWidget::RepairTools ? static_cast<QWidget *>(menu.repairWindow) :
+                 submenu == MenuWidget::Payload ? static_cast<QWidget *>(menu.payloadWindow) :
+                 submenu == MenuWidget::DeviceCheck ? static_cast<QWidget *>(menu.deviceCheckWindow) :
+                                                      static_cast<QWidget *>(menu.configWindow);
+    }
+    QVERIFY(target);
+    QVERIFY(target->acceptDrops());
+    QVERIFY(putFile(fixturePath + "/mode.txt", "adb"));
+    QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->currentMode(), DeviceManager::ADB, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!DeviceManager::instance()->m_infoQueryActive, 5000);
+    DeviceManager::instance()->m_checkTimer->stop();
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "success"));
+    const QString path = fixturePath + QStringLiteral("/中文 文件's;&.txt");
+    QVERIFY(putFile(path, "original contents"));
+    const bool hadDeviceWindow = menu.deviceCheckWindow;
+    QVERIFY(dropFiles(*target, {QUrl::fromLocalFile(path)}));
+    QVERIFY(menu.deviceCheckWindow);
+    QVERIFY(menu.deviceCheckWindow->operationInProgress);
+    QCOMPARE(menu.deviceCheckWindow->fileTransferSource.data(), target);
+    QCOMPARE(DeviceOperationLease::owner(), menu.deviceCheckWindow);
+    if (!hadDeviceWindow) QVERIFY(!menu.deviceCheckWindow->isVisible());
+    QTRY_VERIFY_WITH_TIMEOUT(!menu.deviceCheckWindow->operationInProgress, 5000);
+    QTRY_COMPARE(messages, 1);
+    QCOMPARE(pushes().size(), 1);
+    QVERIFY(pushes().contains(QJsonArray{"adb", "-s", "mock-serial", "push", path,
+                                       "/sdcard/" + QFileInfo(path).fileName()}));
+    QCOMPARE(readFile(path), QByteArray("original contents"));
+    const QString snapshots = qEnvironmentVariable("ORANGE_UI_SNAPSHOT_DIR");
+    if (!snapshots.isEmpty()) {
+        QVERIFY(QDir().mkpath(snapshots));
+        QVERIFY(target->grab().save(snapshots + '/' + QString::fromLatin1(QTest::currentDataTag()) + ".png"));
+    }
+}
+
+void DeviceOperationTests::submenuDropOverEditorCopiesFile()
+{
+    MenuWidget menu;
+    menu.show();
+    menu.buttons[MenuWidget::Payload]->click();
+    auto *editor = menu.payloadWindow->findChild<QLineEdit *>();
+    QVERIFY(editor);
+    // Native drop targets must not insert the local path or consume the drop.
+    editor->setAcceptDrops(true);
+    editor->setText("keep editor text");
+    QVERIFY(putFile(fixturePath + "/mode.txt", "adb"));
+    QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->currentMode(), DeviceManager::ADB, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!DeviceManager::instance()->m_infoQueryActive, 5000);
+    DeviceManager::instance()->m_checkTimer->stop();
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "success"));
+    const QString path = fixturePath + "/editor-drop.txt";
+    QVERIFY(putFile(path, "contents"));
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(path)});
+    QDragEnterEvent enter(QPoint(5, 5), Qt::CopyAction | Qt::MoveAction, &mime,
+                         Qt::LeftButton, Qt::ShiftModifier);
+    QApplication::sendEvent(editor, &enter);
+    QVERIFY(enter.isAccepted());
+    QCOMPARE(enter.dropAction(), Qt::CopyAction);
+    QDragMoveEvent move(QPoint(5, 5), Qt::CopyAction | Qt::MoveAction, &mime,
+                       Qt::LeftButton, Qt::ShiftModifier);
+    QApplication::sendEvent(editor, &move);
+    QVERIFY(move.isAccepted());
+    QCOMPARE(move.dropAction(), Qt::CopyAction);
+    QDropEvent drop(QPointF(5, 5), Qt::CopyAction | Qt::MoveAction, &mime,
+                    Qt::LeftButton, Qt::ShiftModifier);
+    QApplication::sendEvent(editor, &drop);
+    QVERIFY(drop.isAccepted());
+    QCOMPARE(drop.dropAction(), Qt::CopyAction);
+    QTRY_VERIFY_WITH_TIMEOUT(!menu.deviceCheckWindow->operationInProgress, 5000);
+    QTRY_COMPARE(messages, 1);
+    QCOMPARE(editor->text(), QString("keep editor text"));
+    QCOMPARE(pushes().size(), 1);
+    QVERIFY(QFile::exists(path));
+}
+
+void DeviceOperationTests::submenuTransferSurvivesSwitchAndRejectsSecondDrop()
+{
+    MenuWidget menu;
+    menu.show();
+    menu.buttons[MenuWidget::DeviceCheck]->click();
+    awaitAdb(*menu.deviceCheckWindow);
+    menu.buttons[MenuWidget::RepairTools]->click();
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "hang"));
+    const QString path = fixturePath + "/retained-drop.txt";
+    QVERIFY(putFile(path, "contents"));
+    QVERIFY(dropFiles(*menu.repairWindow, {QUrl::fromLocalFile(path)}));
+    QTRY_COMPARE(menu.deviceCheckWindow->currentProcess->state(), QProcess::Running);
+    menu.buttons[MenuWidget::Configuration]->click();
+    QVERIFY(!menu.repairWindow->isVisible());
+    QVERIFY(!dropFiles(*menu.configWindow, {QUrl::fromLocalFile(path)}));
+    QCOMPARE(menu.deviceCheckWindow->currentProcess->state(), QProcess::Running);
+    QCOMPARE(DeviceOperationLease::owner(), menu.deviceCheckWindow);
+    QTRY_COMPARE(pushes().size(), 1);
+    menu.deviceCheckWindow->currentProcess->kill();
+    QTRY_VERIFY_WITH_TIMEOUT(!menu.deviceCheckWindow->operationInProgress, 5000);
+    QTRY_COMPARE(messages, 1);
+    QVERIFY(!DeviceOperationLease::owner());
+}
+
+void DeviceOperationTests::submenuDropRechecksModeAndLease_data()
+{
+    QTest::addColumn<int>("change");
+    QTest::newRow("disconnected") << 0;
+    QTest::newRow("fastboot") << 1;
+    QTest::newRow("lease-held") << 2;
+    QTest::newRow("move-only") << 3;
+}
+
+void DeviceOperationTests::submenuDropRechecksModeAndLease()
+{
+    QFETCH(int, change);
+    MenuWidget menu;
+    menu.show();
+    menu.buttons[MenuWidget::DeviceCheck]->click();
+    awaitAdb(*menu.deviceCheckWindow);
+    menu.buttons[MenuWidget::Configuration]->click();
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(ResourceExtractor::getAdbPath())});
+    QDragEnterEvent enter(QPoint(30, 80), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(menu.configWindow, &enter);
+    QVERIFY(enter.isAccepted());
+    QObject other;
+    if (change == 0) DeviceManager::instance()->setDetectedDevice(DeviceManager::None, {});
+    if (change == 1) DeviceManager::instance()->setDetectedDevice(DeviceManager::Fastboot, "mock-serial");
+    if (change == 2) QVERIFY(DeviceOperationLease::acquire(&other));
+    QDropEvent drop(QPointF(30, 80), change == 3 ? Qt::MoveAction : Qt::CopyAction,
+                    &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(menu.configWindow, &drop);
+    QVERIFY(!drop.isAccepted());
+    QCOMPARE(pushes().size(), 0);
+    QVERIFY(!menu.deviceCheckWindow->operationInProgress);
+    if (change == 2) DeviceOperationLease::release(&other);
+}
+
+void DeviceOperationTests::unrelatedWindowsAndFoldersDoNotTransfer()
+{
+    MenuWidget menu;
+    menu.show();
+    menu.buttons[MenuWidget::RepairTools]->click();
+    menu.repairWindow->buttons[RepairWindow::OugaFlash]->click();
+    QVERIFY(putFile(fixturePath + "/mode.txt", "adb"));
+    QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->currentMode(), DeviceManager::ADB, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!DeviceManager::instance()->m_infoQueryActive, 5000);
+    DeviceManager::instance()->m_checkTimer->stop();
+    QWidget unrelated;
+    unrelated.setAcceptDrops(true);
+    QVERIFY(!menu.fileDropSurface(&unrelated));
+    QVERIFY(!dropFiles(unrelated, {QUrl::fromLocalFile(ResourceExtractor::getAdbPath())}));
+    QMessageBox dialog(menu.repairWindow);
+    QVERIFY(!menu.fileDropSurface(&dialog));
+    QMimeData folder;
+    folder.setUrls({QUrl::fromLocalFile(fixturePath)});
+    QVERIFY(DeviceCheckWindow::droppedFiles(&folder).isEmpty());
+    QDragEnterEvent enter(QPoint(30, 80), Qt::CopyAction, &folder, Qt::LeftButton, Qt::NoModifier);
+    // The existing after-sales flash-folder handler still sees the folder drag.
+    auto *sales = menu.repairWindow->ougaWindow->findChild<QCheckBox *>("AfterSalesPackageModeCheckBox");
+    QVERIFY(sales);
+    sales->setChecked(true);
+    QApplication::sendEvent(menu.repairWindow->ougaWindow, &enter);
+    QVERIFY(enter.isAccepted());
+    QVERIFY(!menu.deviceCheckWindow);
+    QCOMPARE(pushes().size(), 0);
 }
 
 void DeviceOperationTests::droppedFilesReachSharedStorage()

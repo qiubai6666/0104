@@ -53,6 +53,7 @@ protected:
     void moveEvent(QMoveEvent *event) override;
 
 private:
+    friend class MenuWidget;
     friend class DeviceOperationTests;
     friend class DeviceInformationTests;
     bool beginOperation();
@@ -60,8 +61,8 @@ private:
     QProcess *createOperationProcess();
     void releaseOperationProcess(QProcess *process);
     bool canAcceptFileTransfer() const;
-    QStringList droppedFiles(const QMimeData *mime) const;
-    bool transferFiles(const QStringList &files);
+    static QStringList droppedFiles(const QMimeData *mime);
+    bool transferFiles(const QStringList &files, QWidget *source = nullptr);
     void transferNextFile();
     void finishFileTransferProcess(QProcess *process, bool success, bool failedToStart = false);
     void finishFileTransfer(const QString &interruption = QString());
@@ -96,6 +97,7 @@ private:
         int succeeded = 0;
         QStringList failures;
     } fileTransfer;
+    QPointer<QWidget> fileTransferSource;
 
     // 拖动相关
     bool isDragging;

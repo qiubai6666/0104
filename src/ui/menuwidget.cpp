@@ -17,6 +17,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QList>
 #include <QPushButton>
@@ -30,6 +31,9 @@
 #include <QIcon>
 #include <QLabel>
 #include <QEvent>
+#include <QDialog>
+#include <QDropEvent>
+#include <QMimeData>
 
 
 MenuWidget::MenuWidget(QWidget *parent)
@@ -50,6 +54,9 @@ MenuWidget::MenuWidget(QWidget *parent)
     setWindowTitle(APP_NAME);
 
     setupUI();
+    // Scope the application filter to our submenus, including their controls
+    // and lazily-created tool windows. Unrelated windows keep their own drops.
+    qApp->installEventFilter(this);
     updatePosition();
     // 主菜单持续持有 ADB 监控，修复/提取入口不再依赖先打开其他窗口。
     DeviceManager::instance()->ensureAdbOnlyMonitoring();
@@ -57,6 +64,7 @@ MenuWidget::MenuWidget(QWidget *parent)
 
 MenuWidget::~MenuWidget()
 {
+    qApp->removeEventFilter(this);
     screenCastSpinnerTimer->stop();
     delete screenCastController;
     DeviceManager::instance()->releaseAdbOnlyMonitoring();
@@ -126,7 +134,6 @@ void MenuWidget::setupScreenCastWindow()
     screenCastWindow->setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     screenCastWindow->setWindowTitle(QStringLiteral("手机投屏"));
     UIHelper::applyFloatingSurface(screenCastWindow);
-    screenCastWindow->installEventFilter(this);
     auto *layout = new QVBoxLayout(screenCastWindow);
     layout->setContentsMargins(22, 20, 22, 20);
     layout->setSpacing(12);
@@ -154,7 +161,6 @@ void MenuWidget::toggleSubmenu(MenuAction action, QWidget *window)
     for (QWidget *other : windows) if (other && other != window) other->hide();
     if (wasVisible) window->hide();
     else {
-        window->installEventFilter(this);
         UIHelper::positionDrawer(window, geometry());
         window->showNormal();
         window->raise();
@@ -176,11 +182,89 @@ void MenuWidget::updateMenuSelection()
     }
 }
 
+QWidget *MenuWidget::fileDropSurface(QWidget *widget) const
+{
+    // Message boxes and file pickers keep their own interaction semantics.
+    if (!widget) return nullptr;
+    if (qobject_cast<QDialog *>(widget->window()) && widget->window() != payloadWindow) return nullptr;
+    if (repairWindow && repairWindow->ownsToolWindow(widget->window())) return widget->window();
+    const QList<QWidget *> roots = {screenCastWindow, repairWindow, payloadWindow,
+                                   deviceCheckWindow, configWindow};
+    for (QWidget *root : roots) {
+        if (root && (widget == root || root->isAncestorOf(widget))) return widget->window();
+    }
+    return nullptr;
+}
+
+bool MenuWidget::canAcceptFileTransfer() const
+{
+    if (deviceCheckWindow) return deviceCheckWindow->canAcceptFileTransfer();
+    const auto *manager = DeviceManager::instance();
+    return manager->currentMode() == DeviceManager::ADB && !manager->deviceSerial().isEmpty()
+           && !DeviceOperationLease::busyFor();
+}
+
+bool MenuWidget::handleFileDrop(QWidget *surface, QEvent *event)
+{
+    auto *drop = static_cast<QDropEvent *>(event);
+    const QStringList files = DeviceCheckWindow::droppedFiles(drop->mimeData());
+    if (files.isEmpty()) {
+        const auto *mime = drop->mimeData();
+        if (!mime || !mime->hasUrls()) return false;
+        // Preserve the flash-package selector only for pure local-folder drops.
+        // Invalid/mixed batches must not fall through to native text editors.
+        bool foldersOnly = !mime->urls().isEmpty();
+        for (const QUrl &url : mime->urls())
+            foldersOnly &= url.isLocalFile() && QFileInfo(url.toLocalFile()).isDir();
+        if (foldersOnly) return false;
+        drop->ignore();
+        return true;
+    }
+    if (!drop->possibleActions().testFlag(Qt::CopyAction) || !canAcceptFileTransfer()) {
+        drop->ignore();
+        return true;
+    }
+    if (event->type() == QEvent::Drop) {
+        if (!deviceCheckWindow) deviceCheckWindow = new DeviceCheckWindow();
+        if (!deviceCheckWindow->transferFiles(files, surface)) {
+            drop->ignore();
+            return true;
+        }
+    }
+    // Always copy, including when Explorer proposes MoveAction.
+    drop->setDropAction(Qt::CopyAction);
+    drop->accept();
+    return true;
+}
+
 bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched != this && (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
-                           event->type() == QEvent::WindowStateChange)) {
-        updateMenuSelection();
+    // Do not walk widget ancestry for paint, timer or ordinary input events.
+    const auto type = event->type();
+    if (type != QEvent::Show && type != QEvent::Hide && type != QEvent::WindowStateChange &&
+        type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::Drop)
+        return QWidget::eventFilter(watched, event);
+    auto *widget = qobject_cast<QWidget *>(watched);
+    QWidget *surface = fileDropSurface(widget);
+    if (surface) {
+        if (event->type() == QEvent::Show && widget == surface) {
+            surface->setAcceptDrops(true);
+            if (!surface->property("phoneFileDropTarget").toBool()) {
+                surface->setProperty("phoneFileDropTarget", true);
+                const QString hint = QStringLiteral("ADB 模式下拖入文件传到手机 /sdcard/（同名文件会覆盖）");
+                surface->setToolTip(surface->toolTip().isEmpty() ? hint : surface->toolTip() + '\n' + hint);
+            }
+        }
+        if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove ||
+            event->type() == QEvent::Drop) {
+            return handleFileDrop(surface, event);
+        }
+        if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+            event->type() == QEvent::WindowStateChange) {
+            const QList<QWidget *> roots = {screenCastWindow, repairWindow, payloadWindow,
+                                           deviceCheckWindow, configWindow};
+            if (roots.contains(widget)) updateMenuSelection();
+        }
     }
     return QWidget::eventFilter(watched, event);
 }

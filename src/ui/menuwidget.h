@@ -49,6 +49,9 @@ private:
     void setupScreenCastWindow();
     void toggleSubmenu(MenuAction action, QWidget *window);
     void updateMenuSelection();
+    QWidget *fileDropSurface(QWidget *widget) const;
+    bool handleFileDrop(QWidget *surface, QEvent *event);
+    bool canAcceptFileTransfer() const;
     void updatePosition();
     void extractImg();
     void cleanupAndExit();

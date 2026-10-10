@@ -24,6 +24,7 @@ public:
 
     void setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight);
     bool hasActiveOugaTask() const;
+    bool ownsToolWindow(const QWidget *window) const;
 protected:
     void closeEvent(QCloseEvent *event) override;
 

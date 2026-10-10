@@ -1,6 +1,7 @@
 #include "devicemanager.h"
 #include "deviceinfowindow.h"
 #include "devicecheckwindow.h"
+#include "uihelper.h"
 #include "deviceoperationlease.h"
 #include "processmanager.h"
 #include "resourceextractor.h"
@@ -300,9 +301,11 @@ private slots:
         window.onDeviceInfoUpdated(details());
         window.show();
         QCoreApplication::processEvents();
-        QCOMPARE(window.size(), QSize(252, menuHeight));
-        QCOMPARE(window.pos(), QPoint(248, 100));
-        QCOMPARE(window.infoLabel->font().pixelSize(), 10);
+        QCOMPARE(window.size(), QSize(UIHelper::DrawerWidth, UIHelper::DrawerHeight));
+        const QRect menuRect(500, 100, UIHelper::MainMenuWidth, menuHeight);
+        QCOMPARE(window.pos(), QPoint(menuRect.left() - UIHelper::DrawerWidth - 12,
+                                      menuRect.center().y() - UIHelper::DrawerHeight / 2));
+        QCOMPARE(window.infoLabel->font().pixelSize(), 12);
         QCOMPARE(window.infoLabel->palette().color(QPalette::WindowText), QColor("#555"));
         QCOMPARE(window.statusLabel->font().pixelSize(), 13);
         QCOMPARE(window.statusLabel->palette().color(QPalette::WindowText), QColor("#2c3e50"));
@@ -318,14 +321,17 @@ private slots:
             QCOMPARE(buttons[i]->text(), texts[i]);
             QCOMPARE(buttons[i]->height(), 34);
             QCOMPARE(buttons[i]->font().pixelSize(), 13);
-            QCOMPARE(buttons[i]->palette().color(QPalette::Active, QPalette::ButtonText), QColor(Qt::white));
+            const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+            QCOMPARE(buttons[i]->palette().color(QPalette::Active, QPalette::ButtonText),
+                     i < 2 ? QColor(Qt::white) : QColor(dark ? "#e9edf3" : "#2c3e50"));
             QVERIFY(window.rect().contains(QRect(buttons[i]->mapTo(&window, QPoint()), buttons[i]->size())));
         }
         const int footerY = window.bootButton->mapTo(&window, QPoint()).y();
         QCOMPARE(footerY, window.initBootButton->mapTo(&window, QPoint()).y());
-        QCOMPARE(menuHeight - (footerY + window.bootButton->height()), 12);
+        QCOMPARE(window.height() - (footerY + window.bootButton->height()), UIHelper::DrawerVerticalMargin);
         QVERIFY(window.executeButton->mapTo(&window, QPoint()).y() > window.rebootComboBox->mapTo(&window, window.rebootComboBox->rect().bottomRight()).y());
-        QVERIFY(window.cmdButton->mapTo(&window, QPoint()).y() > window.executeButton->mapTo(&window, window.executeButton->rect().bottomRight()).y());
+        QCOMPARE(window.cmdButton->mapTo(&window, QPoint()).y(), window.executeButton->mapTo(&window, QPoint()).y());
+        QVERIFY(window.cmdButton->mapTo(&window, QPoint()).x() > window.executeButton->mapTo(&window, window.executeButton->rect().bottomRight()).x());
         QVERIFY(footerY > window.cmdButton->mapTo(&window, window.cmdButton->rect().bottomRight()).y());
         const bool connected = mode != DeviceManager::None;
         QCOMPARE(window.executeButton->isEnabled(), connected);
