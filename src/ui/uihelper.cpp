@@ -130,52 +130,75 @@ QString UIHelper::textButtonStyle()
 QVector<QPushButton *> UIHelper::createDrawerButtons(QWidget *parent, QVBoxLayout *layout,
     const QString &title, const QString &subtitle, const QStringList &texts,
     int splitIndex, const QString &firstGroup, const QString &secondGroup,
-    bool floating)
+    bool floating, const QStringList &icons)
 {
+    // 嵌入控制中心时按预览稿子页渲染：标题由面板头部承担，页内仅保留
+    // 分组标签与带图标的行按钮；独立抽屉（回归测试替身）维持原样。
+    const bool embedded = !floating;
     if (floating) applyFloatingSurface(parent);
-    layout->setContentsMargins(DrawerHorizontalMargin, DrawerVerticalMargin,
-                              DrawerHorizontalMargin, DrawerVerticalMargin);
-    layout->setSpacing(4);
+    layout->setContentsMargins(embedded ? 12 : DrawerHorizontalMargin,
+                              embedded ? 2 : DrawerVerticalMargin,
+                              embedded ? 14 : DrawerHorizontalMargin,
+                              embedded ? 10 : DrawerVerticalMargin);
+    layout->setSpacing(embedded ? 0 : 4);
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    const QColor inkDim(dark ? "#93a7b6" : "#647585");
     parent->setStyleSheet(QString("QLabel {background:transparent; color:%1; font-family:'Segoe UI','Microsoft YaHei';}")
                          .arg(dark ? "#e9edf3" : "#2c3e50"));
-    if (!subtitle.isEmpty()) {
+    if (!subtitle.isEmpty() && !embedded) {
         auto *label = new QLabel(subtitle, parent);
         label->setStyleSheet("font-size:11px; color:#71808d;");
         layout->addWidget(label);
     }
-    auto *heading = new QLabel(title, parent);
-    heading->setStyleSheet("font-size:17px; font-weight:normal;");
-    layout->addWidget(heading);
+    if (!embedded) {
+        auto *heading = new QLabel(title, parent);
+        heading->setStyleSheet("font-size:17px; font-weight:normal;");
+        layout->addWidget(heading);
+    }
+    // 预览稿 .rb：透明底、13px 墨色文字、悬停 accent 淡底。
+    const QString rowStyle = QString(
+        "QPushButton { background:transparent; border:none; border-radius:10px;"
+        " color:%1; font-size:13px; padding:0 10px; text-align:left; }"
+        "QPushButton:hover { background:rgba(47,128,237,26); color:%2; }"
+        "QPushButton:pressed { background:rgba(47,128,237,44); }")
+        .arg(dark ? "#e9edf3" : "#22364a", dark ? "#3f8cf2" : "#2F80ED");
     QVector<QPushButton *> result;
     for (int group = 0; group < 2; ++group) {
         const int begin = group == 0 ? 0 : splitIndex;
         const int end = group == 0 ? splitIndex : texts.size();
         if (begin == end) continue;
-        layout->addSpacing(8);
+        layout->addSpacing(embedded ? 6 : 8);
         if (group == 1) {
             auto *line = new QWidget(parent);
             line->setFixedHeight(1);
             line->setStyleSheet("background:rgba(146,166,181,42);");
             layout->addWidget(line);
-            layout->addSpacing(6);
+            layout->addSpacing(embedded ? 4 : 6);
         }
         auto *label = new QLabel(group == 0 ? firstGroup : secondGroup, parent);
-        label->setStyleSheet(QString("font-size:11px; color:%1;").arg(dark ? "#adb8c4" : "#71808d"));
+        label->setStyleSheet(QString("font-size:11px; color:%1; padding:0 2px;").arg(inkDim.name()));
         layout->addWidget(label);
         auto *grid = new QGridLayout;
         grid->setHorizontalSpacing(8);
-        grid->setVerticalSpacing(3);
+        grid->setVerticalSpacing(embedded ? 2 : 3);
         grid->setColumnStretch(0, 1);
         grid->setColumnStretch(1, 1);
         for (int index = begin; index < end; ++index) {
             auto *button = new QPushButton(texts[index], parent);
             button->setObjectName(QString("drawerAction%1").arg(index));
             button->setCursor(Qt::PointingHandCursor);
-            button->setFixedHeight(DrawerButtonHeight);
+            button->setFixedHeight(embedded ? 37 : DrawerButtonHeight);
             button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
             button->setToolTip(texts[index]);
-            button->setStyleSheet(textButtonStyle());
+            if (embedded) {
+                button->setStyleSheet(rowStyle);
+                if (index < icons.size() && !icons[index].isEmpty()) {
+                    button->setIcon(menuIcon(icons[index], inkDim, parent->devicePixelRatioF()));
+                    button->setIconSize(QSize(16, 16));
+                }
+            } else {
+                button->setStyleSheet(textButtonStyle());
+            }
             grid->addWidget(button, (index - begin) / 2, (index - begin) % 2);
             result.append(button);
         }

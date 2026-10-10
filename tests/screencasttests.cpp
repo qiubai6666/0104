@@ -152,16 +152,29 @@ private slots:
             const int drawerY = menuY + (menu.height() - UIHelper::DrawerHeight) / 2;
             const int drawerStep = UIHelper::DrawerWidth + 18;
             const int drawerX = menuX + menu.width() + 18;
-            QImage sheet(drawerX + drawers.size() * drawerStep, menuY + menu.height() + 20,
+            QImage sheet(drawerX + drawers.size() * 2 * drawerStep, menuY + menu.height() + 20,
                          QImage::Format_ARGB32_Premultiplied);
             sheet.fill(QColor("#dce8ed"));
             QPainter painter(&sheet);
             painter.setPen(QColor("#385565"));
             painter.setFont(QFont("Microsoft YaHei", 10));
-            painter.drawText(16, 26, QStringLiteral("控制中心 296 × 452px / 次菜单统一 296 × 336px"));
+            painter.drawText(16, 26, QStringLiteral("控制中心 296 × 452px / 嵌入子页（真实样式）+ 独立抽屉（测试替身）"));
             menu.render(&painter, QPoint(menuX, menuY));
             for (int i = 0; i < drawers.size(); ++i)
                 drawers[i]->render(&painter, QPoint(drawerX + i * drawerStep, drawerY));
+            // 嵌入态子页预览：带 parent 构造即真实应用中的面板内翻页样式。
+            RepairWindow embeddedRepair(&menu);
+            PayloadWindow embeddedPayload(&menu);
+            DeviceCheckWindow embeddedDevice(&menu);
+            ConfigWindow embeddedConfig(&menu);
+            const QList<QWidget *> embedded = {
+                &embeddedRepair, &embeddedPayload, &embeddedDevice, &embeddedConfig};
+            const int embeddedX = drawerX + drawers.size() * drawerStep;
+            for (int i = 0; i < embedded.size(); ++i) {
+                embedded[i]->resize(UIHelper::DrawerWidth, UIHelper::ControlCenterHeight);
+                embedded[i]->layout()->activate();
+                embedded[i]->render(&painter, QPoint(embeddedX + i * drawerStep, menuY));
+            }
             painter.end();
             QVERIFY(sheet.save(output));
         }

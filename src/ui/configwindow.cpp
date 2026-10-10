@@ -112,7 +112,9 @@ void ConfigWindow::setupUI()
     buttons = UIHelper::createDrawerButtons(this, mainLayout,
         QStringLiteral("配置与工具"), QStringLiteral(""), buttonTexts,
         6, QStringLiteral("下载资源"), QStringLiteral("外部工具"),
-        parentWidget() == nullptr);
+        parentWidget() == nullptr,
+        QStringList{"hard-drive", "smartphone", "cpu", "shield", "wrench", "zap",
+                    "wrench", "cloud", "external"});
     for (QPushButton *button : buttons) {
         connect(button, &QPushButton::clicked, this, &ConfigWindow::onButtonClicked);
     }

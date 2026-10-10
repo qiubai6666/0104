@@ -12,5 +12,16 @@
     <file alias="command.svg">../../assets/menu/command.svg</file>
     <file alias="heart.svg">../../assets/menu/heart.svg</file>
     <file alias="chevron-left.svg">../../assets/menu/chevron-left.svg</file>
+    <file alias="chevron-right.svg">../../assets/menu/chevron-right.svg</file>
+    <file alias="usb.svg">../../assets/menu/usb.svg</file>
+    <file alias="folder.svg">../../assets/menu/folder.svg</file>
+    <file alias="package.svg">../../assets/menu/package.svg</file>
+    <file alias="blocks.svg">../../assets/menu/blocks.svg</file>
+    <file alias="cpu.svg">../../assets/menu/cpu.svg</file>
+    <file alias="zap.svg">../../assets/menu/zap.svg</file>
+    <file alias="cloud.svg">../../assets/menu/cloud.svg</file>
+    <file alias="hard-drive.svg">../../assets/menu/hard-drive.svg</file>
+    <file alias="shield.svg">../../assets/menu/shield.svg</file>
+    <file alias="external.svg">../../assets/menu/external.svg</file>
   </qresource>
 </RCC>

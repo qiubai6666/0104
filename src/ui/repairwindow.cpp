@@ -80,7 +80,8 @@ void RepairWindow::setupUI()
     buttons = UIHelper::createDrawerButtons(this, mainLayout,
         QStringLiteral("修复工具"), QStringLiteral("秋白工作室"), buttonTexts,
         4, QStringLiteral("维护"), QStringLiteral("线刷与资源"),
-        parentWidget() == nullptr);
+        parentWidget() == nullptr,
+        QStringList{"usb", "folder", "package", "blocks", "cpu", "zap", "cloud"});
     for (QPushButton *button : buttons) {
         connect(button, &QPushButton::clicked, this, &RepairWindow::onButtonClicked);
     }
