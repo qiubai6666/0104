@@ -1,6 +1,7 @@
 #include "openlistwindow.h"
 #include "openlistinstaller.h"
 #include "devicemanager.h"
+#include "uihelper.h"
 #include <QCloseEvent>
 #include <QScreen>
 #include <QShowEvent>
@@ -164,7 +165,8 @@ void OpenListWindow::setupUi() {
     }
     m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选文件或文件夹后安装或传输；传输至内部存储根目录，不安装"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
     auto *progress = new QHBoxLayout; m_progress = new QProgressBar(this); m_progress->setValue(0); progress->addWidget(m_progress,1);
-    m_cancel = new QPushButton(QStringLiteral("取消下载"),this); m_cancel->setEnabled(false); progress->addWidget(m_cancel); layout->addLayout(progress);
+    m_cancel = new QPushButton(QStringLiteral("取消下载"),this); m_cancel->setEnabled(false);
+    m_cancel->setObjectName("openListCancel"); progress->addWidget(m_cancel); layout->addLayout(progress);
     auto *logs = new QGroupBox(QStringLiteral("操作日志"),this); auto *logsLayout = new QVBoxLayout(logs);
     m_log = new QPlainTextEdit(logs); m_log->setObjectName("openListLog"); m_log->setReadOnly(true); m_log->setMaximumBlockCount(500);
     logsLayout->addWidget(m_log); layout->addWidget(logs,1);
@@ -173,16 +175,21 @@ void OpenListWindow::setupUi() {
         QGroupBox { background:#FFFFFF; border:1px solid #D9E2EC; border-radius:12px; margin-top:8px; color:#334155; font-weight:600; }
         QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 5px; background:#FFFFFF; }
         QLabel { color:#526579; }
-        QPushButton { background:#E7EEF3; color:#526579; border:1px solid #CBD7E2; border-radius:8px; padding:7px 12px; }
-        QPushButton:hover { background:#DCE7EF; border-color:#7892A8; }
-        QPushButton:disabled { color:#A9B5C1; }
+        QPushButton { background:#FFFFFF; color:#526579; border:1px solid #CBD7E2; border-radius:8px; padding:7px 12px; }
+        QPushButton:hover { border-color:#2F80ED; color:#2F80ED; background:rgba(47,128,237,.06); }
+        QPushButton:disabled { color:#A9B5C1; border-color:#D9E2EC; background:#F3F6FA; }
+        QPushButton#openListInstallSelected { background:#2F80ED; color:#FFFFFF; border-color:#2F80ED; font-weight:600; }
+        QPushButton#openListInstallSelected:hover { background:#2A73D6; border-color:#2A73D6; color:#FFFFFF; }
+        QPushButton#openListCancel { color:#DC2626; border-color:#F3C9C9; background:#FFFFFF; }
+        QPushButton#openListCancel:hover { color:#DC2626; border-color:#DC2626; background:#FEF2F2; }
+        QPushButton#openListCancel:disabled { color:#A9B5C1; border-color:#D9E2EC; background:#F3F6FA; }
         QLineEdit { background:#FFFFFF; color:#526579; border:1px solid #D2DDE7; border-radius:6px; padding:7px; }
         QTableWidget { background:#FFFFFF; alternate-background-color:#F8FAFC; color:#334155; border:1px solid #DCE5ED; selection-background-color:#DCE7EF; selection-color:#334155; }
         QTableWidget::item { padding:0 4px; }
         QHeaderView::section { background:#EEF3F7; color:#526579; border:0; padding:6px; }
         QPlainTextEdit { background:#F8FAFC; color:#334155; border:0; font-family:"Microsoft YaHei UI","Consolas"; }
         QProgressBar { border:1px solid #CBD7E2; border-radius:6px; background:#FFFFFF; text-align:center; min-height:20px; }
-        QProgressBar::chunk { background:#718CA4; }
+        QProgressBar::chunk { background:#2F80ED; }
     )");
 }
 void OpenListWindow::refresh() {
@@ -203,7 +210,19 @@ void OpenListWindow::render(bool module) {
         if (!filter.isEmpty() && !entry.relativePath.contains(filter,Qt::CaseInsensitive)) continue;
         const int row = table->rowCount(); table->insertRow(row);
         auto *name = new QTableWidgetItem(entry.name);
-        if (entry.directory) name->setIcon(style()->standardIcon(QStyle::SP_DirIcon)); name->setData(Qt::UserRole,index); name->setToolTip(entry.relativePath); table->setItem(row,0,name);
+        // 预览稿：目录为 accent 蓝文件夹图标；文件按类型着色（APK 绿 / ZIP 蓝 / SH 琥珀 / 其他墨灰）。
+        if (entry.directory) {
+            name->setIcon(UIHelper::menuIcon(QStringLiteral("folder"), QColor(QStringLiteral("#2F80ED")),
+                                             devicePixelRatioF()));
+        } else {
+            const QString lower = entry.name.toLower();
+            QString tone = QStringLiteral("#647585");
+            if (lower.endsWith(QStringLiteral(".apk"))) tone = QStringLiteral("#16A34A");
+            else if (lower.endsWith(QStringLiteral(".zip"))) tone = QStringLiteral("#2F80ED");
+            else if (lower.endsWith(QStringLiteral(".sh"))) tone = QStringLiteral("#D97706");
+            name->setIcon(UIHelper::menuIcon(QStringLiteral("file"), QColor(tone), devicePixelRatioF()));
+        }
+        name->setData(Qt::UserRole,index); name->setToolTip(entry.relativePath); table->setItem(row,0,name);
         QString dir = QFileInfo(entry.relativePath).path(); if (dir == ".") dir = QStringLiteral("根目录");
         table->setItem(row,1,new QTableWidgetItem(dir));
         table->setItem(row,2,new QTableWidgetItem(entry.directory ? QStringLiteral("文件夹") : entry.size < 0 ? QStringLiteral("未知") : QLocale().formattedDataSize(entry.size)));
@@ -324,8 +343,14 @@ void OpenListWindow::log(const QString &text) {
 }
 void OpenListWindow::updateDevice() {
     auto *devices = DeviceManager::instance();
-    m_device->setText(m_busy && !m_serial.isEmpty() ? QStringLiteral("目标手机：%1").arg(m_serial) :
-        devices->currentMode() == DeviceManager::ADB ? QStringLiteral("ADB 已连接：%1").arg(devices->deviceSerial()) : QStringLiteral("未检测到已授权 ADB 手机"));
+    const bool targeting = m_busy && !m_serial.isEmpty();
+    const bool adb = devices->currentMode() == DeviceManager::ADB;
+    m_device->setText(targeting ? QStringLiteral("目标手机：%1").arg(m_serial) :
+        adb ? QStringLiteral("ADB 已连接：%1").arg(devices->deviceSerial()) : QStringLiteral("未检测到已授权 ADB 手机"));
+    // 预览稿状态 pill：琥珀=执行中 / 绿=已连接 / 灰=未连接。
+    m_device->setStyleSheet(QStringLiteral(
+        "border-radius:9px;padding:2px 9px;font-size:10.5px;color:#FFFFFF;background:%1;")
+        .arg(targeting ? QStringLiteral("#F59E0B") : adb ? QStringLiteral("#22C55E") : QStringLiteral("#9AA8B5")));
 }
 void OpenListWindow::closeEvent(QCloseEvent *event) {
     // Openlist is a child tool window; closing it must not veto application shutdown.

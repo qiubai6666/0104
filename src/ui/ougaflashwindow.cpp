@@ -329,22 +329,22 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
       left:10px; padding:0 5px; background:#FFFFFF; }
     QPushButton { background:#FFFFFF; color:#526579; border:1px solid #CBD7E2;
       border-radius:8px; font-size:12px; font-weight:400; padding:0 5px; }
-    QPushButton:hover { border-color:#7892A8; background:#EEF3F7; }
-    QPushButton:pressed { background:#E3EBF1; }
-    QPushButton[tone="sky"] { background:#718CA4; color:#FFFFFF; border-color:#718CA4; }
-    QPushButton[tone="sky"]:hover { background:#627E97; border-color:#627E97; }
-    QPushButton[tone="unpack"] { background:#829D96; color:#FFFFFF; border-color:#829D96; }
-    QPushButton[tone="unpack"]:hover { background:#718D86; border-color:#718D86; }
-    QPushButton[tone="start"] { background:#2F80ED; color:#FFFFFF; border-color:#2F80ED; }
-    QPushButton[tone="start"]:hover { background:#1D6FD1; border-color:#1D6FD1; }
-    QPushButton[tone="repair"] { background:#E7EEF3; color:#526579; border-color:#C9D7E2; }
-    QPushButton[tone="repair"]:hover { background:#DCE7EF; border-color:#B9CBD9; }
-    QPushButton[tone="stop"] { background:#E5EBF0; color:#596B7D; border-color:#C8D5DF; }
-    QPushButton[tone="stop"]:hover { background:#D9E3EB; border-color:#B8C9D6; }
+    QPushButton:hover { border-color:#9DBDEF; background:#F4F8FC; }
+    QPushButton:pressed { background:#E9F1FA; }
+    QPushButton[tone="sky"] { background:#FFFFFF; color:#526579; border-color:#CBD7E2; }
+    QPushButton[tone="sky"]:hover { border-color:#2F80ED; color:#2F80ED; background:rgba(47,128,237,.06); }
+    QPushButton[tone="unpack"] { background:#FFFFFF; color:#526579; border-color:#CBD7E2; }
+    QPushButton[tone="unpack"]:hover { border-color:#2F80ED; color:#2F80ED; background:rgba(47,128,237,.06); }
+    QPushButton[tone="start"] { background:#2F80ED; color:#FFFFFF; border-color:#2F80ED; font-weight:600; }
+    QPushButton[tone="start"]:hover { background:#2A73D6; border-color:#2A73D6; }
+    QPushButton[tone="repair"] { background:#FFFFFF; color:#2F80ED; border-color:#9DBDEF; }
+    QPushButton[tone="repair"]:hover { background:rgba(47,128,237,.08); border-color:#2F80ED; }
+    QPushButton[tone="stop"] { background:#FFFFFF; color:#DC2626; border-color:#F3C9C9; }
+    QPushButton[tone="stop"]:hover { background:#FEF2F2; border-color:#DC2626; }
     QPushButton:disabled { color:#A9B5C1; border-color:#D9E2EC; }
     QLineEdit, QComboBox { background:#FFFFFF; color:#526579; border:1px solid #D2DDE7;
       border-radius:6px; padding:0 9px; font-size:12px; font-weight:400; }
-    QLineEdit:focus, QComboBox:focus { border-color:#7892A8; }
+    QLineEdit:focus, QComboBox:focus { border-color:#2F80ED; }
     QComboBox { color:#526579; padding-right:23px; }
     QComboBox::drop-down { border:0; width:22px; }
     QComboBox QAbstractItemView { background:#FFFFFF; color:#526579;
@@ -354,9 +354,9 @@ OugaFlashWindow::OugaFlashWindow(QWidget *parent, OugaCommandRunner *runner,
     QLabel { color:#526579; font-weight:400; }
     QTableWidget { background:#FFFFFF; alternate-background-color:#F8FAFC;
       color:#334155; border:1px solid #DCE5ED; font-size:12px;
-      selection-background-color:#DCE7EF; selection-color:#334155; }
+      selection-background-color:#DCE9FA; selection-color:#334155; }
     QTableWidget::item { border-bottom:1px solid #EEF2F6; padding:0 4px; }
-    QTableWidget::item:hover { background:#F1F5F8; }
+    QTableWidget::item:hover { background:#EDF3FB; }
     QHeaderView::section { background:#EEF3F7; color:#526579; border:0;
       border-bottom:1px solid #DCE5ED; font-weight:600; }
     QPlainTextEdit { background:#F8FAFC; color:#334155; border:0; padding:7px;
@@ -527,7 +527,7 @@ void OugaFlashWindow::buildPage(int index) {
   page.extract = button("提取分区",
                         sales ? "AfterSalesExtractPartitionButton"
                               : "ExtractPartitionButton",
-                        page.cloud);
+                        page.cloud, "repair");
   page.extract->setFixedWidth(104);
   cloud->addWidget(page.preset, 1, 0);
   cloud->addWidget(page.extract, 1, 1);

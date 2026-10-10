@@ -85,7 +85,7 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
     statusRow->addWidget(m_cancelCheck); root->addLayout(statusRow);
     m_warning = new QLabel(this); m_warning->setWordWrap(true);
     m_warning->setObjectName("XiaomiFlashWarningLabel");
-    m_warning->setStyleSheet("color:#B45309;font-size:12px;");
+    m_warning->setStyleSheet("color:#B45309;font-size:12px;background:#FEF6E7;border:1px solid #F5D9A8;border-radius:6px;padding:8px 10px;");
     m_warning->hide(); root->addWidget(m_warning);
     root->addWidget(new QLabel("线刷日志", this));
     m_log = new QPlainTextEdit(this); m_log->setObjectName("XiaomiFlashLogTextBox"); m_log->setReadOnly(true);
@@ -99,13 +99,15 @@ XiaomiFlashWindow::XiaomiFlashWindow(QWidget *launcher)
         QLabel, QRadioButton { color:#334155; }
         QRadioButton { spacing:8px; padding:4px 0; }
         QLineEdit, QPlainTextEdit { background:white; color:#475569; border:1px solid #DDE2EA; border-radius:6px; padding:6px; }
-        QPushButton { border:1px solid #E6E6E6; border-radius:8px; padding:5px 12px; }
-        QPushButton[tone="sky"] { background:#87CEEB; color:white; }
-        QPushButton[tone="purple"] { background:#B876DD; color:white; }
-        QPushButton:hover { border-color:#8B5CB3; }
-        QPushButton:disabled { background:#E2E6ED; color:#94A3B8; }
+        QPushButton { border:1px solid #CBD7E2; border-radius:8px; padding:5px 12px; }
+        QPushButton[tone="sky"] { background:#FFFFFF; color:#526579; }
+        QPushButton[tone="sky"]:hover { border-color:#2F80ED; color:#2F80ED; }
+        QPushButton[tone="purple"] { background:#2F80ED; color:white; border-color:#2F80ED; font-weight:600; }
+        QPushButton[tone="purple"]:hover { background:#2A73D6; border-color:#2A73D6; }
+        QPushButton:hover { border-color:#9DBDEF; }
+        QPushButton:disabled { background:#E2E6ED; color:#94A3B8; border-color:#E2E6ED; }
         QProgressBar { background:white; border:1px solid #DDE2EA; border-radius:6px; text-align:center; color:#475569; min-height:22px; }
-        QProgressBar::chunk { background:#B876DD; border-radius:5px; }
+        QProgressBar::chunk { background:#2F80ED; border-radius:5px; }
     )");
     connect(m_choose, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getExistingDirectory(this, "选择小米刷机包文件夹", m_path->text());
