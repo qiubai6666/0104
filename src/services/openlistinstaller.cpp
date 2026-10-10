@@ -288,7 +288,7 @@ bool OpenListInstaller::handleApkRoot(int code,bool normal,const QString &out) {
             end(false,QStringLiteral("未获得 Root 授权，禁止执行 SH 脚本。"));
         } else {
             m_canTransferFailure = true;
-            emit log(QStringLiteral("未获得 Shell Root 权限，使用普通 ADB 安装 APK。"));
+            emit log(QStringLiteral("未获得 Shell Root 权限。"));
             adb(ApkInstall,{"install","-r",m_file});
         }
         return true;
