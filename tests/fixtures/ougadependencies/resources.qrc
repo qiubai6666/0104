@@ -4,7 +4,7 @@
     <file alias="qiubai/fastboot.exe">bundled-tool.txt</file>
     <file alias="qiubai/AdbWinApi.dll">bundled-tool.txt</file>
     <file alias="qiubai/AdbWinUsbApi.dll">bundled-tool.txt</file>
-    <file alias="qiubai/payload.exe">legacy-tool.txt</file>
+    <file alias="qiubai/payload-dumper-go.exe">legacy-tool.txt</file>
     <file alias="qiubai/Neil.jpg">legacy-tool.txt</file>
     <file alias="qiubai/bin/7zip/7z.exe">bundled-tool.txt</file>
     <file alias="qiubai/bin/7zip/7z.dll">bundled-tool.txt</file>

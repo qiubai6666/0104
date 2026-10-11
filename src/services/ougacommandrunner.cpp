@@ -120,7 +120,9 @@ QString OugaProcessRunner::bundledToolPath(const QString &resourceDirectory,
     relative = "bin/7zip/7z.exe";
   else if (key == "lpmake")
     relative = "bin/lpmake/lpmake.exe";
-  else if (key == "fastboot" || key == "adb" || key == "payload")
+  else if (key == "payload")
+    relative = "payload-dumper-go.exe";
+  else if (key == "fastboot" || key == "adb")
     // Share the root tools with all existing device/package operations.
     relative = key + ".exe";
   else

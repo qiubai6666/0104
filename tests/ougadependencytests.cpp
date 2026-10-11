@@ -149,7 +149,7 @@ private slots:
     QTest::newRow("lpmake") << "lpmake" << "bin/lpmake/lpmake.exe";
     QTest::newRow("fastboot") << "fastboot" << "fastboot.exe";
     QTest::newRow("adb") << "adb" << "adb.exe";
-    QTest::newRow("payload") << "payload" << "payload.exe";
+    QTest::newRow("payload") << "payload" << "payload-dumper-go.exe";
     QTest::newRow("unknown-key") << "rom" << "";
     QTest::newRow("path-not-a-tool-key") << "../fastboot" << "";
   }
@@ -186,6 +186,7 @@ private slots:
                            : directory + "/发布 中文/qiubai";
     const QString relative = key == "7z" ? "bin/7zip/7z.exe"
                            : key == "lpmake" ? "bin/lpmake/lpmake.exe"
+                           : key == "payload" ? "payload-dumper-go.exe"
                            : key + ".exe";
     const QString expected = toolRoot + "/" + relative;
     QVERIFY(put(expected, "inert tool fixture"));

@@ -19,7 +19,7 @@ public:
                     quint64 *size, QString *error = nullptr);
   // REPLACE / BZ / XZ / ZSTD / ZERO / DISCARD only. Every data operation is
   // hash-verified, and the destination extents
-  // tile the partition exactly; anything else is left to payload.exe.
+  // tile the partition exactly; anything else is left to the external tool.
   static bool supported(const OugaPayloadEntry &entry,
                         const OugaPayloadLayout &layout);
   // Selected entries (all when empty) can be extracted in-process.

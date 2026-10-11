@@ -560,7 +560,7 @@ void OugaFlashWindow::runPayload() {
         }
       }
       tool = requireTool("payload", "Payload工具",
-                         ResourceExtractor::getResourcePath() + "/payload.exe");
+                         ResourceExtractor::getResourcePath() + "/payload-dumper-go.exe");
       if (!continueTask(generation))
         return;
       if (tool.isEmpty()) {

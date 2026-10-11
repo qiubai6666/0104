@@ -6658,7 +6658,7 @@ private slots:
       QVERIFY(QDir().mkpath(tools + "/bin/7zip"));
       QVERIFY(QFile::copy(helper, tools + "/bin/7zip/7z.exe"));
       QVERIFY(put(tools + "/bin/7zip/7z.dll", "inert format-library fixture"));
-      QVERIFY(QFile::copy(helper, tools + "/payload.exe"));
+      QVERIFY(QFile::copy(helper, tools + "/payload-dumper-go.exe"));
       for (const QString key : {"7z", "payload"}) {
         if (toolConfiguration == "bundled")
           settings.remove("Ouga/" + key);
@@ -8342,15 +8342,16 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "Everything is Ok\n");
       return 0;
     }
-    if (command == "--out" && argc >= 6 &&
+    if (command == "-m" && argc >= 7 &&
+        QString::fromLocal8Bit(argv[2]) == "--output" &&
         QString::fromLocal8Bit(argv[argc - 1]).endsWith("payload.bin")) {
       // Assert the production invocation uses bounded CPU parallelism.
-      if (std::strcmp(argv[3], "--workers") != 0 ||
-          QString::fromLocal8Bit(argv[4]).toInt() != qBound(2, QThread::idealThreadCount(), 8))
+      if (std::strcmp(argv[4], "--concurrency") != 0 ||
+          QString::fromLocal8Bit(argv[5]).toInt() != qBound(2, QThread::idealThreadCount(), 8))
         return 11;
       const QByteArray excluded = payloadContainer(payloadPartition("boot", 0) + payloadPartition("misc", 0));
       if (read(QString::fromLocal8Bit(argv[argc - 1])) == excluded) {
-        const QString output = QString::fromLocal8Bit(argv[2]);
+        const QString output = QString::fromLocal8Bit(argv[3]);
         return put(output + "/boot.img", QByteArray(512, 'p')) &&
                put(output + "/misc.img", QByteArray(512, output.endsWith("corrupt") ? 'x' : 'p')) ? 0 : 12;
       }
@@ -8359,7 +8360,7 @@ int main(int argc, char **argv) {
       const QByteArray bytes = read(source);
       if (bytes == payloadContainer(payloadCounterPartition("boot", 8) +
                                     payloadCounterPartition("vendor", 2))) {
-        const QString out = QDir::fromNativeSeparators(QString::fromLocal8Bit(argv[2]));
+        const QString out = QDir::fromNativeSeparators(QString::fromLocal8Bit(argv[3]));
         const auto chunk = [](const char *s) {
           std::fputs(s, stdout); std::fflush(stdout);
           std::this_thread::sleep_for(std::chrono::milliseconds(60));
@@ -8387,13 +8388,13 @@ int main(int argc, char **argv) {
           bytes != payloadBytes(false, 9, true) && !sourceOperation &&
           bytes != mixedPayloadBytes())
         return 5;
-      bool diff = false;
+      bool delta = false;
       for (int i = 2; i < argc - 1; ++i)
-        diff |= std::strcmp(argv[i], "--diff") == 0;
-      if (diff != sourceOperation)
+        delta |= std::strcmp(argv[i], "--old") == 0;
+      if (delta != sourceOperation)
         return 7;
       const QString output = QDir::fromNativeSeparators(
-          QString::fromLocal8Bit(argv[2]));
+          QString::fromLocal8Bit(argv[3]));
       const bool corrupt = output.contains("/corrupt-output/");
       if (!put(output + "/boot.img", QByteArray(512, corrupt ? 'x' : 'p')))
         return 6;

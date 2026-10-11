@@ -40,12 +40,12 @@ void PayloadWindow::setupUI()
     mainLayout->addWidget(titleLabel);
     mainLayout->addSpacing(3);
     // URL 输入
-    QLabel *urlLabel = new QLabel("Payload 链接：", container);
+    QLabel *urlLabel = new QLabel("Payload 文件：", container);
     urlLabel->setStyleSheet("QLabel { color: #2c3e50; background: transparent; font-size: 13px; }");
     mainLayout->addWidget(urlLabel);
-    
+
     urlEdit = new QLineEdit(container);
-    urlEdit->setPlaceholderText("粘贴链接或路径");
+    urlEdit->setPlaceholderText("粘贴 payload.bin 或 OTA ZIP 文件路径");
     urlEdit->setMinimumHeight(34);
     urlEdit->setStyleSheet(R"(
         QLineEdit {
@@ -156,27 +156,34 @@ QString PayloadWindow::getOutputPath()
 void PayloadWindow::onExtractClicked()
 {
     QString url = urlEdit->text().trimmed();
-    
+
     if (url.isEmpty()) {
-        QMessageBox::warning(this, "警告", "请输入 Payload 链接或路径！");
+        QMessageBox::warning(this, "警告", "请输入 Payload 文件路径！");
         return;
     }
-    
+
+    if (url.startsWith("http://", Qt::CaseInsensitive) ||
+        url.startsWith("https://", Qt::CaseInsensitive)) {
+        QMessageBox::warning(this, "警告",
+            "Payload 工具不支持远程链接，请先将文件下载到本地再输入路径！");
+        return;
+    }
+
     QString outputPath = getOutputPath();
-    QString payloadExe = ResourceExtractor::getResourcePath() + "/payload.exe";
-    
-    // 检查 payload.exe 是否存在
-    if (!QFile::exists(payloadExe)) {
-        QMessageBox::warning(this, "错误", "找不到 payload.exe 文件！");
+    QString payloadTool = ResourceExtractor::getResourcePath() + "/payload-dumper-go.exe";
+
+    // 检查提取工具是否存在
+    if (!QFile::exists(payloadTool)) {
+        QMessageBox::warning(this, "错误", "找不到 payload-dumper-go.exe 文件！");
         return;
     }
-    
-    // 执行 payload.exe
+
+    // 执行 payload-dumper-go
     QProcess *process = ProcessManager::createProcess(this);
     process->setWorkingDirectory(ResourceExtractor::getResourcePath());
-    
+
     QStringList args;
-    args << "--out" << outputPath;
+    args << "--output" << outputPath;
     args << url;
     
     // 显示正在处理的提示
@@ -201,5 +208,5 @@ void PayloadWindow::onExtractClicked()
         process->deleteLater();
     });
     
-    process->start(payloadExe, args);
+    process->start(payloadTool, args);
 }

@@ -63,7 +63,7 @@
 | `src/services/screencastcontroller.cpp/.h` | 主菜单投屏按钮的等待、启动、停止和异常恢复；绑定设备序列号启动 scrcpy | `toggle()`、`tryStart()`、`stop()`；不再打开旧设备信息投屏窗口 |
 | `src/ui/devicecheckwindow.cpp/.h` | 显示 ADB/Fastboot 状态；重启/切换模式；打开命令行；刷写 boot/init_boot | `flashPartition()` → `waitForFastbootMode()` → `performFlash()` |
 | `src/ui/repairwindow.cpp/.h` | 执行 USB 脚本、修复临时目录、批量安装 APK 和 Root 模块 | 各 `on…StepFinished()` 通过进程完成信号串联步骤；阶段由具名枚举表示 |
-| `src/ui/payloadwindow.cpp/.h` | 接收 Payload 链接或路径，选择 boot/init_boot，调用 payload.exe 提取 | `onExtractClicked()`；顶部的局部复选框类负责绘制 |
+| `src/ui/payloadwindow.cpp/.h` | 接收 Payload 文件路径，调用 payload-dumper-go.exe 提取 | `onExtractClicked()`；顶部的局部复选框类负责绘制 |
 | `src/ui/configwindow.cpp/.h` | 读取下载配置；下载/解压/启动工具；显示进度、处理重试 | `DownloadConfig` 表示一条配置；`downloadFile()`、`onFileDownloadFinished()` |
 | `src/ui/uihelper.cpp/.h` | 统一菜单按钮样式、创建按钮、显示居中消息框 | `createMenuButtons()` 只管界面，各窗口自行连接业务信号 |
 | `src/services/devicemanager.cpp/.h` | 共享设备监控、设备模式和信息缓存 | 单例；全模式/仅 ADB 的引用计数；轮询和暂停/恢复 |
@@ -165,7 +165,7 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 | --- | --- | --- |
 | 投屏 | 点击后按钮显示圆圈旋转，等待已授权的 ADB 设备后启动 scrcpy；启动后恢复“投屏”，再次点击停止。等待期间再次点击可取消，不再打开旧设备信息卡片 | USB 调试已开启，设备已授权；未授权/离线/Fastboot 时继续等待 |
 | 秋白工作室 | 打开修复菜单：USB 修复、修复 TMP、安装 APK、安装模块（全部成功后自动重启）、欧加线刷、小米线刷 | 多数操作使用 `su`，依赖 Root 权限及相应管理器 |
-| PAYLOAD | 输入链接或本地路径，选择 boot/init_boot，用 payload.exe 提取到桌面 IMG | 输入是否受支持由外部 Payload 工具决定 |
+| PAYLOAD | 输入本地 payload.bin/OTA ZIP 路径，用 payload-dumper-go.exe 提取到桌面 IMG | 拒绝远程链接；提取/校验行为由外部 Payload 工具决定 |
 | 提取IMG | 从手机 `/sdcard/Download/*.img` 中拉取按时间排序的最新一个到桌面 IMG | 已检测到连接设备且目录可读；不是直接读取手机分区 |
 | 设备检测 | 查看模式/设备信息、选择重启方式、打开 CMD、刷写 boot/init_boot | 模式与命令必须匹配；刷写前确认镜像兼容性 |
 | 配置 | 前六项按下载配置获取工具；另有 GeekFlashTool、网盘、NDM 入口 | 网络可用，只使用可信下载来源 |

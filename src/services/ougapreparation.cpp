@@ -191,17 +191,40 @@ void OugaPreparation::startPayloadRow(const QString &name) {
   }
 }
 void OugaPreparation::parsePayloadCounter() {
-  // Read completed/total operation counts, NOT rounded terminal percentages,
-  // output-file lengths, elapsed time, or preallocated/sparse extents.
+  // payload-dumper-go -m rows ("<partition>:<percent>") report the share of
+  // completed install operations per partition; a manually configured python
+  // payload_dumper keeps emitting exact tqdm done/total counts. Both are
+  // converted to the same verified operation counters below — never rounded
+  // terminal percentages of bytes, elapsed time, or preallocated extents.
+  const QString line = QString::fromUtf8(m_payloadLine);
+  static const QRegularExpression machine(
+      R"(^([A-Za-z0-9_]+):([0-9]{1,3})$)");
   static const QRegularExpression row(
       R"(^([A-Za-z0-9_]+) +[0-9]{1,3}%\|.*\| *([0-9]+) */ *([0-9]+)(?: |$))");
-  const auto match = row.match(QString::fromUtf8(m_payloadLine));
-  if (!match.hasMatch() || m_cancel) return;
-  const QString name = match.captured(1);
-  bool a = false, b = false;
-  const quint64 done = match.captured(2).toULongLong(&a);
-  const quint64 total = match.captured(3).toULongLong(&b);
-  if (!a || !b || !total || !m_payloadOperations.contains(name) ||
+  const auto progress = machine.match(line);
+  const auto counter = row.match(line);
+  if (m_cancel || (!progress.hasMatch() && !counter.hasMatch())) return;
+  QString name;
+  quint64 done = 0, total = 0;
+  bool valid = false;
+  if (progress.hasMatch()) {
+    bool percentOk = false;
+    const int percent = progress.captured(2).toInt(&percentOk);
+    name = progress.captured(1);
+    total = m_payloadOperations.value(name);
+    // Recover the operation count without ever exceeding the manifest total.
+    done = percentOk && percent > 0
+               ? qMin<quint64>(total, quint64(percent) * total / 100)
+               : 0;
+    valid = percentOk && total;
+  } else {
+    bool a = false, b = false;
+    name = counter.captured(1);
+    done = counter.captured(2).toULongLong(&a);
+    total = counter.captured(3).toULongLong(&b);
+    valid = a && b;
+  }
+  if (!valid || !total || !m_payloadOperations.contains(name) ||
       total != m_payloadOperations.value(name) || done > total ||
       done < m_payloadDone.value(name)) return;
   startPayloadRow(name);
@@ -405,14 +428,17 @@ void OugaPreparation::payload(const QString &tool, const QString &file,
           return;
         }
         if (tool.isEmpty() || layout->base != 0) {
-          end(false, "此 Payload 需要 payload.exe 提取（增量或不支持的操作）");
+          end(false, "此 Payload 需要 Payload 工具提取（增量或不支持的操作）");
           return;
         }
         // Match CPU parallelism without unbounded disk contention on large hosts.
         const int workers = qBound(2, QThread::idealThreadCount(), 8);
-        QStringList args = {"--out", output, "--workers", QString::number(workers)};
+        // payload-dumper-go: -m emits "<partition>:<percent>" machine rows,
+        // -old enables incremental extraction without a separate --diff flag.
+        QStringList args = {"-m", "--output", output,
+                            "--concurrency", QString::number(workers)};
         if (*delta)
-          args << "--diff" << "--old" << oldDirectory;
+          args << "--old" << oldDirectory;
         if (!selected.isEmpty())
           args << "--partitions" << selected.join(',');
         args << file;

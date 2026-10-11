@@ -19,7 +19,7 @@ QStringList IntegrityChecker::getCriticalFiles()
         << "fastboot.exe"
         << "scrcpy.exe"
         << "scrcpy-server"
-        << "payload.exe"
+        << "payload-dumper-go.exe"
         << "AdbWinApi.dll"
         << "AdbWinUsbApi.dll"
         << "libusb-1.0.dll"

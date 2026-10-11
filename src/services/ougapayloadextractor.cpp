@@ -54,7 +54,7 @@ private:
   lzma_stream m_stream = LZMA_STREAM_INIT;
 };
 
-// VioletToolBox's Type.Zstd (14), without falling back to payload.exe.
+// VioletToolBox's Type.Zstd (14), without falling back to the external tool.
 // A worker reuses its context, and the manifest's bounded destination length
 // controls allocation. Reject oversized windows, dictionaries, extra frames
 // or trailing bytes instead of silently accepting a partial decode.
@@ -409,7 +409,7 @@ bool OugaPayloadExtractor::supported(const OugaPayloadEntry &entry,
       if (op.dataLength)
         return false;
       break;
-    default: // Source/delta operations stay with payload.exe
+    default: // Source/delta operations stay with the external Payload tool
       return false;
     }
   }
