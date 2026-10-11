@@ -122,7 +122,9 @@ public:
 
     FloatingBall()
     {
-        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        // Qt::Tool：悬浮球不占用任务栏图标，主菜单单独保留任务栏入口。
+        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
+                       Qt::Tool);
         setAttribute(Qt::WA_TranslucentBackground);
         // 应用存活锚点：面板不承担 QuitOnClose，由悬浮球保持事件循环。
         setAttribute(Qt::WA_QuitOnClose);
