@@ -24,16 +24,17 @@ QString configFileUrl()
 
 bool ConfigWindow::isSafeFileName(const QString &fileName)
 {
-    if (fileName.isEmpty() || fileName == "." || fileName == "..") {
-        return false;
+    if (fileName.isEmpty() || fileName.contains("..") || fileName.endsWith('.')
+        || fileName.endsWith(' ') || QDir::isAbsolutePath(fileName)) return false;
+    const QString forbidden = QStringLiteral("<>:\"/\\|?*");
+    for (const QChar ch : fileName) {
+        if (ch.unicode() < 32 || forbidden.contains(ch)) return false;
     }
-
-    // 配置文件只允许指定资源目录下的单层文件名，不能借助路径穿越写出资源目录。
-    if (fileName.contains("/") || fileName.contains("\\") || fileName.contains("..") ||
-        fileName.contains(":") || QDir::isAbsolutePath(fileName)) {
-        return false;
-    }
-
+    // Windows device names remain reserved even with an extension.
+    const QString base = fileName.section('.', 0, 0).toUpper();
+    if (QStringList{"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}.contains(base)) return false;
+    if (base.size() == 4 && (base.startsWith("COM") || base.startsWith("LPT"))
+        && QStringLiteral("123456789¹²³").contains(base.at(3))) return false;
     return QFileInfo(fileName).fileName() == fileName;
 }
 ConfigWindow::ConfigWindow(QWidget *parent)
@@ -55,7 +56,9 @@ ConfigWindow::ConfigWindow(QWidget *parent)
 
     // 创建文件下载管理器
     fileDownloadManager = new QNetworkAccessManager(this);
-    connect(fileDownloadManager, &QNetworkAccessManager::finished, this, &ConfigWindow::onFileDownloadFinished);
+    // Finish QNAM's reply bookkeeping before opening a nested message-box loop.
+    connect(fileDownloadManager, &QNetworkAccessManager::finished, this,
+            &ConfigWindow::onFileDownloadFinished, Qt::QueuedConnection);
 
     // 先检查配置文件是否存在
     QString qiubaiPath = ResourceExtractor::getResourcePath();
@@ -73,6 +76,15 @@ ConfigWindow::ConfigWindow(QWidget *parent)
 
 ConfigWindow::~ConfigWindow()
 {
+    // Abort while writers still exist; suppress UI callbacks during destruction.
+    for (QNetworkAccessManager *manager : {networkManager, fileDownloadManager}) {
+        disconnect(manager, nullptr, this, nullptr);
+        const auto replies = manager->findChildren<QNetworkReply *>();
+        for (QNetworkReply *reply : replies) {
+            disconnect(reply, nullptr, this, nullptr);
+            reply->abort();
+        }
+    }
     if (extractProcess) {
         extractProcess->kill();
         extractProcess->deleteLater();
@@ -191,24 +203,21 @@ void ConfigWindow::openNDM()
 
 void ConfigWindow::downloadConfig()
 {
-    QString qiubaiPath = ResourceExtractor::getResourcePath();
-    QString configPath = qiubaiPath + "/download_config.txt";
-
-    // 检查文件是否已存在
-    if (QFile::exists(configPath)) {
-        qDebug() << "配置文件已存在，跳过下载:" << configPath;
+    const QString configPath = ResourceExtractor::getResourcePath() + "/download_config.txt";
+    if (QFile::exists(configPath) || !configDownloadFiles.isEmpty()) return;
+    auto *writer = new DownloadFileWriter(configPath, this);
+    if (!writer->isOpen()) {
+        qWarning() << "无法创建配置临时文件:" << writer->errorString();
+        delete writer;
         return;
     }
-
-    // 文件不存在，开始下载
-    qDebug() << "配置文件不存在，开始下载...";
-    QUrl url(configFileUrl());
-    QNetworkRequest request(url);
-
-    // 设置请求头
+    QNetworkRequest request(configFileUrl());
     request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0");
-
-    networkManager->get(request);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    QNetworkReply *reply = networkManager->get(request);
+    configDownloadFiles[reply] = writer;
+    writer->attach(reply);
 }
 
 void ConfigWindow::loadConfigFile()
@@ -216,6 +225,7 @@ void ConfigWindow::loadConfigFile()
     QString qiubaiPath = ResourceExtractor::getResourcePath();
     QString configPath = qiubaiPath + "/download_config.txt";
 
+    configData.clear();
     QFile file(configPath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         qDebug() << "无法打开配置文件:" << configPath;
@@ -236,18 +246,23 @@ void ConfigWindow::loadConfigFile()
         if (line.isEmpty()) continue;
 
         QStringList parts = line.split('|');
-        if (parts.size() >= 4) {
+        if (parts.size() == 4) {
             const int id = parts[0].toInt();
             const QString fileType = parts[1].trimmed().toLower();
             const QString fileName = parts[2].trimmed();
             const QString url = parts[3].trimmed();
+            const QUrl parsedUrl(url);
             if (id < 1 || id > DownloadOptionCount ||
                 (fileType != "exe" && fileType != "zip") ||
-                !isSafeFileName(fileName) || !QUrl(url).isValid()) {
+                !isSafeFileName(fileName) || !parsedUrl.isValid() || parsedUrl.host().isEmpty() ||
+                (fileType == "exe" && !fileName.endsWith(".exe", Qt::CaseInsensitive)) ||
+                parsedUrl.scheme().compare("https", Qt::CaseInsensitive) != 0) {
                 qWarning() << "忽略无效下载配置:" << line;
                 continue;
             }
             configData[id] = DownloadConfig{fileType, fileName, url};
+        } else {
+            qWarning() << "忽略字段数量无效的下载配置:" << line;
         }
     }
 
@@ -275,158 +290,104 @@ void ConfigWindow::refreshConfigButtonLabels()
 void ConfigWindow::preloadConfigFile()
 {
     const QString configPath = ResourceExtractor::getResourcePath() + "/download_config.txt";
-    if (QFile::exists(configPath)) {
+    if (QFile::exists(configPath)) return;
+    auto *manager = new QNetworkAccessManager(qApp);
+    auto *writer = new DownloadFileWriter(configPath, manager);
+    if (!writer->isOpen()) {
+        qWarning() << "配置预热无法创建临时文件:" << writer->errorString();
+        manager->deleteLater();
         return;
     }
-
-    // 启动预热：异步下载配置文件，用户首次打开配置窗口时本地已就绪。
-    auto *manager = new QNetworkAccessManager(qApp);
     QNetworkRequest request(configFileUrl());
     request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     QNetworkReply *reply = manager->get(request);
-    connect(reply, &QNetworkReply::finished, reply, [configPath, manager, reply] {
-        if (reply->error() == QNetworkReply::NoError && !QFile::exists(configPath)) {
-            QSaveFile file(configPath);
-            if (file.open(QIODevice::WriteOnly)) {
-                file.write(reply->readAll());
-                file.commit();
-                qDebug() << "配置文件预热下载成功:" << configPath;
-            } else {
-                qDebug() << "无法保存预热配置文件:" << file.errorString();
-            }
-        } else if (reply->error() != QNetworkReply::NoError) {
-            qDebug() << "配置文件预热下载失败:" << reply->errorString();
-        }
+    writer->attach(reply);
+    connect(reply, &QNetworkReply::finished, reply, [manager, reply, writer] {
+        const QString error = writer->finish();
+        if (!error.isEmpty()) qWarning() << "配置预热下载失败:" << error;
         reply->deleteLater();
         manager->deleteLater();
     });
 }
 
-void ConfigWindow::downloadFile(int id)
+void ConfigWindow::downloadFile(int id, bool retry)
 {
+    if (!retry && activeDownloadPaths.contains(id)) return;
     if (!configData.contains(id)) {
+        restoreDownloadButton(id);
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "配置信息不存在！", this);
         return;
     }
-
     const DownloadConfig entry = configData.value(id);
-    const QString fileType = entry.fileType;
-    const QString fileName = entry.fileName;
-    const QString url = entry.url;
-
-    if (!isSafeFileName(fileName) || (fileType != "exe" && fileType != "zip")) {
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "下载配置中的文件名或类型无效。", this);
+    const QUrl url(entry.url);
+    if (!isSafeFileName(entry.fileName) || (entry.fileType != "exe" && entry.fileType != "zip")
+        || (entry.fileType == "exe" && !entry.fileName.endsWith(".exe", Qt::CaseInsensitive))
+        || !url.isValid() || url.host().isEmpty()
+        || url.scheme().compare("https", Qt::CaseInsensitive) != 0) {
+        restoreDownloadButton(id);
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "下载配置中的文件名、类型或 HTTPS 地址无效。", this);
         return;
     }
-
-    QString qiubaiPath = ResourceExtractor::getResourcePath();
-
-    // 根据文件类型确定实际保存的文件名
-    QString actualFileName = fileName;
-    if (fileType == "zip") {
-        // zip类型：如果文件名是.exe，改为.zip
-        if (actualFileName.endsWith(".exe", Qt::CaseInsensitive)) {
-            actualFileName = actualFileName.left(actualFileName.length() - 4) + ".zip";
-        } else if (!actualFileName.endsWith(".zip", Qt::CaseInsensitive)) {
-            actualFileName += ".zip";
+    QString actualFileName = entry.fileName;
+    if (entry.fileType == "zip") {
+        if (actualFileName.endsWith(".exe", Qt::CaseInsensitive)) actualFileName.chop(4);
+        if (!actualFileName.endsWith(".zip", Qt::CaseInsensitive)) actualFileName += ".zip";
+    }
+    const QString filePath = ResourceExtractor::getResourcePath() + "/" + actualFileName;
+    for (auto it = activeDownloadPaths.cbegin(); it != activeDownloadPaths.cend(); ++it) {
+        if (it.key() != id && it.value().compare(filePath, Qt::CaseInsensitive) == 0) {
+            restoreDownloadButton(id);
+            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "下载进行中", "同一目标文件正在下载，请稍后重试。", this);
+            return;
         }
     }
-
-    QString filePath = qiubaiPath + "/" + actualFileName;
-
-    // 如果是exe且文件已存在，直接打开
-    if (fileType == "exe" && QFile::exists(filePath)) {
-        openExecutable(filePath);
+    if (QFile::exists(filePath)) {
+        restoreDownloadButton(id);
+        if (entry.fileType == "exe") {
+            openExecutable(filePath);
+        } else {
+            const QString exePath = ResourceExtractor::getResourcePath() + "/" + entry.fileName;
+            if (QFile::exists(exePath)) openExecutable(exePath);
+            else extractZipAndOpen(filePath, entry.fileName);
+        }
         return;
     }
-
-    // 如果是zip，检查zip文件或解压后的exe是否存在
-    if (fileType == "zip") {
-        // 先检查zip文件是否存在
-        if (QFile::exists(filePath)) {
-            // zip存在，检查是否已解压
-            QString exeName = fileName;  // 原始文件名（.exe）
-            QString exePath = qiubaiPath + "/" + exeName;
-            if (QFile::exists(exePath)) {
-                openExecutable(exePath);
-                return;
-            } else {
-                // zip存在但未解压，解压并打开
-                extractZipAndOpen(filePath, exeName);
-                return;
-            }
-        }
+    auto *writer = new DownloadFileWriter(filePath, this);
+    if (!writer->isOpen()) {
+        const QString error = writer->errorString();
+        delete writer;
+        restoreDownloadButton(id);
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "无法创建下载临时文件：" + error, this);
+        return;
     }
-
-    // 文件不存在，开始下载
-    qDebug() << "开始下载文件:" << fileName << "从" << url;
-
-    // 更新按钮文本为进度
-    if (id >= 1 && id <= DownloadOptionCount) {
-        buttons[id - 1]->setText("0%");
-        buttons[id - 1]->setEnabled(false);
-    }
-
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-
-    // 禁用HTTP/2，使用HTTP/1.1更稳定
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
-
-    // 设置缓存策略
     request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::PreferNetwork);
-
-    // 设置超时（0表示无超时限制）
-    request.setTransferTimeout(0);
-
     QNetworkReply *reply = fileDownloadManager->get(request);
     downloadingFiles[reply] = id;
-    downloadBuffers[reply] = QByteArray();  // 初始化缓冲区
-
-    // 不设置缓冲区大小限制，让Qt自动管理
-    reply->setReadBufferSize(0);
-
-    // 连接下载进度信号
+    downloadFiles[reply] = writer;
+    downloadPaths[reply] = filePath;
+    activeDownloadPaths[id] = filePath;
+    writer->attach(reply);
     connect(reply, &QNetworkReply::downloadProgress, this, &ConfigWindow::onDownloadProgress);
+    if (id >= 1 && id <= buttons.size()) {
+        buttons[id - 1]->setText("0%");
+        buttons[id - 1]->setEnabled(false);
+    }
+}
 
-    // 连接readyRead信号，及时读取数据到缓冲区
-    connect(reply, &QNetworkReply::readyRead, this, [this, reply]() {
-        if (downloadBuffers.contains(reply)) {
-            downloadBuffers[reply].append(reply->readAll());
-        }
-    });
-
-    // 连接错误信号
-    connect(reply, &QNetworkReply::errorOccurred, this, [this, reply, id](QNetworkReply::NetworkError code) {
-        qDebug() << "下载错误:" << code << reply->errorString();
-        // 清理超时定时器
-        if (downloadTimeoutTimers.contains(reply)) {
-            QTimer *timer = downloadTimeoutTimers.take(reply);
-            timer->stop();
-            timer->deleteLater();
-        }
-        lastReceivedBytes.remove(reply);
-
-        if (id >= 1 && id <= DownloadOptionCount) {
-            buttons[id - 1]->setText("下载失败");
-            QTimer::singleShot(2000, this, [this, id]() {
-                if (originalButtonTexts.contains(id)) {
-                    buttons[id - 1]->setText(originalButtonTexts[id]);
-                    buttons[id - 1]->setEnabled(true);
-                }
-            });
-        }
-    });
-
-    // 创建超时定时器（15秒无数据则超时）
-    QTimer *timeoutTimer = new QTimer(this);
-    timeoutTimer->setSingleShot(false);
-    timeoutTimer->setInterval(15000);  // 15秒检测一次
-    connect(timeoutTimer, &QTimer::timeout, this, &ConfigWindow::onDownloadTimeout);
-    downloadTimeoutTimers[reply] = timeoutTimer;
-    lastReceivedBytes[reply] = 0;
-    timeoutTimer->start();
+void ConfigWindow::restoreDownloadButton(int id)
+{
+    activeDownloadPaths.remove(id);
+    retryCount.remove(id);
+    if (id >= 1 && id <= buttons.size()) {
+        buttons[id - 1]->setText(originalButtonTexts.value(id));
+        buttons[id - 1]->setEnabled(true);
+    }
 }
 
 void ConfigWindow::onDownloadProgress(qint64 bytesReceived, qint64 bytesTotal)
@@ -435,9 +396,6 @@ void ConfigWindow::onDownloadProgress(qint64 bytesReceived, qint64 bytesTotal)
     if (!reply || !downloadingFiles.contains(reply)) {
         return;
     }
-
-    // 更新最后接收的字节数
-    lastReceivedBytes[reply] = bytesReceived;
 
     int id = downloadingFiles[reply];
 
@@ -459,104 +417,35 @@ void ConfigWindow::onDownloadProgress(qint64 bytesReceived, qint64 bytesTotal)
 
 void ConfigWindow::onFileDownloadFinished(QNetworkReply *reply)
 {
-    // 清理超时定时器
-    if (downloadTimeoutTimers.contains(reply)) {
-        QTimer *timer = downloadTimeoutTimers.take(reply);
-        timer->stop();
-        timer->deleteLater();
-    }
-    lastReceivedBytes.remove(reply);
-
     if (!downloadingFiles.contains(reply)) {
         reply->deleteLater();
         return;
     }
-
-    int id = downloadingFiles[reply];
-    downloadingFiles.remove(reply);
-
-    // 清理重试计数
-    retryCount.remove(id);
-
-    // 恢复按钮文本和状态
-    if (id >= 1 && id <= DownloadOptionCount && originalButtonTexts.contains(id)) {
-        buttons[id - 1]->setText(originalButtonTexts[id]);
-        buttons[id - 1]->setEnabled(true);
-    }
-
-    if (reply->error() != QNetworkReply::NoError) {
-        qDebug() << "下载失败 - 错误代码:" << reply->error() << "错误信息:" << reply->errorString();
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "下载失败",
-            QString("文件下载失败：%1").arg(reply->errorString()), this);
-        downloadBuffers.remove(reply);  // 清理缓冲区
-        reply->deleteLater();
-        return;
-    }
-
-    // 从缓冲区获取数据，并读取剩余数据
-    QByteArray data;
-    if (downloadBuffers.contains(reply)) {
-        data = downloadBuffers[reply];
-        downloadBuffers.remove(reply);
-    }
-    data.append(reply->readAll());  // 读取可能剩余的数据
-
-    qDebug() << "下载完成，数据大小:" << data.size() << "字节";
-
-    if (data.isEmpty()) {
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "下载的文件为空！", this);
-        reply->deleteLater();
-        return;
-    }
-
-    const DownloadConfig entry = configData.value(id);
-    const QString fileType = entry.fileType;
-    const QString fileName = entry.fileName;
-
-    QString qiubaiPath = ResourceExtractor::getResourcePath();
-
-    // 根据文件类型确定实际保存的文件名
-    QString actualFileName = fileName;
-    if (fileType == "zip") {
-        // zip类型：如果文件名是.exe，改为.zip
-        if (actualFileName.endsWith(".exe", Qt::CaseInsensitive)) {
-            actualFileName = actualFileName.left(actualFileName.length() - 4) + ".zip";
-        } else if (!actualFileName.endsWith(".zip", Qt::CaseInsensitive)) {
-            actualFileName += ".zip";
-        }
-    }
-
-    QString filePath = qiubaiPath + "/" + actualFileName;
-
-    // 使用 QSaveFile，避免下载中断时留下一个看似完整但实际损坏的正式文件。
-    QSaveFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly)) {
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
-            QString("无法保存文件：%1").arg(file.errorString()), this);
-        reply->deleteLater();
-        return;
-    }
-
-    const qint64 written = file.write(data);
-    if (written != data.size() || !file.commit()) {
-        const QString error = file.errorString();
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
-            QString("保存文件失败：%1").arg(error), this);
-        reply->deleteLater();
-        return;
-    }
-
-    qDebug() << "文件保存完成:" << filePath << "写入字节:" << written;
-
-    // 根据文件类型处理
-    if (fileType == "exe") {
-        openExecutable(filePath);
-    } else if (fileType == "zip") {
-        // 使用原始文件名（.exe）作为解压后要打开的文件
-        extractZipAndOpen(filePath, fileName);
-    }
-
+    const int id = downloadingFiles.take(reply);
+    const QString path = downloadPaths.take(reply);
+    DownloadFileWriter *writer = downloadFiles.take(reply);
+    const QString error = writer ? writer->finish() : QStringLiteral("下载临时文件不存在");
+    const bool retry = writer && writer->timedOut() && retryCount.value(id, 0) < 3;
+    const qint64 written = writer ? writer->bytesWritten() : 0;
+    // finish() already closes the temporary file. Defer object destruction in
+    // case a timeout is still unwinding through the writer's abort callback.
+    if (writer) writer->deleteLater();
     reply->deleteLater();
+    if (retry) {
+        ++retryCount[id];
+        buttons[id - 1]->setText("重试中...");
+        QTimer::singleShot(1000, this, [this, id] { downloadFile(id, true); });
+        return;
+    }
+    restoreDownloadButton(id);
+    if (!error.isEmpty()) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "下载失败", "文件下载失败：" + error, this);
+        return;
+    }
+    qDebug() << "文件保存完成:" << path << "写入字节:" << written;
+    const DownloadConfig entry = configData.value(id);
+    if (entry.fileType == "exe") openExecutable(path);
+    else extractZipAndOpen(path, entry.fileName);
 }
 
 void ConfigWindow::extractZipAndOpen(const QString &zipPath, const QString &exeName)
@@ -679,115 +568,15 @@ void ConfigWindow::openExecutable(const QString &exePath)
     }
 }
 
-void ConfigWindow::onDownloadTimeout()
-{
-    QTimer *timer = qobject_cast<QTimer*>(sender());
-    if (!timer) return;
-
-    // 找到对应的 reply
-    QNetworkReply *reply = nullptr;
-    for (auto it = downloadTimeoutTimers.begin(); it != downloadTimeoutTimers.end(); ++it) {
-        if (it.value() == timer) {
-            reply = it.key();
-            break;
-        }
-    }
-
-    if (!reply || !downloadingFiles.contains(reply)) {
-        timer->stop();
-        return;
-    }
-
-    int id = downloadingFiles[reply];
-    qint64 lastBytes = lastReceivedBytes.value(reply, 0);
-    qint64 currentBytes = downloadBuffers.value(reply, QByteArray()).size();
-
-    // 检查是否有新数据
-    if (currentBytes == lastBytes && currentBytes > 0) {
-        // 没有新数据，可能卡住了
-        int retry = retryCount.value(id, 0);
-
-        if (retry < 3) {
-            // 重试
-            qDebug() << "下载超时，正在重试... 第" << (retry + 1) << "次";
-
-            // 清理当前下载
-            timer->stop();
-            downloadTimeoutTimers.remove(reply);
-            lastReceivedBytes.remove(reply);
-            downloadBuffers.remove(reply);
-            downloadingFiles.remove(reply);
-
-            // 保存重试次数
-            retryCount[id] = retry + 1;
-
-            reply->abort();
-            reply->deleteLater();
-            timer->deleteLater();
-
-            // 重新下载
-            if (id >= 1 && id <= DownloadOptionCount) {
-                buttons[id - 1]->setText("重试中...");
-                buttons[id - 1]->setEnabled(false);
-            }
-
-            QTimer::singleShot(1000, this, [this, id]() {
-                downloadFile(id);
-            });
-        } else {
-            // 超过重试次数
-            qDebug() << "下载失败，已重试3次";
-
-            timer->stop();
-            downloadTimeoutTimers.remove(reply);
-            lastReceivedBytes.remove(reply);
-            retryCount.remove(id);
-            downloadBuffers.remove(reply);
-            downloadingFiles.remove(reply);
-
-            reply->abort();
-            reply->deleteLater();
-            timer->deleteLater();
-
-            if (id >= 1 && id <= DownloadOptionCount && originalButtonTexts.contains(id)) {
-                buttons[id - 1]->setText(originalButtonTexts[id]);
-                buttons[id - 1]->setEnabled(true);
-            }
-
-            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "下载失败",
-                "下载超时，请检查网络连接后重试", this);
-        }
-    }
-
-    // 更新记录
-    lastReceivedBytes[reply] = currentBytes;
-}
-
 void ConfigWindow::onDownloadFinished(QNetworkReply *reply)
 {
-    if (reply->error() == QNetworkReply::NoError) {
-        // 下载成功，保存文件
-        QByteArray data = reply->readAll();
-
-        QString qiubaiPath = ResourceExtractor::getResourcePath();
-        QString configPath = qiubaiPath + "/download_config.txt";
-
-        QFile file(configPath);
-        if (file.open(QIODevice::WriteOnly)) {
-            file.write(data);
-            file.close();
-            qDebug() << "配置文件下载成功:" << configPath;
-
-            // 重新加载配置文件并就地刷新按钮文字（窗口可能已显示）。
-            loadConfigFile();
-            refreshConfigButtonLabels();
-        } else {
-            qDebug() << "无法保存配置文件:" << file.errorString();
-        }
+    DownloadFileWriter *writer = configDownloadFiles.take(reply);
+    const QString error = writer ? writer->finish() : QStringLiteral("下载临时文件不存在");
+    if (error.isEmpty()) {
+        loadConfigFile();
+        refreshConfigButtonLabels();
     } else {
-        // 下载失败
-        qDebug() << "配置文件下载失败:" << reply->errorString();
+        qWarning() << "配置文件下载失败:" << error;
     }
-
     reply->deleteLater();
 }

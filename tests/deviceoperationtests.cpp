@@ -65,12 +65,41 @@ QString ResourceExtractor::getFastbootPath()
 }
 QString ResourceExtractor::getNeilImagePath() { return fixturePath + "/Neil.jpg"; }
 
+class InterruptedReply : public QNetworkReply
+{
+public:
+    explicit InterruptedReply(QObject *parent = nullptr) : QNetworkReply(parent)
+    {
+        setUrl(QUrl("https://example.test/tool"));
+        open(QIODevice::ReadOnly);
+    }
+    void abort() override
+    {
+        setError(OperationCanceledError, "cancelled fixture");
+        setFinished(true);
+        emit finished();
+    }
+protected:
+    qint64 readData(char *, qint64) override { return -1; }
+};
+
 class DeviceOperationTests : public QObject
 {
     Q_OBJECT
 public:
     static int exitHelper(QApplication &application, const QStringList &arguments);
 private slots:
+    void uniqueTargetReboot_data();
+    void uniqueTargetReboot();
+    void multipleDevicesRejectOperations_data();
+    void multipleDevicesRejectOperations();
+    void physicalTargetChangeStopsOperation_data();
+    void physicalTargetChangeStopsOperation();
+    void physicalDisconnectStopsFileBatch();
+    void configRejectsUnsafeInputs();
+    void configTimeoutRetryRestoresButton();
+    void configExistingExeWithoutHashCanLaunch();
+    void configConflictingDestinationRejected();
     void initTestCase();
     void init();
     void payloadShortcutHasNoBootFilters();
@@ -132,6 +161,180 @@ private:
     QTimer messageCloser;
     int messages = 0;
 };
+
+void DeviceOperationTests::uniqueTargetReboot_data()
+{
+    QTest::addColumn<bool>("adb");
+    QTest::newRow("adb") << true;
+    QTest::newRow("fastboot") << false;
+}
+
+void DeviceOperationTests::uniqueTargetReboot()
+{
+    QFETCH(bool, adb);
+    DeviceCheckWindow window;
+    if (adb) awaitAdb(window); else awaitFastboot(window);
+    window.onRebootButtonClicked();
+    QTRY_VERIFY(!window.isOperationInProgress());
+    const QJsonArray command{adb ? "adb" : "fastboot", "-s", "mock-serial", "reboot"};
+    QVERIFY(audit().contains(QString::fromUtf8(QJsonDocument(command).toJson(QJsonDocument::Compact))));
+    QVERIFY(!DeviceOperationLease::owner());
+}
+
+void DeviceOperationTests::multipleDevicesRejectOperations_data()
+{
+    uniqueTargetReboot_data();
+}
+
+void DeviceOperationTests::multipleDevicesRejectOperations()
+{
+    QFETCH(bool, adb);
+    QVERIFY(putFile(fixturePath + "/mode.txt", adb ? "adb" : "fastboot"));
+    QVERIFY(putFile(fixturePath + "/multiple.txt", "yes"));
+    DeviceCheckWindow window;
+    QTRY_COMPARE(DeviceManager::instance()->deviceSerials().size(), 2);
+    QVERIFY(!DeviceManager::instance()->hasUniqueOperableDevice());
+    window.onRebootButtonClicked();
+    QVERIFY(!window.isOperationInProgress());
+    QVERIFY(lastMessage.contains("断开其他设备"));
+    window.flashPartition("boot");
+    QVERIFY(!window.isOperationInProgress());
+    QVERIFY(!window.transferFiles({fixturePath + "/dummy.txt"}));
+    if (adb) {
+        RepairWindow repair;
+        QVERIFY(!repair.beginAdbOperation());
+        QVERIFY(repair.operationSerial.isEmpty());
+    }
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(!audit().contains("\"reboot\""));
+    QVERIFY(!audit().contains("\"flash\""));
+    QVERIFY(!audit().contains("\"push\""));
+}
+
+void DeviceOperationTests::physicalTargetChangeStopsOperation_data()
+{
+    QTest::addColumn<bool>("adb");
+    QTest::addColumn<QString>("change");
+    for (bool adb : {true, false}) {
+        for (const QString &change : {QString("serial"), QString("none"), QString("multiple")})
+            QTest::newRow(qPrintable((adb ? QString("adb-") : QString("fastboot-")) + change)) << adb << change;
+    }
+}
+
+void DeviceOperationTests::physicalTargetChangeStopsOperation()
+{
+    QFETCH(bool, adb);
+    QFETCH(QString, change);
+    DeviceCheckWindow window;
+    if (adb) awaitAdb(window); else awaitFastboot(window);
+    DeviceManager::instance()->pauseMonitoring();
+    if (change == "serial") QVERIFY(putFile(fixturePath + "/serial.txt", "another-device"));
+    else if (change == "none") QVERIFY(putFile(fixturePath + "/mode.txt", "none"));
+    else QVERIFY(putFile(fixturePath + "/multiple.txt", "yes"));
+    // Cached UI data intentionally still points to the original device.
+    QCOMPARE(DeviceManager::instance()->uniqueDeviceSerial(), QString("mock-serial"));
+    window.onRebootButtonClicked();
+    QTRY_VERIFY(!window.isOperationInProgress());
+    QVERIFY(!audit().contains("\"reboot\""));
+    QVERIFY(!DeviceOperationLease::owner());
+    QVERIFY(!lastMessage.isEmpty());
+    if (adb) {
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "mock-serial");
+        DeviceManager::instance()->pauseMonitoring();
+        RepairWindow repair;
+        QVERIFY(repair.beginAdbOperation());
+        repair.repairProcess = ProcessManager::createProcess(&repair);
+        repair.startAdbCommand({"reboot"});
+        QTRY_VERIFY(repair.operationSerial.isEmpty());
+        QVERIFY(repair.buttons[RepairWindow::UsbFix]->isEnabled());
+        QVERIFY(!DeviceOperationLease::owner());
+        QVERIFY(!audit().contains("\"reboot\""));
+    }
+}
+
+void DeviceOperationTests::physicalDisconnectStopsFileBatch()
+{
+    DeviceCheckWindow window;
+    awaitAdb(window);
+    const QString first = fixturePath + "/first.txt";
+    const QString second = fixturePath + "/second.txt";
+    QVERIFY(putFile(first, "first"));
+    QVERIFY(putFile(second, "second"));
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "disconnect-after-first"));
+    QVERIFY(window.transferFiles({first, second}));
+    QTRY_VERIFY(!window.isOperationInProgress());
+    QCOMPARE(pushes().size(), 1);
+    QVERIFY(!DeviceOperationLease::owner());
+}
+
+void DeviceOperationTests::configRejectsUnsafeInputs()
+{
+    QVERIFY(putFile(fixturePath + "/download_config.txt",
+        "id|type|file|url\n"
+        "1|exe|safe.exe|https://example.test/file\n"
+        "2|zip|tool.exe|https://example.test/archive\n"
+        "3|exe|bad.exe|http://example.test/file\n"
+        "4|exe|../bad.exe|https://example.test/file\n"
+        "5|bat|bad.bat|https://example.test/file\n"
+        "6|exe|bad.exe|https:///file\n"));
+    ConfigWindow window;
+    QCOMPARE(window.configData.size(), 2);
+    for (const QString &name : {QString("CON.exe"), QString("LPT1.exe"), QString("bad?.exe"),
+                                QString("bad.exe."), QString("bad.exe "), QString("../tool.exe")})
+        QVERIFY(!ConfigWindow::isSafeFileName(name));
+    QVERIFY(ConfigWindow::isSafeFileName("中文 tool.exe"));
+    QVERIFY(putFile(fixturePath + "/download_config.txt", "header\n6|exe|new.exe|https://example.test/new\n"));
+    window.loadConfigFile();
+    QCOMPARE(window.configData.size(), 1);
+    QVERIFY(window.configData.contains(6));
+}
+
+void DeviceOperationTests::configTimeoutRetryRestoresButton()
+{
+    QVERIFY(putFile(fixturePath + "/download_config.txt", "header\n1|exe|tool.exe|https://example.test/tool\n"));
+    ConfigWindow window;
+    auto *reply = new InterruptedReply(&window);
+    auto *writer = new DownloadFileWriter(fixturePath + "/tool.exe");
+    writer->attach(reply, 20);
+    window.downloadingFiles[reply] = 1;
+    window.downloadFiles[reply] = writer;
+    window.downloadPaths[reply] = fixturePath + "/tool.exe";
+    window.activeDownloadPaths[1] = fixturePath + "/tool.exe";
+    window.buttons[0]->setEnabled(false);
+    connect(reply, &QNetworkReply::finished, &window, [&window, reply] { window.onFileDownloadFinished(reply); });
+    QTRY_COMPARE_WITH_TIMEOUT(window.retryCount.value(1), 1, 500);
+    QVERIFY(!window.buttons[0]->isEnabled());
+    QVERIFY(window.downloadFiles.isEmpty());
+    // The retry uses the offline proxy configured by initTestCase and fails.
+    QTRY_VERIFY_WITH_TIMEOUT(window.buttons[0]->isEnabled(), 5000);
+    QVERIFY(window.activeDownloadPaths.isEmpty());
+    QVERIFY(window.retryCount.isEmpty());
+    QCOMPARE(window.buttons[0]->text(), QString("tool"));
+    QVERIFY(!QFile::exists(fixturePath + "/tool.exe"));
+}
+
+void DeviceOperationTests::configExistingExeWithoutHashCanLaunch()
+{
+    QVERIFY(putFile(fixturePath + "/download_config.txt", "header\n1|exe|adb.exe|https://example.test/tool\n"));
+    ConfigWindow window;
+    window.downloadFile(1);
+    QTRY_VERIFY(audit().contains("[\"adb\"]"));
+    QVERIFY(window.buttons[0]->isEnabled());
+    QVERIFY(window.activeDownloadPaths.isEmpty());
+}
+
+void DeviceOperationTests::configConflictingDestinationRejected()
+{
+    QVERIFY(putFile(fixturePath + "/download_config.txt",
+        "header\n1|zip|tool.exe|https://example.test/one\n2|zip|TOOL.exe|https://example.test/two\n"));
+    ConfigWindow window;
+    window.activeDownloadPaths[1] = fixturePath + "/tool.zip";
+    window.downloadFile(2);
+    QVERIFY(window.downloadingFiles.isEmpty());
+    QVERIFY(window.activeDownloadPaths.contains(1));
+    QVERIFY(window.buttons[1]->isEnabled());
+    QVERIFY(lastMessage.contains("正在下载"));
+}
 
 void DeviceOperationTests::initTestCase()
 {
@@ -349,7 +552,7 @@ void DeviceOperationTests::cleanup()
     QTRY_COMPARE(manager->m_adbOnlyRefCount, 0);
     manager->m_isPaused = false;
     manager->m_isChecking = false;
-    manager->m_currentMode = DeviceManager::None;
+    manager->setDetectedDevice(DeviceManager::None, {});
     manager->m_deviceInfo.clear();
     fixture.reset();
 }
@@ -648,7 +851,7 @@ void DeviceOperationTests::invalidDropsAreRejected()
     QObject other;
     if (reason == "none") manager->m_currentMode = DeviceManager::None;
     if (reason == "fastboot") manager->m_currentMode = DeviceManager::Fastboot;
-    if (reason == "serial") manager->m_deviceSerial.clear();
+    if (reason == "serial") manager->setDetectedDevice(DeviceManager::ADB, {});
     if (reason == "lease") QVERIFY(DeviceOperationLease::acquire(&other));
     if (reason == "directory") urls = {QUrl::fromLocalFile(fixturePath)};
     if (reason == "remote") urls = {QUrl("https://example.invalid/file.txt")};
@@ -733,7 +936,10 @@ void DeviceOperationTests::failedTransferStartReleasesOperation()
     QVERIFY(dropFiles(window, {QUrl::fromLocalFile(path), QUrl::fromLocalFile(ResourceExtractor::getFastbootPath())}));
     QTRY_VERIFY(!window.operationInProgress);
     QTRY_COMPARE(messages, 1);
-    QVERIFY(lastMessage.contains(QStringLiteral("成功：0，失败：1，未传输：1")));
+    // The connection preflight now fails before either push is attempted.
+    QVERIFY(lastMessage.contains(QStringLiteral("成功：0，失败：0，未传输：2")));
+    QVERIFY(lastMessage.contains(QStringLiteral("无法启动设备连接复核")));
+    QVERIFY(pushes().isEmpty());
     QVERIFY(window.fileTransfer.files.isEmpty());
     QVERIFY(window.currentProcess == nullptr);
     QVERIFY(DeviceOperationLease::owner() == nullptr);
@@ -797,7 +1003,7 @@ void DeviceOperationTests::transferDeviceChangeStopsBatch()
                               QUrl::fromLocalFile(ResourceExtractor::getFastbootPath())}));
     QTRY_COMPARE(window.currentProcess->state(), QProcess::Running);
     if (disconnected) DeviceManager::instance()->m_currentMode = DeviceManager::None;
-    else DeviceManager::instance()->m_deviceSerial = "different-device";
+    else DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "different-device");
     QTRY_VERIFY(!window.operationInProgress);
     QTRY_COMPARE(messages, 1);
     QCOMPARE(pushes().size(), 1);
@@ -989,8 +1195,8 @@ void DeviceOperationTests::successfulFlashAndRebootRestoreMonitoring()
     QTRY_VERIFY_WITH_TIMEOUT(!window.isOperationInProgress(), 5000);
     QVERIFY(!window.currentProcess);
     QVERIFY(!DeviceManager::instance()->m_isPaused);
-    QVERIFY(audit().contains("[\"fastboot\",\"flash\",\"boot\",\"boot.img\"]"));
-    QVERIFY(audit().contains("[\"fastboot\",\"reboot\"]"));
+    QVERIFY(audit().contains("[\"fastboot\",\"-s\",\"mock-serial\",\"flash\",\"boot\",\"boot.img\"]"));
+    QVERIFY(audit().contains("[\"fastboot\",\"-s\",\"mock-serial\",\"reboot\"]"));
     QVERIFY(!window.isVisible());
     window.show();
     QVERIFY(window.bootButton->isEnabled());
@@ -1061,7 +1267,7 @@ void DeviceOperationTests::legacyWaitWorksWithApplicationLease()
     QVERIFY(DeviceOperationLease::owner() == &window);
     QTRY_VERIFY_WITH_TIMEOUT(window.currentProcess && window.currentProcess->state() == QProcess::Running, 7000);
     QVERIFY(DeviceManager::instance()->m_isPaused);
-    QTRY_VERIFY(audit().contains("[\"fastboot\",\"flash\",\"boot\",\"boot.img\"]"));
+    QTRY_VERIFY(audit().contains("[\"fastboot\",\"-s\",\"mock-serial\",\"flash\",\"boot\",\"boot.img\"]"));
     window.currentProcess->kill(); // This is the isolated test executable, never a device command.
     QTRY_VERIFY(!window.isOperationInProgress());
     QVERIFY(!DeviceManager::instance()->m_isPaused);
@@ -1129,7 +1335,8 @@ void DeviceOperationTests::apkCommandsQuoteInstallAndCleanup()
     repair.repairProcess = ProcessManager::createProcess(&repair);
     connect(repair.repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             &repair, &RepairWindow::onApkInstallStepFinished);
-    repair.repairProcess->start(ResourceExtractor::getAdbPath(), {"push", repair.apkFilesToInstall[0],
+    QVERIFY(repair.beginAdbOperation());
+    repair.startAdbCommand({"push", repair.apkFilesToInstall[0],
         "/data/local/tmp/My App's;test.apk"});
     QTRY_COMPARE_WITH_TIMEOUT(repair.currentApkIndex, 1, 5000);
     QCOMPARE(repair.successCount, 1);
@@ -1137,7 +1344,7 @@ void DeviceOperationTests::apkCommandsQuoteInstallAndCleanup()
     const QString remote = "/data/local/tmp/My App's;test.apk";
     for (const QString &cmd : {"pm install -r ", "rm -f "}) {
         const QString quoted = ShellCommand::asRoot(cmd + ShellCommand::quote(remote));
-        const QByteArray json = QJsonDocument(QJsonArray{"adb", "shell", quoted}).toJson(QJsonDocument::Compact);
+        const QByteArray json = QJsonDocument(QJsonArray{"adb", "-s", "mock-serial", "shell", quoted}).toJson(QJsonDocument::Compact);
         QVERIFY(audit().contains(QString::fromUtf8(json)));
     }
 }
@@ -1161,6 +1368,7 @@ void DeviceOperationTests::moduleCommandsQuoteInstallAndCleanup()
     repair.rootManagerType = static_cast<RepairWindow::RootManager>(manager);
     repair.moduleFilesToInstall = {fixturePath + "/My Module's;test.zip"};
     repair.repairProcess = ProcessManager::createProcess(&repair);
+    QVERIFY(repair.beginAdbOperation());
     repair.startModuleInstall();
     QTRY_COMPARE_WITH_TIMEOUT(repair.currentModuleIndex, 1, 5000);
     QTRY_COMPARE_WITH_TIMEOUT(repair.buttons[RepairWindow::InstallModule]->text(), QString("安装模块"), 5000);
@@ -1169,7 +1377,7 @@ void DeviceOperationTests::moduleCommandsQuoteInstallAndCleanup()
     const QString remote = "/data/local/tmp/My Module's;test.zip";
     for (const QString &cmd : {installPrefix, QString("rm -f ")}) {
         const QString quoted = ShellCommand::asRoot(cmd + ShellCommand::quote(remote));
-        const QByteArray json = QJsonDocument(QJsonArray{"adb", "shell", quoted}).toJson(QJsonDocument::Compact);
+        const QByteArray json = QJsonDocument(QJsonArray{"adb", "-s", "mock-serial", "shell", quoted}).toJson(QJsonDocument::Compact);
         QVERIFY(audit().contains(QString::fromUtf8(json)));
     }
 }
@@ -1193,10 +1401,18 @@ int helperMain(QCoreApplication &application)
     if (args.value(0) == "-s") { args.removeFirst(); args.removeFirst(); }
     const QByteArray mode = readFile(directory + "/mode.txt");
     if (args.value(0) == "devices") {
+        const QByteArray serial = QFile::exists(directory + "/serial.txt")
+            ? readFile(directory + "/serial.txt") : QByteArray("mock-serial");
+        const bool multiple = QFile::exists(directory + "/multiple.txt");
         if (base == "adb") {
-            std::puts(mode == "adb" ? "List of devices attached\nmock-serial\tdevice" : "List of devices attached");
+            std::puts("List of devices attached");
+            if (mode == "adb") {
+                std::printf("%s\tdevice\n", serial.constData());
+                if (multiple) std::puts("other-device\tdevice");
+            }
         } else if (mode == "fastboot") {
-            std::puts("mock-serial\tfastboot");
+            std::printf("%s\tfastboot\n", serial.constData());
+            if (multiple) std::puts("other-device\tfastboot");
         }
         return 0;
     }
@@ -1225,6 +1441,7 @@ int helperMain(QCoreApplication &application)
             const QString target = directory + "/device/" + QFileInfo(args.value(2)).fileName();
             QFile::remove(target);
             if (!QFile::copy(args.value(1), target)) { application.exit(1); return; }
+            if (behavior == "disconnect-after-first") putFile(directory + "/mode.txt", "none");
             std::puts("1 file pushed");
             application.exit(0);
         });

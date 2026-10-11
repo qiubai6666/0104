@@ -5,6 +5,8 @@
 #include <QProcess>
 #include <QTimer>
 #include <QString>
+#include <QStringList>
+#include <functional>
 
 // 共享设备监控：轮询 ADB/Fastboot，缓存信息，并以信号通知窗口。
 // 窗口必须成对申请/释放监控；刷写分区时暂停监控以避免命令冲突。
@@ -32,6 +34,12 @@ public:
     QString getDeviceDetails() const { return m_deviceDetails; }
     QString getExtendedDeviceDetails() const { return m_extendedDeviceDetails; }
     QString deviceSerial() const { return m_deviceSerial; }
+    QStringList deviceSerials() const { return m_deviceSerials; }
+    QString uniqueDeviceSerial(QString *error = nullptr) const;
+    bool hasUniqueOperableDevice() const { return !uniqueDeviceSerial().isEmpty(); }
+    // Monitoring is paused while a lease is held. Re-enumerate before each command.
+    void verifyOperationTarget(DeviceMode mode, const QString &serial, QObject *context,
+                               std::function<void(const QString &)> completed);
     bool monitoringEnabled() const { return m_checkTimer->isActive(); }
 
     // 确保监控已启动（引用计数）
@@ -77,6 +85,7 @@ private:
     friend class DeviceInformationTests;
     friend class ScreenCastTests;
     void setDetectedDevice(DeviceMode mode, const QString &serial);
+    void setDetectedDevices(DeviceMode mode, const QStringList &serials);
     void cancelInfoQuery();
     void startInfoStep(int step);
     void finishInfoStep(bool success, const QString &output);
@@ -105,6 +114,7 @@ private:
     QString m_deviceDetails;
     QString m_extendedDeviceDetails;
     QString m_deviceSerial;
+    QStringList m_deviceSerials;
     QTimer *m_infoTimer;
     quint64 m_infoGeneration = 0;
     bool m_infoQueryActive = false;

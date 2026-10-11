@@ -17,6 +17,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QPointer>
 
 RepairWindow::RepairWindow(QWidget *parent)
     : QWidget(parent)
@@ -148,23 +149,95 @@ bool RepairWindow::ownsToolWindow(const QWidget *window) const
 bool RepairWindow::setButtonsEnabled(bool enabled)
 {
     if (!enabled && !DeviceOperationLease::acquire(this)) return false;
-    if (enabled) DeviceOperationLease::release(this);
+    if (enabled) {
+        DeviceOperationLease::release(this);
+        operationSerial.clear();
+        buttons[UsbFix]->setText("USB修复");
+        buttons[TmpFix]->setText("修复TMP");
+        buttons[InstallApk]->setText("安装APK");
+        buttons[InstallModule]->setText("安装模块");
+    }
     for (QPushButton *btn : buttons) {
         btn->setEnabled(enabled);
     }
     return true;
 }
 
+bool RepairWindow::beginAdbOperation()
+{
+    QString error;
+    const QString serial = DeviceManager::instance()->uniqueDeviceSerial(&error);
+    if (serial.isEmpty() || DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
+        if (error.isEmpty()) error = QStringLiteral("请连接唯一的 ADB 设备后重试。");
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "无法操作设备", error, this);
+        return false;
+    }
+    operationSerial = serial;
+    if (!setButtonsEnabled(false)) {
+        operationSerial.clear();
+        return false;
+    }
+    return true;
+}
+
+bool RepairWindow::validateAdbOperation()
+{
+    QString error;
+    const QString serial = DeviceManager::instance()->uniqueDeviceSerial(&error);
+    if (!operationSerial.isEmpty() && serial == operationSerial && DeviceManager::instance()->currentMode() == DeviceManager::ADB) {
+        return true;
+    }
+    if (repairProcess) {
+        disconnect(repairProcess, nullptr, this, nullptr);
+        if (repairProcess->state() != QProcess::NotRunning) repairProcess->kill();
+    }
+    setButtonsEnabled(true);
+    UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备已变化",
+        error.isEmpty() ? "设备已断开或目标序列号发生变化，未继续后续操作。" : error, this);
+    return false;
+}
+
+void RepairWindow::startAdbCommand(const QStringList &arguments)
+{
+    if (!validateAdbOperation()) return;
+    const QPointer<QProcess> process(repairProcess);
+    const QString serial = operationSerial;
+    DeviceManager::instance()->verifyOperationTarget(DeviceManager::ADB, serial, this,
+        [this, process, serial, arguments](const QString &error) {
+        if (!process || process != repairProcess || serial != operationSerial) return;
+        if (!error.isEmpty()) {
+            disconnect(process, nullptr, this, nullptr);
+            setButtonsEnabled(true);
+            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备已变化", error, this);
+            return;
+        }
+        if (!validateAdbOperation()) return;
+        connect(process, &QProcess::errorOccurred, this,
+                [this, process, serial](QProcess::ProcessError code) {
+            if (code != QProcess::FailedToStart || serial != operationSerial) return;
+            const QString error = process->errorString();
+            disconnect(process, nullptr, this, nullptr);
+            setButtonsEnabled(true);
+            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "启动失败", error, this);
+        });
+        process->start(ResourceExtractor::getAdbPath(), adbArguments(arguments));
+    });
+}
+
+QStringList RepairWindow::adbArguments(const QStringList &arguments) const
+{
+    QStringList result{QStringLiteral("-s"), operationSerial};
+    result += arguments;
+    return result;
+}
+
 void RepairWindow::executeUsbFix()
 {
     if (DeviceOperationLease::busyFor(this)) return;
-    // 检查设备连接
     if (DeviceManager::instance()->currentMode() != DeviceManager::ADB) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "未检测到设备，请检查设备连接与授权。", this);
         return;
     }
-
-    QString adbPath = ResourceExtractor::getAdbPath();
     QString usbShPath = ResourceExtractor::getResourcePath() + "/usb.sh";
 
     // 检查文件是否存在
@@ -173,7 +246,7 @@ void RepairWindow::executeUsbFix()
         return;
     }
 
-    if (!setButtonsEnabled(false)) return;
+    if (!beginAdbOperation()) return;
     buttons[UsbFix]->setText("修复中...");
 
     // 创建进程对象
@@ -181,7 +254,6 @@ void RepairWindow::executeUsbFix()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
-    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
     usbFixStep = UsbFixStep::Push;
     usbFixExecutionFailed = false;
@@ -193,12 +265,14 @@ void RepairWindow::executeUsbFix()
     connect(repairProcess, &QProcess::errorOccurred,
             this, &RepairWindow::onUsbFixProcessError);
 
-    repairProcess->start(adbPath, QStringList() << "push" << usbShPath << "/storage/emulated/0/usb.sh");
+    startAdbCommand(QStringList() << "push" << usbShPath << "/storage/emulated/0/usb.sh");
 }
 
 void RepairWindow::onUsbFixStep1Finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
+
+    if (!validateAdbOperation()) return;
 
     if (exitStatus != QProcess::NormalExit || exitCode != 0) {
         finishUsbFix(false, "传送 usb.sh 失败，请检查设备连接与授权。\n" +
@@ -208,18 +282,19 @@ void RepairWindow::onUsbFixStep1Finished(int exitCode, QProcess::ExitStatus exit
 
     // 第2步：执行 usb.sh
     usbFixStep = UsbFixStep::Execute;
-    QString adbPath = ResourceExtractor::getAdbPath();
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RepairWindow::onUsbFixStep2Finished);
     connect(repairProcess, &QProcess::errorOccurred,
             this, &RepairWindow::onUsbFixProcessError);
 
-    repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("sh /storage/emulated/0/usb.sh"));
+    startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot("sh /storage/emulated/0/usb.sh"));
 }
 
 void RepairWindow::onUsbFixStep2Finished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
+
+    if (!validateAdbOperation()) return;
 
     const QString output = QString::fromUtf8(repairProcess->readAllStandardOutput()).trimmed();
     const QString errorOutput = QString::fromUtf8(repairProcess->readAllStandardError()).trimmed();
@@ -292,14 +367,13 @@ void RepairWindow::finishUsbFix(bool success, const QString &detail)
 void RepairWindow::startUsbFixCleanup()
 {
     disconnect(repairProcess, nullptr, this, nullptr);
+    if (!validateAdbOperation()) return;
     usbFixStep = UsbFixStep::Cleanup;
-
-    const QString adbPath = ResourceExtractor::getAdbPath();
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RepairWindow::onUsbFixStep3Finished);
     connect(repairProcess, &QProcess::errorOccurred,
             this, &RepairWindow::onUsbFixProcessError);
-    repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f /storage/emulated/0/usb.sh"));
+    startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot("rm -f /storage/emulated/0/usb.sh"));
 }
 
 void RepairWindow::fixTmpFolder()
@@ -311,7 +385,7 @@ void RepairWindow::fixTmpFolder()
         return;
     }
 
-    if (!setButtonsEnabled(false)) return;
+    if (!beginAdbOperation()) return;
     buttons[TmpFix]->setText("修复中...");
 
     // 创建进程对象
@@ -319,7 +393,6 @@ void RepairWindow::fixTmpFolder()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
-    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     // 第1步：创建目录
@@ -330,7 +403,6 @@ void RepairWindow::fixTmpFolder()
 void RepairWindow::onTmpFixStepFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
-    QString adbPath = ResourceExtractor::getAdbPath();
     const bool succeeded = exitStatus == QProcess::NormalExit && exitCode == 0;
 
     switch (tmpFixStep) {
@@ -414,12 +486,13 @@ void RepairWindow::finishTmpFix(bool success, const QString &detail)
 void RepairWindow::startTmpFixCommand(const QStringList &arguments, TmpFixStep step)
 {
     disconnect(repairProcess, nullptr, this, nullptr);
+    if (!validateAdbOperation()) return;
     tmpFixStep = step;
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RepairWindow::onTmpFixStepFinished);
     connect(repairProcess, &QProcess::errorOccurred,
             this, &RepairWindow::onTmpFixProcessError);
-    repairProcess->start(ResourceExtractor::getAdbPath(), arguments);
+    startAdbCommand(arguments);
 }
 
 void RepairWindow::installApk()
@@ -500,7 +573,7 @@ void RepairWindow::installApk()
     }
 
     // 开始安装
-    if (!setButtonsEnabled(false)) return;
+    if (!beginAdbOperation()) return;
     buttons[InstallApk]->setText("安装中...");
 
     currentApkIndex = 0;
@@ -513,28 +586,26 @@ void RepairWindow::installApk()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
-    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RepairWindow::onApkInstallStepFinished);
 
     // 第一步：推送APK到设备
-    QString adbPath = ResourceExtractor::getAdbPath();
     QString apkPath = apkFilesToInstall[currentApkIndex];
     QString apkName = QFileInfo(apkPath).fileName();
     QString remotePath = "/data/local/tmp/" + apkName;
 
     buttons[InstallApk]->setText(QString("推送中(%1/%2)").arg(1).arg(apkFilesToInstall.size()));
-    repairProcess->start(adbPath, QStringList() << "push" << apkPath << remotePath);
+    startAdbCommand(QStringList() << "push" << apkPath << remotePath);
 }
 
 void RepairWindow::onApkInstallStepFinished()
 {
+    if (!validateAdbOperation()) return;
     int exitCode = repairProcess->exitCode();
     QString output = QString::fromLocal8Bit(repairProcess->readAllStandardOutput());
     QString error = QString::fromLocal8Bit(repairProcess->readAllStandardError());
-    QString adbPath = ResourceExtractor::getAdbPath();
     QString apkPath = apkFilesToInstall[currentApkIndex];
     QString apkName = QFileInfo(apkPath).fileName();
     QString remotePath = "/data/local/tmp/" + apkName;
@@ -552,7 +623,7 @@ void RepairWindow::onApkInstallStepFinished()
                 QString nextName = QFileInfo(nextApk).fileName();
                 QString nextRemote = "/data/local/tmp/" + nextName;
                 buttons[InstallApk]->setText(QString("推送中(%1/%2)").arg(currentApkIndex + 1).arg(apkFilesToInstall.size()));
-                repairProcess->start(adbPath, QStringList() << "push" << nextApk << nextRemote);
+                startAdbCommand(QStringList() << "push" << nextApk << nextRemote);
             } else {
                 goto finished;
             }
@@ -561,7 +632,7 @@ void RepairWindow::onApkInstallStepFinished()
             apkInstallStep = ApkInstallStep::InstallWithSuC;
             buttons[InstallApk]->setText(QString("安装中(%1/%2)").arg(currentApkIndex + 1).arg(apkFilesToInstall.size()));
             // 路径先按内层 shell 引用，再引用完整的 su 命令字符串
-            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("pm install -r " + ShellCommand::quote(remotePath)));
+            startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot("pm install -r " + ShellCommand::quote(remotePath)));
         }
         break;
 
@@ -571,12 +642,12 @@ void RepairWindow::onApkInstallStepFinished()
             qDebug() << "安装成功:" << apkName;
             // 删除临时文件
             apkInstallStep = ApkInstallStep::DeleteTemporaryFile;
-            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
+            startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
         } else {
             // -c 失败，尝试使用 -s
             qDebug() << "su -c 失败，尝试 su -s:" << apkName;
             apkInstallStep = ApkInstallStep::InstallWithSuS;
-            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("pm install -r " + ShellCommand::quote(remotePath), "-s"));
+            startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot("pm install -r " + ShellCommand::quote(remotePath), "-s"));
         }
         break;
 
@@ -590,7 +661,7 @@ void RepairWindow::onApkInstallStepFinished()
         }
         // 删除临时文件
         apkInstallStep = ApkInstallStep::DeleteTemporaryFile;
-        repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
+        startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
         break;
 
     case ApkInstallStep::DeleteTemporaryFile:  // delete完成
@@ -603,7 +674,7 @@ void RepairWindow::onApkInstallStepFinished()
             QString nextName = QFileInfo(nextApk).fileName();
             QString nextRemote = "/data/local/tmp/" + nextName;
             buttons[InstallApk]->setText(QString("推送中(%1/%2)").arg(currentApkIndex + 1).arg(apkFilesToInstall.size()));
-            repairProcess->start(adbPath, QStringList() << "push" << nextApk << nextRemote);
+            startAdbCommand(QStringList() << "push" << nextApk << nextRemote);
         } else {
             goto finished;
         }
@@ -688,7 +759,7 @@ void RepairWindow::installModule()
     }
 
     // 禁用按钮，开始检测Root管理器
-    if (!setButtonsEnabled(false)) return;
+    if (!beginAdbOperation()) return;
     buttons[InstallModule]->setText("检测中...");
 
     // 创建进程对象
@@ -696,25 +767,24 @@ void RepairWindow::installModule()
         repairProcess->deleteLater();
     }
     repairProcess = ProcessManager::createProcess(this);
-    connect(repairProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) { if (e==QProcess::FailedToStart) setButtonsEnabled(true); });
     repairProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     connect(repairProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &RepairWindow::onRootDetectFinished);
 
     // 检测Root管理器类型：检查特定目录是否存在（需要root权限）
-    QString adbPath = ResourceExtractor::getAdbPath();
     // Magisk: /data/adb/magisk
     // APatch: /data/adb/ap
     // KernelSU: /data/adb/ksu
     // 使用 su -c 执行，因为 /data/adb 需要root权限访问
-    repairProcess->start(adbPath, QStringList() << "shell"
+    startAdbCommand(QStringList() << "shell"
         << "su -c 'echo MAGISK:$([ -d /data/adb/magisk ] && echo YES || echo NO):AP:$([ -d /data/adb/ap ] && echo YES || echo NO):KSU:$([ -d /data/adb/ksu ] && echo YES || echo NO)'");
 }
 
 void RepairWindow::onRootDetectFinished()
 {
     disconnect(repairProcess, nullptr, this, nullptr);
+    if (!validateAdbOperation()) return;
 
     QString output = QString::fromLocal8Bit(repairProcess->readAllStandardOutput());
     QString error = QString::fromLocal8Bit(repairProcess->readAllStandardError());
@@ -772,6 +842,7 @@ void RepairWindow::onRootDetectFinished()
 void RepairWindow::startModuleInstall()
 {
     if (DeviceOperationLease::busyFor(this)) return;
+    if (!validateAdbOperation()) return;
     buttons[InstallModule]->setText("安装中...");
 
     currentModuleIndex = 0;
@@ -783,21 +854,20 @@ void RepairWindow::startModuleInstall()
             this, &RepairWindow::onModuleInstallStepFinished);
 
     // 第一步：推送模块到设备
-    QString adbPath = ResourceExtractor::getAdbPath();
     QString modulePath = moduleFilesToInstall[currentModuleIndex];
     QString moduleName = QFileInfo(modulePath).fileName();
     QString remotePath = "/data/local/tmp/" + moduleName;
 
     buttons[InstallModule]->setText(QString("推送中(%1/%2)").arg(1).arg(moduleFilesToInstall.size()));
-    repairProcess->start(adbPath, QStringList() << "push" << modulePath << remotePath);
+    startAdbCommand(QStringList() << "push" << modulePath << remotePath);
 }
 
 void RepairWindow::onModuleInstallStepFinished()
 {
+    if (!validateAdbOperation()) return;
     int exitCode = repairProcess->exitCode();
     QString output = QString::fromLocal8Bit(repairProcess->readAllStandardOutput());
     QString error = QString::fromLocal8Bit(repairProcess->readAllStandardError());
-    QString adbPath = ResourceExtractor::getAdbPath();
     QString modulePath = moduleFilesToInstall[currentModuleIndex];
     QString moduleName = QFileInfo(modulePath).fileName();
     QString remotePath = "/data/local/tmp/" + moduleName;
@@ -815,7 +885,7 @@ void RepairWindow::onModuleInstallStepFinished()
                 QString nextName = QFileInfo(nextModule).fileName();
                 QString nextRemote = "/data/local/tmp/" + nextName;
                 buttons[InstallModule]->setText(QString("推送中(%1/%2)").arg(currentModuleIndex + 1).arg(moduleFilesToInstall.size()));
-                repairProcess->start(adbPath, QStringList() << "push" << nextModule << nextRemote);
+                startAdbCommand(QStringList() << "push" << nextModule << nextRemote);
             } else {
                 goto module_finished;
             }
@@ -837,7 +907,7 @@ void RepairWindow::onModuleInstallStepFinished()
                     installCmd = QString("/data/adb/ksu/bin/ksud module install %1").arg(ShellCommand::quote(remotePath));
                     break;
             }
-            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot(installCmd));
+            startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot(installCmd));
         }
         break;
 
@@ -864,7 +934,7 @@ void RepairWindow::onModuleInstallStepFinished()
 
             // 删除临时文件
             moduleInstallStep = ModuleInstallStep::DeleteTemporaryFile;
-            repairProcess->start(adbPath, QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
+            startAdbCommand(QStringList() << "shell" << ShellCommand::asRoot("rm -f " + ShellCommand::quote(remotePath)));
         }
         break;
 
@@ -878,7 +948,7 @@ void RepairWindow::onModuleInstallStepFinished()
             QString nextName = QFileInfo(nextModule).fileName();
             QString nextRemote = "/data/local/tmp/" + nextName;
             buttons[InstallModule]->setText(QString("推送中(%1/%2)").arg(currentModuleIndex + 1).arg(moduleFilesToInstall.size()));
-            repairProcess->start(adbPath, QStringList() << "push" << nextModule << nextRemote);
+            startAdbCommand(QStringList() << "push" << nextModule << nextRemote);
         } else {
             goto module_finished;
         }
@@ -908,9 +978,8 @@ module_finished:
             setButtonsEnabled(true);
             buttons[InstallModule]->setText("安装模块");
         });
-
-        QString adbPath = ResourceExtractor::getAdbPath();
-        repairProcess->start(adbPath, QStringList() << "reboot");
+        if (!validateAdbOperation()) return;
+        startAdbCommand(QStringList() << "reboot");
     }
 }
 

@@ -39,6 +39,7 @@ HEADERS += \
     src/ui/payloadwindow.h \
     src/ui/devicecheckwindow.h \
     src/ui/configwindow.h \
+    src/services/downloadfilewriter.h \
     src/services/processmanager.h \
     src/services/shellcommand.h \
     src/services/resourceextractor.h \

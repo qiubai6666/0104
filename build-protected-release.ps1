@@ -9,6 +9,7 @@ param(
     [ValidateRange(1,32)][int]$Jobs = 4
 )
 . (Join-Path $PSScriptRoot 'scripts\Protection.Build.ps1')
+. (Join-Path $PSScriptRoot 'scripts\ReleaseInputs.ps1')
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Use PowerShell 7 (pwsh.exe)' }
 if (-not $QtBinPath) { $QtBinPath = Split-Path -Parent (Get-Command qmake.exe -ErrorAction Stop).Source }
 if (-not $CompilerBinPath) { $CompilerBinPath = Split-Path -Parent (Get-Command g++.exe -ErrorAction Stop).Source }
@@ -23,11 +24,7 @@ $stage = New-ReleaseTemp $StageRoot
 Write-Host "Protection evidence/private symbols (do not distribute): $stage"
 $source = Join-Path $stage 'source'
 [IO.Directory]::CreateDirectory($source) | Out-Null
-foreach ($relative in @('src','tests','qiubai','third_party','OrangeTools.pro','protected-release.pri','resources.pri','resources.qrc',
-                        'ouga.pri','xiaomi.pri','ougacodecs.pri','app.rc','app.manifest','LICENSE')) {
-    Assert-NoLinks (Join-Path $PSScriptRoot $relative)
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $relative) -Destination $source -Recurse
-}
+Copy-ReleaseSourceSnapshot $PSScriptRoot $source ${function:Assert-NoLinks}
 $sourceManifest = @(Get-ReleaseManifest $source)
 $sourceManifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'source-manifest.json') -Encoding utf8NoBOM
 $saved = @{}

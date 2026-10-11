@@ -26,6 +26,7 @@
 #include <QTextDocument>
 #include <QAbstractTextDocumentLayout>
 #include <QResizeEvent>
+#include <QProcessEnvironment>
 #include <QGridLayout>
 #include <QPointer>
 #include <QApplication>
@@ -206,11 +207,18 @@ bool DeviceCheckWindow::beginOperation()
         return false;
     }
     QString error;
-    if (!DeviceOperationLease::acquire(this, &error)) {
-        // 设备通道被占用时明确提示，避免点击后无任何反馈。
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备通道占用", error, this);
+    const QString serial = DeviceManager::instance()->uniqueDeviceSerial(&error);
+    if (serial.isEmpty()) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "无法操作设备", error, this);
         return false;
     }
+    QString leaseError;
+    if (!DeviceOperationLease::acquire(this, &leaseError)) {
+        // 设备通道被占用时明确提示，避免点击后无任何反馈。
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备通道占用", leaseError, this);
+        return false;
+    }
+    operationSerial = serial;
     operationInProgress = true;
     updateUIForMode(DeviceManager::instance()->currentMode());
     return true;
@@ -227,6 +235,7 @@ void DeviceCheckWindow::finishOperation()
     fileTransferSource.clear();
     pendingFlashPartition.clear();
     pendingFlashImage.clear();
+    operationSerial.clear();
     DeviceOperationLease::release(this);
     if (monitoringPausedByOperation) {
         monitoringPausedByOperation = false;
@@ -234,6 +243,52 @@ void DeviceCheckWindow::finishOperation()
     }
     operationInProgress = false;
     updateUIForMode(DeviceManager::instance()->currentMode());
+}
+
+bool DeviceCheckWindow::validateOperation(DeviceManager::DeviceMode expectedMode, QString *error) const
+{
+    const auto *manager = DeviceManager::instance();
+    const QString serial = manager->uniqueDeviceSerial(error);
+    if (serial.isEmpty() || manager->currentMode() != expectedMode || serial != operationSerial) {
+        if (error && error->isEmpty()) {
+            *error = QStringLiteral("设备已断开、切换模式或目标序列号发生变化。");
+        }
+        return false;
+    }
+    return true;
+}
+
+QStringList DeviceCheckWindow::deviceArguments(const QStringList &arguments) const
+{
+    QStringList result{QStringLiteral("-s"), operationSerial};
+    result += arguments;
+    return result;
+}
+
+void DeviceCheckWindow::startDeviceCommand(QProcess *process, DeviceManager::DeviceMode mode,
+                                           const QStringList &arguments)
+{
+    const QPointer<QProcess> target(process);
+    const QString serial = operationSerial;
+    DeviceManager::instance()->verifyOperationTarget(mode, serial, this,
+        [this, target, serial, mode, arguments](const QString &verificationError) {
+        if (!target || target != currentProcess || !operationInProgress || operationSerial != serial) return;
+        QString error = verificationError;
+        if (error.isEmpty()) validateOperation(mode, &error);
+        if (!error.isEmpty()) {
+            releaseOperationProcess(target);
+            if (!fileTransfer.files.isEmpty()) {
+                finishFileTransfer(error);
+            } else {
+                finishOperation();
+                UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备已变化", error, this);
+            }
+            return;
+        }
+        target->start(mode == DeviceManager::ADB ? ResourceExtractor::getAdbPath()
+                                                 : ResourceExtractor::getFastbootPath(),
+                      deviceArguments(arguments));
+    });
 }
 
 QProcess *DeviceCheckWindow::createOperationProcess()
@@ -272,7 +327,8 @@ bool DeviceCheckWindow::canAcceptFileTransfer() const
 {
     const auto *manager = DeviceManager::instance();
     const QObject *owner = DeviceOperationLease::owner();
-    return manager->currentMode() == DeviceManager::ADB && !manager->deviceSerial().isEmpty()
+    return manager->currentMode() == DeviceManager::ADB && manager->deviceSerials().size() == 1
+           && !manager->deviceSerial().isEmpty()
            && !operationInProgress && (!owner || owner == this);
 }
 
@@ -323,7 +379,7 @@ bool DeviceCheckWindow::transferFiles(const QStringList &files, QWidget *source)
     if (files.isEmpty() || !canAcceptFileTransfer() || !beginOperation()) return false;
     fileTransferSource = source ? source : this;
     fileTransfer.files = files;
-    fileTransfer.serial = DeviceManager::instance()->deviceSerial();
+    fileTransfer.serial = operationSerial;
     transferNextFile();
     return true;
 }
@@ -336,7 +392,9 @@ void DeviceCheckWindow::transferNextFile()
     }
     const auto *manager = DeviceManager::instance();
     if (manager->currentMode() != DeviceManager::ADB
-        || manager->deviceSerial() != fileTransfer.serial) {
+        || manager->deviceSerials().size() != 1
+        || manager->deviceSerial() != fileTransfer.serial
+        || operationSerial != fileTransfer.serial) {
         finishFileTransfer(QStringLiteral("原设备已断开或改变，未继续传输剩余文件。"));
         return;
     }
@@ -349,9 +407,8 @@ void DeviceCheckWindow::transferNextFile()
         finishFileTransferProcess(process, exitCode == 0 && status == QProcess::NormalExit);
     });
     // Keep Unicode paths intact and pin every push to the device selected for this batch.
-    process->start(ResourceExtractor::getAdbPath(),
-                   {"-s", fileTransfer.serial, "push", path,
-                    "/sdcard/" + QFileInfo(path).fileName()});
+    startDeviceCommand(process, DeviceManager::ADB,
+                       {"push", path, "/sdcard/" + QFileInfo(path).fileName()});
 }
 
 void DeviceCheckWindow::finishFileTransferProcess(QProcess *process, bool success, bool failedToStart)
@@ -745,14 +802,19 @@ void DeviceCheckWindow::onRebootButtonClicked()
             UIHelper::showCenteredMessageBox(QMessageBox::Warning, "重启失败", error, this);
         }
     });
-    process->start(mode == DeviceManager::ADB ? ResourceExtractor::getAdbPath() :
-                                             ResourceExtractor::getFastbootPath(), arguments);
+    startDeviceCommand(process, mode, arguments);
 }
 
 void DeviceCheckWindow::onOpenCmdClicked()
 {
     if (DeviceOperationLease::busyFor(this)) return;
     if (operationInProgress) return;
+    QString serialError;
+    const QString serial = DeviceManager::instance()->uniqueDeviceSerial(&serialError);
+    if (serial.isEmpty()) {
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "无法打开 CMD", serialError, this);
+        return;
+    }
     QString qiubaiPath = ResourceExtractor::getResourcePath();
     QString cmdBatPath = qiubaiPath + "/CMD.bat";
     
@@ -763,13 +825,21 @@ void DeviceCheckWindow::onOpenCmdClicked()
     }
     
     // 直接持有运行批处理的 CMD，不使用 start 创建无法持有的中间进程。
-    QProcess *process = ProcessManager::startProcess("cmd.exe",
-                           QStringList() << "/d" << "/c" << "CMD.bat", qiubaiPath, true);
+    QProcess *process = ProcessManager::createProcess(this, true);
+    process->setWorkingDirectory(qiubaiPath);
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("ANDROID_SERIAL"), serial);
+    process->setProcessEnvironment(environment);
+    process->start("cmd.exe", QStringList() << "/d" << "/c" << "CMD.bat");
+    if (!process->waitForStarted(3000)) {
+        const QString error = process->errorString();
+        process->deleteLater();
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "无法打开 CMD：" + error, this);
+        return;
+    }
 
     if (process) {
-        qDebug() << "CMD已启动，PID:" << process->processId();
-    } else {
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "无法打开 CMD！", this);
+        qDebug() << "CMD已启动，PID:" << process->processId() << "ANDROID_SERIAL:" << serial;
     }
 }
 
@@ -818,7 +888,12 @@ void DeviceCheckWindow::flashPartition(const QString &partition)
                 UIHelper::showCenteredMessageBox(QMessageBox::Warning, "重启失败", error, this);
             }
         });
-        process->start(ResourceExtractor::getAdbPath(), {"reboot", "bootloader"});
+        if (!validateOperation(DeviceManager::ADB)) {
+            releaseOperationProcess(process);
+            finishOperation();
+            return;
+        }
+        startDeviceCommand(process, DeviceManager::ADB, {"reboot", "bootloader"});
     } else if (mode == DeviceManager::Fastboot) {
         performFlash(partition, imagePath);
     } else {
@@ -839,7 +914,9 @@ void DeviceCheckWindow::waitForFastbootMode()
     waitTimer = new QTimer(this);
     connect(waitTimer, &QTimer::timeout, this, [this]() {
         ++waitCounter;
-        if (DeviceManager::instance()->currentMode() == DeviceManager::Fastboot) {
+        if (DeviceManager::instance()->currentMode() == DeviceManager::Fastboot
+            && DeviceManager::instance()->deviceSerials().size() == 1
+            && DeviceManager::instance()->deviceSerial() == operationSerial) {
             DeviceManager::instance()->pauseMonitoring();
             waitTimer->stop();
             waitTimer->deleteLater();
@@ -850,6 +927,12 @@ void DeviceCheckWindow::waitForFastbootMode()
             QTimer::singleShot(2000, this, [this, partition, image]() {
                 if (operationInProgress) performFlash(partition, image);
             });
+        } else if (DeviceManager::instance()->currentMode() != DeviceManager::None
+                   && (DeviceManager::instance()->deviceSerials().size() != 1
+                       || DeviceManager::instance()->deviceSerial() != operationSerial)) {
+            finishOperation();
+            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备已变化",
+                "检测到其他设备或多台设备，已取消刷写，请断开其他设备后重试。", this);
         } else if (waitCounter >= 40) {
             finishOperation();
             UIHelper::showCenteredMessageBox(QMessageBox::Warning, "超时",
@@ -862,9 +945,11 @@ void DeviceCheckWindow::waitForFastbootMode()
 void DeviceCheckWindow::performFlash(const QString &partition, const QString &imagePath)
 {
     if (!operationInProgress || currentProcess) return;
-    if (DeviceManager::instance()->currentMode() != DeviceManager::Fastboot) {
+    QString error;
+    if (!validateOperation(DeviceManager::Fastboot, &error)) {
         finishOperation();
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误", "设备已离开Fastboot模式", this);
+        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "错误",
+            error.isEmpty() ? "设备已离开Fastboot模式" : error, this);
         return;
     }
     DeviceManager::instance()->pauseMonitoring();
@@ -899,9 +984,14 @@ void DeviceCheckWindow::performFlash(const QString &partition, const QString &im
                 UIHelper::showCenteredMessageBox(QMessageBox::Warning, "刷写后重启失败", error, this);
             }
         });
-        reboot->start(ResourceExtractor::getFastbootPath(), {"reboot"});
+        if (!validateOperation(DeviceManager::Fastboot)) {
+            releaseOperationProcess(reboot);
+            finishOperation();
+            return;
+        }
+        startDeviceCommand(reboot, DeviceManager::Fastboot, {"reboot"});
     });
-    process->start(ResourceExtractor::getFastbootPath(), {"flash", partition, imagePath});
+    startDeviceCommand(process, DeviceManager::Fastboot, {"flash", partition, imagePath});
 }
 
 void DeviceCheckWindow::mousePressEvent(QMouseEvent *event)

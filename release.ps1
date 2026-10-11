@@ -14,6 +14,7 @@ param(
     [switch]$ProtectedRelease
 )
 . (Join-Path $PSScriptRoot 'scripts\Protection.Common.ps1')
+. (Join-Path $PSScriptRoot 'scripts\ReleaseInputs.ps1')
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Run this entry with PowerShell 7 (pwsh.exe).' }
 if (-not $QtBinPath) { $QtBinPath = Split-Path -Parent (Get-Command qmake.exe -ErrorAction Stop).Source }
 if (-not $CompilerBinPath) { $CompilerBinPath = Split-Path -Parent (Get-Command g++.exe -ErrorAction Stop).Source }
@@ -47,11 +48,7 @@ Write-Host "Release evidence (preserved on failure/success): $stage"
 $source = Join-Path $stage 'source'
 [IO.Directory]::CreateDirectory($source) | Out-Null
 # Snapshot only formal inputs. Never package the historical OrangeToolsApp directory.
-foreach ($relative in @('src','tests','qiubai','third_party','OrangeTools.pro','protected-release.pri','resources.pri','resources.qrc','ouga.pri','xiaomi.pri','ougacodecs.pri','app.rc','app.manifest','LICENSE')) {
-    $inputPath = Join-Path $PSScriptRoot $relative
-    Assert-NoLinks $inputPath
-    Copy-Item -LiteralPath $inputPath -Destination $source -Recurse
-}
+Copy-ReleaseSourceSnapshot $PSScriptRoot $source ${function:Assert-NoLinks}
 $sourceManifest = @(Get-ReleaseManifest $source)
 $sourceManifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'source-manifest.json') -Encoding utf8NoBOM
 # Keep test paths short for legacy bundled offline tools; record the task-owned root.

@@ -57,6 +57,9 @@ private:
     friend class DeviceOperationTests;
     friend class DeviceInformationTests;
     bool beginOperation();
+    bool validateOperation(DeviceManager::DeviceMode expectedMode, QString *error = nullptr) const;
+    QStringList deviceArguments(const QStringList &arguments) const;
+    void startDeviceCommand(QProcess *process, DeviceManager::DeviceMode mode, const QStringList &arguments);
     void finishOperation();
     QProcess *createOperationProcess();
     void releaseOperationProcess(QProcess *process);
@@ -88,6 +91,7 @@ private:
     QTimer *waitTimer;
     QString pendingFlashPartition;
     QString pendingFlashImage;
+    QString operationSerial;
     int waitCounter;
     
     struct FileTransfer {

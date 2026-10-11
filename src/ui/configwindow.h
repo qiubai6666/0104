@@ -11,6 +11,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QFile>
+#include "downloadfilewriter.h"
 #include <QMap>
 #include <QTimer>
 
@@ -31,9 +32,9 @@ private slots:
     void onDownloadFinished(QNetworkReply *reply);
     void onFileDownloadFinished(QNetworkReply *reply);
     void onDownloadProgress(qint64 bytesReceived, qint64 bytesTotal);
-    void onDownloadTimeout();  // 超时处理
 
 private:
+    friend class DeviceOperationTests;
     // download_config.txt 的一行数据，只在读取文件时解析分隔符。
     struct DownloadConfig {
         QString fileType;  // exe 或 zip
@@ -49,7 +50,8 @@ private:
     void downloadConfig();
     void loadConfigFile();
     void refreshConfigButtonLabels();
-    void downloadFile(int id);
+    void downloadFile(int id, bool retry = false);
+    void restoreDownloadButton(int id);
     void extractZipAndOpen(const QString &zipPath, const QString &exeName);
     void openExecutable(const QString &exePath);
     static bool isSafeFileName(const QString &fileName);
@@ -64,9 +66,10 @@ private:
     QMap<int, DownloadConfig> configData;  // 配置编号 -> 下载描述
     QMap<QNetworkReply*, int> downloadingFiles;  // reply -> id
     QMap<int, QString> originalButtonTexts;  // id -> 原始按钮文本
-    QMap<QNetworkReply*, QByteArray> downloadBuffers;  // reply -> 下载缓冲区
-    QMap<QNetworkReply*, QTimer*> downloadTimeoutTimers;  // 超时定时器
-    QMap<QNetworkReply*, qint64> lastReceivedBytes;  // 上次接收字节数
+    QMap<QNetworkReply*, DownloadFileWriter*> downloadFiles;  // reply -> 同目录临时文件
+    QMap<QNetworkReply*, QString> downloadPaths;  // reply -> 正式目标路径
+    QMap<QNetworkReply*, DownloadFileWriter*> configDownloadFiles;  // 配置文件临时文件
+    QMap<int, QString> activeDownloadPaths;  // 含等待重试的任务，防止目标冲突
     QMap<int, int> retryCount;  // id -> 重试次数
     QProcess *extractProcess;
     QString pendingExeName;

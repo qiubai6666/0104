@@ -3,11 +3,45 @@ param([string]$StageRoot)
 . (Join-Path $PSScriptRoot '..\scripts\SingleExe.Common.ps1')
 $stage = New-ReleaseTemp $StageRoot
 $checks = 0
+. (Join-Path $PSScriptRoot '..\scripts\ReleaseInputs.ps1')
 function Must-Fail([scriptblock]$Action, [string]$Label) {
     $failed = $false
     try { & $Action } catch { $failed = $true }
     if (-not $failed) { throw "Missing rejection: $Label" }
     $script:checks++
+}
+# An inert project fixture checks shared input parity without invoking qmake.
+$projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$projectFixture = Join-Path $stage 'source-fixture'
+[IO.Directory]::CreateDirectory($projectFixture) | Out-Null
+foreach ($name in Get-ReleaseInputPaths $projectRoot) {
+    $from = Join-Path $projectRoot $name
+    $to = Join-Path $projectFixture $name
+    if (Test-Path -LiteralPath $from -PathType Container) {
+        [IO.Directory]::CreateDirectory($to) | Out-Null
+    } else {
+        Copy-Item -LiteralPath $from -Destination $to -ErrorAction Stop
+    }
+}
+$snapshot = Join-Path $stage 'source-snapshot'
+Copy-ReleaseSourceSnapshot $projectFixture $snapshot ${function:Assert-NoLinks}
+foreach ($name in @('openlist.pri','xiaomi.pri','ouga.pri','ougacodecs.pri','resources.pri','protected-release.pri')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $snapshot $name) -PathType Leaf)) { throw "Missing snapshot include: $name" }
+    $checks++
+}
+if (-not (Test-Path -LiteralPath (Join-Path $snapshot 'assets') -PathType Container)) { throw 'Missing snapshot assets directory' }
+$checks++
+foreach ($entry in @('release.ps1','build-protected-release.ps1')) {
+    $text = Get-Content -LiteralPath (Join-Path $projectRoot $entry) -Raw
+    if ($text -notmatch 'Copy-ReleaseSourceSnapshot' -or $text -notmatch 'ReleaseInputs.ps1') { throw "Entry does not share release inputs: $entry" }
+    $checks++
+}
+foreach ($name in @('openlist.pri','resources.pri','ougacodecs.pri','app.rc','assets')) {
+    $path = [IO.Path]::GetFullPath((Join-Path $projectFixture $name))
+    if (-not $path.StartsWith($projectFixture + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw "Fixture path escaped: $path" }
+    Move-Item -LiteralPath $path -Destination ($path + '.missing') -ErrorAction Stop
+    try { Must-Fail { Copy-ReleaseSourceSnapshot $projectFixture (Join-Path $stage ('missing-' + $name)) ${function:Assert-NoLinks} } "missing required source $name" }
+    finally { Move-Item -LiteralPath ($path + '.missing') -Destination $path -ErrorAction Stop }
 }
 $inputRoot = Join-Path $stage '中文 空格 input'
 [IO.Directory]::CreateDirectory($inputRoot) | Out-Null

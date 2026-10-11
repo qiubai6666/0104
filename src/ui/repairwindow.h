@@ -67,6 +67,10 @@ private:
     void startUsbFixCleanup();
     void finishTmpFix(bool success, const QString &detail);
     void startTmpFixCommand(const QStringList &arguments, TmpFixStep step);
+    bool beginAdbOperation();
+    bool validateAdbOperation();
+    void startAdbCommand(const QStringList &arguments);
+    QStringList adbArguments(const QStringList &arguments) const;
 
     OugaFlashWindow *ougaWindow = nullptr;
     XiaomiFlashWindow *xiaomiWindow = nullptr;
@@ -93,6 +97,7 @@ private:
     int moduleFailCount;
     ModuleInstallStep moduleInstallStep;
     RootManager rootManagerType;
+    QString operationSerial;
 };
 
 #endif // REPAIRWINDOW_H
