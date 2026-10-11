@@ -460,20 +460,23 @@ void DeviceCheckWindow::setupUI()
                                    UIHelper::DrawerHorizontalMargin, UIHelper::DrawerVerticalMargin);
 
     // 标题去掉独立边框，避免小窗口内重复套卡。
-    QLabel *titleLabel = new QLabel("设备检测", container);
-    titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    titleLabel->setFixedHeight(24);
-    titleLabel->setStyleSheet(
-        "QLabel {"
-        "   color: #2c3e50;"
-        "   font-size: 17px;"
-        "   font-weight: normal;"
-        "   background: transparent;"
-        "   border: none;"
-        "}"
-    );
-    mainLayout->addWidget(titleLabel);
-    mainLayout->addSpacing(4);
+    // 嵌入控制中心时面板头部已显示页标题，此处不再重复。
+    if (isWindow()) {
+        QLabel *titleLabel = new QLabel("设备检测", container);
+        titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        titleLabel->setFixedHeight(24);
+        titleLabel->setStyleSheet(
+            "QLabel {"
+            "   color: #2c3e50;"
+            "   font-size: 17px;"
+            "   font-weight: normal;"
+            "   background: transparent;"
+            "   border: none;"
+            "}"
+        );
+        mainLayout->addWidget(titleLabel);
+        mainLayout->addSpacing(4);
+    }
     
     // 单一浅蓝信息面板，细色带区分信息与操作，不使用图标或表情。
     QWidget *statusCard = new QWidget(container);

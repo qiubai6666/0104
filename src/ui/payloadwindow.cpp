@@ -45,10 +45,13 @@ void PayloadWindow::setupUI()
     mainLayout->setContentsMargins(UIHelper::DrawerHorizontalMargin, UIHelper::DrawerVerticalMargin,
                                    UIHelper::DrawerHorizontalMargin, UIHelper::DrawerVerticalMargin);
     mainLayout->setSpacing(6);
-    QLabel *titleLabel = new QLabel("Payload 分区提取", container);
-    titleLabel->setStyleSheet("color:#2c3e50; background:transparent; font-size:17px; font-weight:normal;");
-    mainLayout->addWidget(titleLabel);
-    mainLayout->addSpacing(3);
+    if (isWindow()) {
+        // 独立窗口保留页内标题；嵌入控制中心时面板头部已显示页标题。
+        QLabel *titleLabel = new QLabel("Payload 分区提取", container);
+        titleLabel->setStyleSheet("color:#2c3e50; background:transparent; font-size:17px; font-weight:normal;");
+        mainLayout->addWidget(titleLabel);
+        mainLayout->addSpacing(3);
+    }
     // URL 输入
     QLabel *urlLabel = new QLabel("Payload 文件：", container);
     urlLabel->setStyleSheet("QLabel { color: #2c3e50; background: transparent; font-size: 13px; }");
@@ -82,8 +85,8 @@ void PayloadWindow::setupUI()
         "QCheckBox { color:#2c3e50; background:transparent; font-size:12.5px; spacing:6px; }"
         "QCheckBox::indicator { width:16px; height:16px; border:1.5px solid #B9C6D2;"
         "border-radius:4px; background:#FFFFFF; }"
-        "QCheckBox::indicator:hover { border-color:#649EB3; }"
-        "QCheckBox::indicator:checked { background:#649EB3; border-color:#649EB3; }");
+        "QCheckBox::indicator:hover { border-color:#2F80ED; }"
+        "QCheckBox::indicator:checked { background:#2F80ED; border-color:#2F80ED; }");
     QHBoxLayout *checkRow = new QHBoxLayout();
     checkRow->setSpacing(16);
     bootCheck = new QCheckBox("boot", container);
@@ -138,7 +141,7 @@ void PayloadWindow::setupUI()
             text-align: center;
         }
         QProgressBar::chunk {
-            background-color: #649EB3;
+            background-color: #2F80ED;
             border-radius: 5px;
         }
     )");
@@ -146,16 +149,16 @@ void PayloadWindow::setupUI()
     mainLayout->addWidget(progressBar);
 
     // 提示信息
-    QLabel *infoLabel = new QLabel("勾选或输入要提取的镜像分区\n输出路径：桌面/IMG 文件夹", container);
-    infoLabel->setStyleSheet("QLabel { color: #666; background: transparent; font-size: 11px; }");
+    QLabel *infoLabel = new QLabel("输出路径：桌面/IMG 文件夹", container);
+    infoLabel->setStyleSheet("QLabel { color: #647585; background: transparent; font-size: 11px; }");
     mainLayout->addWidget(infoLabel);
-    
+
     mainLayout->addStretch();
-    
-    // 按钮
+
+    // 按钮：通栏两枚，取消为次级、提取为主操作
     QHBoxLayout *buttonLayout = new QHBoxLayout();
     buttonLayout->setSpacing(10);
-    
+
     cancelButton = new QPushButton("取消", container);
     cancelButton->setFixedHeight(UIHelper::DrawerButtonHeight);
     cancelButton->setCursor(Qt::PointingHandCursor);
@@ -179,39 +182,37 @@ void PayloadWindow::setupUI()
             border-color: #83AECA;
         }
     )");
-    
+
     extractButton = new QPushButton("开始提取", container);
     extractButton->setFixedHeight(UIHelper::DrawerButtonHeight);
     extractButton->setCursor(Qt::PointingHandCursor);
     extractButton->setStyleSheet(R"(
         QPushButton {
             padding: 6px 12px;
-            background-color: #649EB3;
+            background-color: #2F80ED;
             color: white;
-            border: 1px solid #D0DEEB;
+            border: none;
             border-radius: 6px;
             font-size: 13px;
-            font-weight: normal;
+            font-weight: 600;
         }
         QPushButton:hover {
-            background-color: #578FA6;
+            background-color: #2A73D1;
         }
         QPushButton:pressed {
-            background-color: #477F96;
+            background-color: #2465B8;
         }
         QPushButton:focus {
-            border-color: #3F7894;
+            outline: none;
         }
         QPushButton:disabled {
-            background-color: #A8C3D0;
-            border-color: #A8C3D0;
+            background-color: #A9C7F1;
             color: white;
         }
     )");
-    
-    buttonLayout->addStretch();
-    buttonLayout->addWidget(cancelButton);
-    buttonLayout->addWidget(extractButton);
+
+    buttonLayout->addWidget(cancelButton, 1);
+    buttonLayout->addWidget(extractButton, 1);
     
     mainLayout->addLayout(buttonLayout);
     

@@ -362,10 +362,10 @@ void DeviceOperationTests::payloadShortcutHasNoBootFilters()
     QVERIFY(!boot->isChecked());
     QVERIFY(!initBoot->isChecked());
     QVERIFY(window.findChild<QLineEdit *>(QStringLiteral("PayloadCustomPartitionsEdit")));
-    bool describesSelection = false;
+    bool describesOutput = false;
     for (auto label : window.findChildren<QLabel *>())
-        describesSelection |= label->text().contains(QStringLiteral("勾选或输入"));
-    QVERIFY(describesSelection);
+        describesOutput |= label->text().contains(QStringLiteral("输出路径"));
+    QVERIFY(describesOutput);
 }
 
 void DeviceOperationTests::ougaSingleWindowAndLease()
