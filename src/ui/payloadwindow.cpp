@@ -8,7 +8,12 @@
 #include <QScreen>
 #include <QGuiApplication>
 #include <QDesktopServices>
+#include <QThread>
+#include <QtConcurrent>
 #include <QUrl>
+#include "ougapackage.h"
+#include "ougapayloadextractor.h"
+#include "ougapayloadreader.h"
 
 PayloadWindow::PayloadWindow(QWidget *parent)
     : QDialog(parent)
@@ -27,6 +32,10 @@ PayloadWindow::PayloadWindow(QWidget *parent)
 
 PayloadWindow::~PayloadWindow()
 {
+    // 若流式云提取仍在后台运行，请求取消并等待退出，避免回调访问已销毁窗口。
+    m_cancel = true;
+    if (m_future.isRunning())
+        m_future.waitForFinished();
 }
 
 void PayloadWindow::setupUI()
@@ -235,13 +244,6 @@ void PayloadWindow::onExtractClicked()
         return;
     }
 
-    if (url.startsWith("http://", Qt::CaseInsensitive) ||
-        url.startsWith("https://", Qt::CaseInsensitive)) {
-        QMessageBox::warning(this, "警告",
-            "Payload 工具不支持远程链接，请先将文件下载到本地再输入路径！");
-        return;
-    }
-
     // 收集提取目标：勾选的 boot / init_boot + 自定义分区名（支持双选与多分区）。
     QStringList targets;
     if (bootCheck->isChecked())
@@ -267,7 +269,6 @@ void PayloadWindow::onExtractClicked()
         return;
     }
 
-    QString outputPath = getOutputPath();
     QString payloadTool = ResourceExtractor::getResourcePath() + "/payload-dumper-go.exe";
 
     // 检查提取工具是否存在
@@ -275,6 +276,96 @@ void PayloadWindow::onExtractClicked()
         QMessageBox::warning(this, "错误", "找不到 payload-dumper-go.exe 文件！");
         return;
     }
+
+    // 远程链接：HTTP Range 流式云提取，不落盘完整文件。
+    if (url.startsWith("http://", Qt::CaseInsensitive) ||
+        url.startsWith("https://", Qt::CaseInsensitive)) {
+        startRemoteExtraction(url, targets);
+        return;
+    }
+
+    runExtractor(url, targets);
+}
+
+void PayloadWindow::startRemoteExtraction(const QString &url, const QStringList &targets)
+{
+    const QString outputPath = getOutputPath();
+    m_cancel = false;
+
+    extractButton->setEnabled(false);
+    extractButton->setText("提取中...");
+    // 读取远程 payload 清单阶段耗时不定，先显示繁忙态。
+    progressBar->setRange(0, 0);
+    progressBar->setValue(0);
+    progressBar->show();
+
+    m_future = QtConcurrent::run([this, url, targets, outputPath]() -> QString {
+        QString error;
+        auto reader = OugaHttpRangeReader::create(QUrl(url), &m_cancel, &error);
+        if (!reader)
+            return error;
+        QVector<OugaPayloadEntry> entries;
+        OugaPayloadLayout layout;
+        bool delta = false;
+        if (!OugaPackage::payloadManifest(*reader, &entries, &delta, &error, &layout))
+            return error;
+        if (delta)
+            return QStringLiteral("远程增量 Payload 需要匹配的旧镜像，无法按需提取");
+        QStringList chosen;
+        for (const auto &entry : entries)
+            if (targets.contains(entry.name))
+                chosen << entry.name;
+        if (chosen.isEmpty())
+            return QStringLiteral("Payload 中没有所请求的分区");
+        if (!OugaPayloadExtractor::supported(entries, chosen, layout))
+            return QStringLiteral("远程 Payload 含不支持或无效的操作，无法流式提取");
+        if (!QDir().mkpath(outputPath))
+            return QStringLiteral("无法创建输出目录");
+
+        OugaPayloadExtractor::Callbacks callbacks;
+        callbacks.progress = [this](quint64 done, quint64 total) {
+            // 写入字节数进度；仅在首个进度回调时恢复确定区间。
+            const int percent = total ? int(qMin<quint64>(99, done * 100 / total)) : 0;
+            QMetaObject::invokeMethod(this, [this, percent] {
+                if (progressBar->maximum() == 0)
+                    progressBar->setRange(0, 100);
+                if (percent > progressBar->value())
+                    progressBar->setValue(percent);
+            }, Qt::QueuedConnection);
+        };
+        const int workers = qMax(1, QThread::idealThreadCount());
+        return OugaPayloadExtractor::extract(reader, layout, entries, outputPath,
+                                             workers, m_cancel, callbacks);
+    }).then(this, [this, outputPath](const QString &error) {
+        extractButton->setEnabled(true);
+        extractButton->setText("开始提取");
+
+        if (m_cancel) {
+            progressBar->setRange(0, 100);
+            progressBar->setValue(0);
+            progressBar->hide();
+            return;
+        }
+        if (error.isEmpty()) {
+            progressBar->setRange(0, 100);
+            progressBar->setValue(100);
+            // 提取成功，直接打开 IMG 文件夹
+            QDesktopServices::openUrl(QUrl::fromLocalFile(outputPath));
+            accept();
+        } else {
+            progressBar->setRange(0, 100);
+            progressBar->setValue(0);
+            progressBar->hide();
+            QMessageBox::critical(this, "错误",
+                QString("云提取失败！\n错误信息：%1").arg(error));
+        }
+    });
+}
+
+void PayloadWindow::runExtractor(const QString &localPayloadFile, const QStringList &targets)
+{
+    QString outputPath = getOutputPath();
+    QString payloadTool = ResourceExtractor::getResourcePath() + "/payload-dumper-go.exe";
 
     // 执行 payload-dumper-go
     QProcess *process = ProcessManager::createProcess(this);
@@ -284,7 +375,7 @@ void PayloadWindow::onExtractClicked()
     // -p：仅提取所选分区（boot / init_boot / 自定义），避免全量解包。
     args << "--output" << outputPath;
     args << "-p" << targets.join(",");
-    args << url;
+    args << localPayloadFile;
 
     // 显示正在处理的提示并开启进度条（解析工具输出的百分比，单调递增）。
     extractButton->setEnabled(false);
