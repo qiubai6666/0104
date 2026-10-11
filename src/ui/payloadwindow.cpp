@@ -325,6 +325,13 @@ void PayloadWindow::startRemoteExtraction(const QString &url, const QStringList 
             return QStringLiteral("远程 Payload 含不支持或无效的操作，无法流式提取");
         if (!QDir().mkpath(outputPath))
             return QStringLiteral("无法创建输出目录");
+        // 直接覆盖：提取前移除所选分区的旧镜像与残留 partial。
+        // 仅本页生效；欧加线刷仍保留「已存在拒绝覆盖」保护。
+        QDir outDir(outputPath);
+        for (const auto &entry : chosenEntries) {
+            outDir.remove(entry.name + QStringLiteral(".img"));
+            outDir.remove(entry.name + QStringLiteral(".img.partial"));
+        }
 
         OugaPayloadExtractor::Callbacks callbacks;
         callbacks.progress = [this](quint64 done, quint64 total) {
