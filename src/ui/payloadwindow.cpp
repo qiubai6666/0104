@@ -89,12 +89,12 @@ void PayloadWindow::setupUI()
     bootCheck = new QCheckBox("boot", container);
     bootCheck->setObjectName("PayloadBootCheck");
     bootCheck->setStyleSheet(checkStyle);
-    bootCheck->setChecked(true);
+    bootCheck->setChecked(false);
     bootCheck->setCursor(Qt::PointingHandCursor);
     initBootCheck = new QCheckBox("init_boot", container);
     initBootCheck->setObjectName("PayloadInitBootCheck");
     initBootCheck->setStyleSheet(checkStyle);
-    initBootCheck->setChecked(true);
+    initBootCheck->setChecked(false);
     initBootCheck->setCursor(Qt::PointingHandCursor);
     checkRow->addWidget(bootCheck);
     checkRow->addWidget(initBootCheck);
@@ -312,9 +312,13 @@ void PayloadWindow::startRemoteExtraction(const QString &url, const QStringList 
         if (delta)
             return QStringLiteral("远程增量 Payload 需要匹配的旧镜像，无法按需提取");
         QStringList chosen;
-        for (const auto &entry : entries)
-            if (targets.contains(entry.name))
+        QVector<OugaPayloadEntry> chosenEntries;
+        for (const auto &entry : entries) {
+            if (targets.contains(entry.name)) {
                 chosen << entry.name;
+                chosenEntries << entry;
+            }
+        }
         if (chosen.isEmpty())
             return QStringLiteral("Payload 中没有所请求的分区");
         if (!OugaPayloadExtractor::supported(entries, chosen, layout))
@@ -334,7 +338,8 @@ void PayloadWindow::startRemoteExtraction(const QString &url, const QStringList 
             }, Qt::QueuedConnection);
         };
         const int workers = qMax(1, QThread::idealThreadCount());
-        return OugaPayloadExtractor::extract(reader, layout, entries, outputPath,
+        // 只传所选分区条目，确保不会解出全部镜像。
+        return OugaPayloadExtractor::extract(reader, layout, chosenEntries, outputPath,
                                              workers, m_cancel, callbacks);
     }).then(this, [this, outputPath](const QString &error) {
         extractButton->setEnabled(true);

@@ -354,13 +354,13 @@ void DeviceOperationTests::initTestCase()
 void DeviceOperationTests::payloadShortcutHasNoBootFilters()
 {
     PayloadWindow window;
-    // 2026-10 需求：boot / init_boot 复选（支持双选）+ 自定义分区名，默认全勾选。
+    // 2026-10 需求：boot / init_boot 复选（支持双选）+ 自定义分区名，默认不勾选。
     auto *boot = window.findChild<QCheckBox *>(QStringLiteral("PayloadBootCheck"));
     auto *initBoot = window.findChild<QCheckBox *>(QStringLiteral("PayloadInitBootCheck"));
     QVERIFY(boot);
     QVERIFY(initBoot);
-    QVERIFY(boot->isChecked());
-    QVERIFY(initBoot->isChecked());
+    QVERIFY(!boot->isChecked());
+    QVERIFY(!initBoot->isChecked());
     QVERIFY(window.findChild<QLineEdit *>(QStringLiteral("PayloadCustomPartitionsEdit")));
     bool describesSelection = false;
     for (auto label : window.findChildren<QLabel *>())
