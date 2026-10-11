@@ -4,6 +4,7 @@
 #include "uihelper.h"
 #include <QCoreApplication>
 #include <QFile>
+#include <QRegularExpression>
 #include <QScreen>
 #include <QGuiApplication>
 #include <QDesktopServices>
@@ -62,9 +63,81 @@ void PayloadWindow::setupUI()
         }
     )");
     mainLayout->addWidget(urlEdit);
-    
+
+    // 提取镜像：boot / init_boot 可任意勾选（支持双选），并可自定义分区名。
+    QLabel *imageLabel = new QLabel("提取镜像：", container);
+    imageLabel->setStyleSheet("QLabel { color: #2c3e50; background: transparent; font-size: 13px; }");
+    mainLayout->addWidget(imageLabel);
+
+    const QString checkStyle = QStringLiteral(
+        "QCheckBox { color:#2c3e50; background:transparent; font-size:12.5px; spacing:6px; }"
+        "QCheckBox::indicator { width:16px; height:16px; border:1.5px solid #B9C6D2;"
+        "border-radius:4px; background:#FFFFFF; }"
+        "QCheckBox::indicator:hover { border-color:#649EB3; }"
+        "QCheckBox::indicator:checked { background:#649EB3; border-color:#649EB3; }");
+    QHBoxLayout *checkRow = new QHBoxLayout();
+    checkRow->setSpacing(16);
+    bootCheck = new QCheckBox("boot", container);
+    bootCheck->setObjectName("PayloadBootCheck");
+    bootCheck->setStyleSheet(checkStyle);
+    bootCheck->setChecked(true);
+    bootCheck->setCursor(Qt::PointingHandCursor);
+    initBootCheck = new QCheckBox("init_boot", container);
+    initBootCheck->setObjectName("PayloadInitBootCheck");
+    initBootCheck->setStyleSheet(checkStyle);
+    initBootCheck->setChecked(true);
+    initBootCheck->setCursor(Qt::PointingHandCursor);
+    checkRow->addWidget(bootCheck);
+    checkRow->addWidget(initBootCheck);
+    checkRow->addStretch();
+    mainLayout->addLayout(checkRow);
+
+    // 自定义分区：支持英文逗号分隔的多个分区名。
+    customEdit = new QLineEdit(container);
+    customEdit->setObjectName("PayloadCustomPartitionsEdit");
+    customEdit->setPlaceholderText("自定义分区名，多个用英文逗号分隔（如 vbmeta,dtbo）");
+    customEdit->setMinimumHeight(34);
+    customEdit->setStyleSheet(R"(
+        QLineEdit {
+            padding: 6px 10px;
+            border: 1px solid #D0DEEB;
+            border-radius: 6px;
+            font-size: 12px;
+            background-color: #F7FAFD;
+            color: #2c3e50;
+        }
+        QLineEdit:focus {
+            border: 1px solid #83AECA;
+            background-color: #FFFFFF;
+        }
+    )");
+    mainLayout->addWidget(customEdit);
+
+    // 提取进度
+    progressBar = new QProgressBar(container);
+    progressBar->setRange(0, 100);
+    progressBar->setValue(0);
+    progressBar->setTextVisible(true);
+    progressBar->setFixedHeight(20);
+    progressBar->setStyleSheet(R"(
+        QProgressBar {
+            background-color: #FFFFFF;
+            border: 1px solid #D0DEEB;
+            border-radius: 6px;
+            font-size: 11px;
+            color: #2c3e50;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background-color: #649EB3;
+            border-radius: 5px;
+        }
+    )");
+    progressBar->hide();
+    mainLayout->addWidget(progressBar);
+
     // 提示信息
-    QLabel *infoLabel = new QLabel("Payload 中的全部可用镜像将被提取\n输出路径：桌面/IMG 文件夹", container);
+    QLabel *infoLabel = new QLabel("勾选或输入要提取的镜像分区\n输出路径：桌面/IMG 文件夹", container);
     infoLabel->setStyleSheet("QLabel { color: #666; background: transparent; font-size: 11px; }");
     mainLayout->addWidget(infoLabel);
     
@@ -169,6 +242,31 @@ void PayloadWindow::onExtractClicked()
         return;
     }
 
+    // 收集提取目标：勾选的 boot / init_boot + 自定义分区名（支持双选与多分区）。
+    QStringList targets;
+    if (bootCheck->isChecked())
+        targets << QStringLiteral("boot");
+    if (initBootCheck->isChecked())
+        targets << QStringLiteral("init_boot");
+    const QStringList customNames =
+        customEdit->text().split(QRegularExpression("[,，\\s]+"), Qt::SkipEmptyParts);
+    for (QString name : customNames) {
+        name = name.trimmed().toLower();
+        if (name.isEmpty())
+            continue;
+        if (!QRegularExpression("^[a-z0-9_.-]+$").match(name).hasMatch()) {
+            QMessageBox::warning(this, "警告",
+                QString("自定义分区名无效：%1\n仅允许字母、数字、下划线、点和中划线。").arg(name));
+            return;
+        }
+        targets << name;
+    }
+    targets.removeDuplicates();
+    if (targets.isEmpty()) {
+        QMessageBox::warning(this, "警告", "请至少勾选一个镜像或输入自定义分区名！");
+        return;
+    }
+
     QString outputPath = getOutputPath();
     QString payloadTool = ResourceExtractor::getResourcePath() + "/payload-dumper-go.exe";
 
@@ -183,30 +281,55 @@ void PayloadWindow::onExtractClicked()
     process->setWorkingDirectory(ResourceExtractor::getResourcePath());
 
     QStringList args;
+    // -p：仅提取所选分区（boot / init_boot / 自定义），避免全量解包。
     args << "--output" << outputPath;
+    args << "-p" << targets.join(",");
     args << url;
-    
-    // 显示正在处理的提示
+
+    // 显示正在处理的提示并开启进度条（解析工具输出的百分比，单调递增）。
     extractButton->setEnabled(false);
     extractButton->setText("提取中...");
-    
+    progressBar->setValue(0);
+    progressBar->show();
+    auto progressReader = [this](const QByteArray &chunk) {
+        static const QRegularExpression percentPattern("(\\d+(?:\\.\\d+)?)\\s*%");
+        QRegularExpressionMatchIterator it = percentPattern.globalMatch(
+            QString::fromLocal8Bit(chunk));
+        while (it.hasNext()) {
+            bool ok = false;
+            const double value = it.next().captured(1).toDouble(&ok);
+            if (!ok)
+                continue;
+            const int percent = qBound(0, qRound(value), 100);
+            if (percent > progressBar->value())
+                progressBar->setValue(percent);
+        }
+    };
+    connect(process, &QProcess::readyReadStandardOutput, this,
+            [this, process, progressReader] { progressReader(process->readAllStandardOutput()); });
+    connect(process, &QProcess::readyReadStandardError, this,
+            [this, process, progressReader] { progressReader(process->readAllStandardError()); });
+
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, process, outputPath](int exitCode, QProcess::ExitStatus exitStatus) {
         extractButton->setEnabled(true);
         extractButton->setText("开始提取");
-        
+
         if (exitCode == 0 && exitStatus == QProcess::NormalExit) {
+            progressBar->setValue(100);
             // 提取成功，直接打开 IMG 文件夹
             QDesktopServices::openUrl(QUrl::fromLocalFile(outputPath));
             accept();
         } else {
+            progressBar->setValue(0);
+            progressBar->hide();
             QString error = process->readAllStandardError();
-            QMessageBox::critical(this, "错误", 
+            QMessageBox::critical(this, "错误",
                 QString("提取失败！\n错误信息：%1").arg(error.isEmpty() ? "未知错误" : error));
         }
-        
+
         process->deleteLater();
     });
-    
+
     process->start(payloadTool, args);
 }

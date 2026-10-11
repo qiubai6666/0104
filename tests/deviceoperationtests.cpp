@@ -354,11 +354,18 @@ void DeviceOperationTests::initTestCase()
 void DeviceOperationTests::payloadShortcutHasNoBootFilters()
 {
     PayloadWindow window;
-    QVERIFY(window.findChildren<QCheckBox *>().isEmpty());
-    bool describesAllImages = false;
+    // 2026-10 需求：boot / init_boot 复选（支持双选）+ 自定义分区名，默认全勾选。
+    auto *boot = window.findChild<QCheckBox *>(QStringLiteral("PayloadBootCheck"));
+    auto *initBoot = window.findChild<QCheckBox *>(QStringLiteral("PayloadInitBootCheck"));
+    QVERIFY(boot);
+    QVERIFY(initBoot);
+    QVERIFY(boot->isChecked());
+    QVERIFY(initBoot->isChecked());
+    QVERIFY(window.findChild<QLineEdit *>(QStringLiteral("PayloadCustomPartitionsEdit")));
+    bool describesSelection = false;
     for (auto label : window.findChildren<QLabel *>())
-        describesAllImages |= label->text().contains(QStringLiteral("全部可用镜像"));
-    QVERIFY(describesAllImages);
+        describesSelection |= label->text().contains(QStringLiteral("勾选或输入"));
+    QVERIFY(describesSelection);
 }
 
 void DeviceOperationTests::ougaSingleWindowAndLease()

@@ -2,7 +2,9 @@
 #define PAYLOADWINDOW_H
 
 #include <QDialog>
+#include <QCheckBox>
 #include <QLineEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -28,6 +30,10 @@ private:
     QString getOutputPath();
     
     QLineEdit *urlEdit;
+    QCheckBox *bootCheck;
+    QCheckBox *initBootCheck;
+    QLineEdit *customEdit;
+    QProgressBar *progressBar;
     QPushButton *extractButton;
     QPushButton *cancelButton;
 };
