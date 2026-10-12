@@ -11,6 +11,8 @@
 #include <QThread>
 #include <QtConcurrent>
 #include <QUrl>
+#include <atomic>
+#include <memory>
 #include "ougapackage.h"
 #include "ougapayloadextractor.h"
 #include "ougapayloadreader.h"
@@ -335,15 +337,23 @@ void PayloadWindow::startRemoteExtraction(const QString &url, const QStringList 
         }
 
         OugaPayloadExtractor::Callbacks callbacks;
-        callbacks.progress = [this](quint64 done, quint64 total) {
+        // 多工作线程高频回调：与欧加线刷相同，仅在百分比变化时投递主线程，
+        // 避免每秒数千个 QueuedConnection 事件刷爆事件队列导致界面卡顿。
+        auto last = std::make_shared<std::atomic_int>(0);
+        callbacks.progress = [this, last](quint64 done, quint64 total) {
             // 写入字节数进度；仅在首个进度回调时恢复确定区间。
             const int percent = total ? int(qMin<quint64>(99, done * 100 / total)) : 0;
-            QMetaObject::invokeMethod(this, [this, percent] {
-                if (progressBar->maximum() == 0)
-                    progressBar->setRange(0, 100);
-                if (percent > progressBar->value())
-                    progressBar->setValue(percent);
-            }, Qt::QueuedConnection);
+            int previous = last->load();
+            while (percent > previous &&
+                   !last->compare_exchange_weak(previous, percent)) {
+            }
+            if (percent > previous)
+                QMetaObject::invokeMethod(this, [this, percent] {
+                    if (progressBar->maximum() == 0)
+                        progressBar->setRange(0, 100);
+                    if (percent > progressBar->value())
+                        progressBar->setValue(percent);
+                }, Qt::QueuedConnection);
         };
         const int workers = qMax(1, QThread::idealThreadCount());
         // 只传所选分区条目，确保不会解出全部镜像。
