@@ -12,6 +12,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QScrollArea>
 #include <QFontDatabase>
@@ -99,6 +100,41 @@ private slots:
         QCOMPARE(manager->m_fullModeRefCount, 0);
         QCOMPARE(manager->m_adbOnlyRefCount, 0);
         fixture.reset();
+    }
+    void pollingReusesRecentInfoButExplicitRefreshStillWorks() {
+        manager->ensureAdbOnlyMonitoring();
+        const auto monitoring = qScopeGuard([this] { manager->releaseAdbOnlyMonitoring(); });
+        QTRY_VERIFY_WITH_TIMEOUT(!manager->getExtendedDeviceDetails().isEmpty(), 6000);
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        const int initialQueries = queryCount("ro.product.device");
+        QTest::qWait(2200);
+        qInfo() << "Device information batches after 2.2 seconds:" << queryCount("ro.product.device");
+        QCOMPARE(queryCount("ro.product.device"), initialQueries);
+        QVERIFY(queryCount("devices") >= 3);
+
+        setting("ro.product.device.value", "beta");
+        manager->updateDeviceInfo();
+        QTRY_COMPARE(manager->getDeviceInfo(), snapshot("beta"));
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        QCOMPARE(queryCount("ro.product.device"), initialQueries + 1);
+    }
+    void polledInfoRefreshesAfterReplacementPauseAndExpiry() {
+        manager->ensureAdbOnlyMonitoring();
+        const auto monitoring = qScopeGuard([this] { manager->releaseAdbOnlyMonitoring(); });
+        QTRY_VERIFY_WITH_TIMEOUT(!manager->getExtendedDeviceDetails().isEmpty(), 6000);
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        setting("adb.devices", "List of devices attached\nsecond\tdevice\n");
+        QTRY_COMPARE_WITH_TIMEOUT(manager->getDeviceInfo(), snapshot("beta"), 3000);
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        manager->pauseMonitoring();
+        setting("ro.product.device.value", "gamma");
+        manager->resumeMonitoring();
+        QTRY_COMPARE_WITH_TIMEOUT(manager->getDeviceInfo(), snapshot("gamma"), 3000);
+        QTRY_VERIFY(!manager->m_infoQueryActive);
+        setting("ro.product.device.value", "delta");
+        QTest::qWait(500);
+        QCOMPARE(manager->getDeviceInfo(), snapshot("gamma"));
+        QTRY_COMPARE_WITH_TIMEOUT(manager->getDeviceInfo(), snapshot("delta"), 12000);
     }
     void slowAdbSlotIsNotRestartedByPolling() {
         setting("ro.boot.slot_suffix.delay", 1300);

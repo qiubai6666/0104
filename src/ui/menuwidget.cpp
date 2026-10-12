@@ -697,11 +697,20 @@ bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
 {
     const auto type = event->type();
     if (type == QEvent::DynamicPropertyChange) {
-        // 样式表驱动的状态（tile 选中、状态 pill）需要重新求值选择器。
+        const QByteArray name = static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName();
+        // Qt 的内部样式属性和业务元数据不能触发再次 polish。
+        if (name != "state" && name != "menuSelected")
+            return QWidget::eventFilter(watched, event);
         auto *widget = qobject_cast<QWidget *>(watched);
         if (widget && isAncestorOf(widget)) {
-            widget->style()->unpolish(widget);
-            widget->style()->polish(widget);
+            if (name == "state" && widget->objectName() == "statusPill") {
+                widget->style()->unpolish(widget);
+                widget->style()->polish(widget);
+                widget->update();
+            } else if (name == "menuSelected") {
+                // 选中态由按钮绘制，不需要重算样式表及字体。
+                widget->update();
+            }
         }
         return QWidget::eventFilter(watched, event);
     }

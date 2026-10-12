@@ -77,6 +77,7 @@ void DeviceManager::ensureMonitoring()
 {
     // 增加全模式引用计数
     m_fullModeRefCount++;
+    if (m_fullModeRefCount == 1) m_infoRefreshTimer.invalidate();
     qDebug() << "DeviceManager 全模式引用计数:" << m_fullModeRefCount;
 
     // 只要有全模式请求，就必须切换到全模式
@@ -163,6 +164,7 @@ void DeviceManager::releaseAdbOnlyMonitoring()
 void DeviceManager::stopMonitoring()
 {
     m_checkTimer->stop();
+    m_infoRefreshTimer.invalidate();
     cancelInfoQuery();
     // Disconnect before killing, including processes still in Starting state.
     for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
@@ -179,6 +181,7 @@ void DeviceManager::pauseMonitoring()
 {
     if (m_isPaused) return;
     m_isPaused = true;
+    m_infoRefreshTimer.invalidate();
     cancelInfoQuery();
     for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
         disconnect(process, nullptr, this, nullptr);
@@ -279,7 +282,7 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
     } else {
         // 有 ADB 连接或处于 ADB-only 模式
         setDetectedDevices(adbConnected ? ADB : None, adbSerials);
-        if (m_currentMode == ADB) updateDeviceInfo();
+        if (m_currentMode == ADB) updatePolledDeviceInfo();
         m_isChecking = false;
     }
 }
@@ -334,7 +337,7 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
     }
 
     setDetectedDevices(fastbootSerials.isEmpty() ? None : Fastboot, fastbootSerials);
-    if (m_currentMode != None) updateDeviceInfo();
+    if (m_currentMode != None) updatePolledDeviceInfo();
 
     m_isChecking = false;
 }
@@ -371,6 +374,7 @@ void DeviceManager::setDetectedDevices(DeviceMode mode, const QStringList &seria
     const QString preferredSerial = normalized.contains(m_deviceSerial)
         ? m_deviceSerial : normalized.value(0);
     if (mode == m_currentMode && preferredSerial == m_deviceSerial && normalized == m_deviceSerials) return;
+    m_infoRefreshTimer.invalidate();
     cancelInfoQuery();
     const bool modeChanged = mode != m_currentMode;
     m_currentMode = mode;
@@ -474,6 +478,16 @@ bool DeviceManager::isCurrentInfoQuery(quint64 generation, QProcess *process, in
     return m_infoQueryActive && !m_isPaused && generation == m_infoGeneration &&
            process == m_infoProcess && step == m_infoStep &&
            m_currentMode == m_infoMode && m_deviceSerial == m_infoSerial;
+}
+
+void DeviceManager::updatePolledDeviceInfo()
+{
+    // Connectivity still polls every second. Reuse a completed information
+    // snapshot so an idle connected device does not spawn seven extra commands
+    // on each tick. Explicit refreshes bypass this cache.
+    if (m_infoRefreshTimer.isValid() &&
+        m_infoRefreshTimer.elapsed() < DEVICE_INFO_REFRESH_INTERVAL) return;
+    updateDeviceInfo();
 }
 
 void DeviceManager::updateDeviceInfo()
@@ -603,6 +617,7 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
         startInfoStep(3);
         return;
     }
+    m_infoRefreshTimer.start();
     m_infoQueryActive = false;
 }
 
@@ -688,6 +703,7 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
              m_pendingSelinuxStatus == QStringLiteral("Permissive") ? QStringLiteral("宽容模式") :
              m_pendingSelinuxStatus == QStringLiteral("Disabled") ? QStringLiteral("已禁用") : m_pendingSelinuxStatus);
     // Finish the batch before notifying observers; a slot may start a new one.
+    m_infoRefreshTimer.start();
     m_infoQueryActive = false;
     if (details != m_extendedDeviceDetails) {
         m_extendedDeviceDetails = details;

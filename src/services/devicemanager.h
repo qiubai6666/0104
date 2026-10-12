@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QString>
 #include <QStringList>
 #include <functional>
@@ -87,6 +88,7 @@ private:
     void setDetectedDevice(DeviceMode mode, const QString &serial);
     void setDetectedDevices(DeviceMode mode, const QStringList &serials);
     void cancelInfoQuery();
+    void updatePolledDeviceInfo();
     void startInfoStep(int step);
     void finishInfoStep(bool success, const QString &output);
     void finishExtendedInfoQuery(bool success, const QString &output);
@@ -116,6 +118,7 @@ private:
     QString m_deviceSerial;
     QStringList m_deviceSerials;
     QTimer *m_infoTimer;
+    QElapsedTimer m_infoRefreshTimer;
     quint64 m_infoGeneration = 0;
     bool m_infoQueryActive = false;
     DeviceMode m_infoMode = None;

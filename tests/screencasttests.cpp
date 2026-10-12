@@ -22,6 +22,8 @@
 #include <QLayout>
 #include <QLabel>
 #include <QPainter>
+#include <QProxyStyle>
+#include <QStyleFactory>
 #include "devicecheckwindow.h"
 #include "screencastcontroller.h"
 #include "devicemanager.h"
@@ -37,6 +39,22 @@ QByteArray readFile(const QString &path) {
 bool writeFile(const QString &path, const QByteArray &value) {
     QFile file(path); return file.open(QIODevice::WriteOnly) && file.write(value) == value.size();
 }
+class PolishCounter : public QProxyStyle {
+public:
+    PolishCounter() : QProxyStyle(QStyleFactory::create("Fusion")) {}
+    void polish(QWidget *widget) override { ++polishes; QProxyStyle::polish(widget); }
+    void unpolish(QWidget *widget) override { ++unpolishes; QProxyStyle::unpolish(widget); }
+    int polishes = 0;
+    int unpolishes = 0;
+};
+class UpdateCounter : public QObject {
+public:
+    int updates = 0;
+    bool eventFilter(QObject *, QEvent *event) override {
+        if (event->type() == QEvent::UpdateRequest) ++updates;
+        return false;
+    }
+};
 }
 QString ResourceExtractor::getResourcePath() { return fixturePath; }
 QString ResourceExtractor::getAdbPath() { return fixturePath + "/adb.exe"; }
@@ -77,6 +95,60 @@ private slots:
         QCOMPARE(DeviceManager::instance()->m_adbOnlyRefCount, 0);
         QCOMPARE(DeviceManager::instance()->m_fullModeRefCount, 0);
         fixture.reset();
+    }
+    void unrelatedPropertiesDoNotRepolishMenu() {
+        QVERIFY(writeFile(fixturePath + "/download_config.txt", ""));
+        MenuWidget menu;
+        freeze(menu);
+        PolishCounter style;
+        QPushButton child(&menu);
+        child.setStyle(&style);
+        child.setStyleSheet("QPushButton { color: #22364a; font-size: 13px; }");
+        child.ensurePolished();
+        style.polishes = style.unpolishes = 0;
+        // Metadata and Qt's internal stylesheet properties are not UI state.
+        child.setProperty("operationProgress", 1);
+        child.setProperty("operationProgress", 2);
+        child.setProperty("_q_testStyleMetadata", true);
+        QCOMPARE(style.polishes, 0);
+        QCOMPARE(style.unpolishes, 0);
+    }
+    void statusPillRefreshesWithoutRecursivePolish() {
+        QVERIFY(writeFile(fixturePath + "/download_config.txt", ""));
+        MenuWidget menu;
+        freeze(menu);
+        PolishCounter style;
+        QLabel pill(&menu);
+        pill.setStyle(&style);
+        pill.setObjectName("statusPill");
+        pill.setProperty("state", "off");
+        pill.setStyleSheet("QLabel { font-size: 13px; }"
+                          "QLabel[state=\"off\"] { color: #9aa8b5; }"
+                          "QLabel[state=\"ok\"] { color: #22c55e; }");
+        pill.ensurePolished();
+        style.polishes = style.unpolishes = 0;
+        pill.setProperty("state", "ok");
+        QCOMPARE(pill.palette().color(QPalette::WindowText), QColor("#22c55e"));
+        QCOMPARE(style.polishes, 1);
+        QCOMPARE(style.unpolishes, 1);
+        pill.setProperty("state", "off");
+        QCOMPARE(pill.palette().color(QPalette::WindowText), QColor("#9aa8b5"));
+        QCOMPARE(style.polishes, 2);
+        QCOMPARE(style.unpolishes, 2);
+    }
+    void idleMenuStopsRepainting() {
+        QVERIFY(writeFile(fixturePath + "/download_config.txt", ""));
+        MenuWidget menu;
+        freeze(menu);
+        menu.setAttribute(Qt::WA_DontShowOnScreen);
+        menu.show();
+        QTest::qWait(200);
+        UpdateCounter counter;
+        menu.installEventFilter(&counter);
+        QTest::qWait(300);
+        qInfo() << "Idle panel update requests in 300 ms:" << counter.updates;
+        QVERIFY2(counter.updates <= 2, "Idle panel continuously requests repaints");
+        QVERIFY(!menu.screenCastSpinnerTimer->isActive());
     }
     void compactMenuAndUniformDrawers() {
         // A local empty config prevents the constructor from downloading anything.
