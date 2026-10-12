@@ -2,6 +2,7 @@
 #include "ougaflashplanner.h"
 #include "ougaflashservice.h"
 #include "ougaflashwindow.h"
+#include "ougapackage.h"
 #include "ougapayloadextractor.h"
 #include "ougapreparation.h"
 #include "ougaromservice.h"
@@ -371,8 +372,17 @@ void OugaFlashWindow::extractPayload(bool all) {
     m_payloadSource = page.url->text().trimmed();
   m_payloadSource.remove(QChar(0x60));
   if (m_payloadSource.isEmpty()) {
-    log("错误：请先选择Payload.bin文件、全量包ZIP文件，或输入有效的全量包链接");
-    return;
+    // 所选文件夹本身带 payload.bin 时（扫描结果里已作为镜像列出），
+    // 直接复用它，不再要求重复选择文件。
+    const QString directory = page.folder->text().trimmed();
+    const QString found =
+        directory.isEmpty() ? QString() : OugaPackage::findPayload(directory);
+    if (found.isEmpty()) {
+      log("错误：请先选择Payload.bin文件、全量包ZIP文件，或输入有效的全量包链接");
+      return;
+    }
+    m_payloadSource = found;
+    log("已从所选文件夹自动使用 payload.bin：" + found);
   }
   if (all && QUrl(m_payloadSource).scheme() != "https" &&
       QUrl(m_payloadSource).scheme() != "http" &&
