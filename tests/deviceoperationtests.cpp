@@ -123,9 +123,9 @@ private slots:
     void menuStartsMonitoringWithoutOtherWindows();
     void repairStartsMonitoringWithoutOtherWindows();
     void droppedFilesReachSharedStorage();
-    void allSubmenusAcceptFiles_data();
-    void allSubmenusAcceptFiles();
-    void submenuDropOverEditorCopiesFile();
+    void onlyDeviceDetectionTransfersFiles_data();
+    void onlyDeviceDetectionTransfersFiles();
+    void deviceDropOverChildCopiesFile();
     void submenuTransferSurvivesSwitchAndRejectsSecondDrop();
     void submenuDropRechecksModeAndLease_data();
     void submenuDropRechecksModeAndLease();
@@ -608,7 +608,7 @@ QList<QJsonArray> DeviceOperationTests::pushes() const
     return result;
 }
 
-void DeviceOperationTests::allSubmenusAcceptFiles_data()
+void DeviceOperationTests::onlyDeviceDetectionTransfersFiles_data()
 {
     QTest::addColumn<int>("submenu");
     QTest::newRow("screen-cast") << -1;
@@ -621,14 +621,14 @@ void DeviceOperationTests::allSubmenusAcceptFiles_data()
     QTest::newRow("openlist") << 102;
 }
 
-void DeviceOperationTests::allSubmenusAcceptFiles()
+void DeviceOperationTests::onlyDeviceDetectionTransfersFiles()
 {
     QFETCH(int, submenu);
     MenuWidget menu;
     menu.show();
     QWidget *target = nullptr;
     if (submenu == -1) {
-        // 主页（面板本体）同样是合法拖放目标。
+        // 主页不能触发手机文件传输。
         target = &menu;
     } else if (submenu >= 100) {
         menu.buttons[MenuWidget::RepairTools]->click();
@@ -646,7 +646,6 @@ void DeviceOperationTests::allSubmenusAcceptFiles()
                                                       static_cast<QWidget *>(menu.configWindow);
     }
     QVERIFY(target);
-    QVERIFY(target->acceptDrops());
     QVERIFY(putFile(fixturePath + "/mode.txt", "adb"));
     QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->currentMode(), DeviceManager::ADB, 5000);
     QTRY_VERIFY_WITH_TIMEOUT(!DeviceManager::instance()->m_infoQueryActive, 5000);
@@ -655,6 +654,16 @@ void DeviceOperationTests::allSubmenusAcceptFiles()
     const QString path = fixturePath + QStringLiteral("/中文 文件's;&.txt");
     QVERIFY(putFile(path, "original contents"));
     const bool hadDeviceWindow = menu.deviceCheckWindow;
+    if (submenu != MenuWidget::DeviceCheck) {
+        QVERIFY(!menu.fileDropSurface(target));
+        dropFiles(*target, {QUrl::fromLocalFile(path)});
+        QTest::qWait(100);
+        QCOMPARE(bool(menu.deviceCheckWindow), hadDeviceWindow);
+        QVERIFY(pushes().isEmpty());
+        QCOMPARE(messages, 0);
+        return;
+    }
+    QVERIFY(target->acceptDrops());
     QVERIFY(dropFiles(*target, {QUrl::fromLocalFile(path)}));
     QVERIFY(menu.deviceCheckWindow);
     QVERIFY(menu.deviceCheckWindow->operationInProgress);
@@ -662,7 +671,8 @@ void DeviceOperationTests::allSubmenusAcceptFiles()
     QCOMPARE(DeviceOperationLease::owner(), menu.deviceCheckWindow);
     if (!hadDeviceWindow) QVERIFY(!menu.deviceCheckWindow->isVisible());
     QTRY_VERIFY_WITH_TIMEOUT(!menu.deviceCheckWindow->operationInProgress, 5000);
-    QTRY_COMPARE(messages, 1);
+    QTest::qWait(50);
+    QCOMPARE(messages, 0);
     QCOMPARE(pushes().size(), 1);
     QVERIFY(pushes().contains(QJsonArray{"adb", "-s", "mock-serial", "push", path,
                                        "/sdcard/" + QFileInfo(path).fileName()}));
@@ -674,13 +684,12 @@ void DeviceOperationTests::allSubmenusAcceptFiles()
     }
 }
 
-void DeviceOperationTests::submenuDropOverEditorCopiesFile()
+void DeviceOperationTests::deviceDropOverChildCopiesFile()
 {
     MenuWidget menu;
     menu.show();
-    menu.buttons[MenuWidget::Payload]->click();
-    auto *editor = menu.payloadWindow->findChild<QLineEdit *>();
-    QVERIFY(editor);
+    menu.buttons[MenuWidget::DeviceCheck]->click();
+    auto *editor = new QLineEdit(menu.deviceCheckWindow);
     // Native drop targets must not insert the local path or consume the drop.
     editor->setAcceptDrops(true);
     editor->setText("keep editor text");
@@ -709,7 +718,8 @@ void DeviceOperationTests::submenuDropOverEditorCopiesFile()
     QVERIFY(drop.isAccepted());
     QCOMPARE(drop.dropAction(), Qt::CopyAction);
     QTRY_VERIFY_WITH_TIMEOUT(!menu.deviceCheckWindow->operationInProgress, 5000);
-    QTRY_COMPARE(messages, 1);
+    QTest::qWait(50);
+    QCOMPARE(messages, 0);
     QCOMPARE(editor->text(), QString("keep editor text"));
     QCOMPARE(pushes().size(), 1);
     QVERIFY(QFile::exists(path));
@@ -721,14 +731,13 @@ void DeviceOperationTests::submenuTransferSurvivesSwitchAndRejectsSecondDrop()
     menu.show();
     menu.buttons[MenuWidget::DeviceCheck]->click();
     awaitAdb(*menu.deviceCheckWindow);
-    menu.buttons[MenuWidget::RepairTools]->click();
     QVERIFY(putFile(fixturePath + "/push-behavior.txt", "hang"));
     const QString path = fixturePath + "/retained-drop.txt";
     QVERIFY(putFile(path, "contents"));
-    QVERIFY(dropFiles(*menu.repairWindow, {QUrl::fromLocalFile(path)}));
+    QVERIFY(dropFiles(*menu.deviceCheckWindow, {QUrl::fromLocalFile(path)}));
     QTRY_COMPARE(menu.deviceCheckWindow->currentProcess->state(), QProcess::Running);
     menu.buttons[MenuWidget::Configuration]->click();
-    QVERIFY(!menu.repairWindow->isVisible());
+    QVERIFY(!menu.deviceCheckWindow->isVisible());
     QVERIFY(!dropFiles(*menu.configWindow, {QUrl::fromLocalFile(path)}));
     QCOMPARE(menu.deviceCheckWindow->currentProcess->state(), QProcess::Running);
     QCOMPARE(DeviceOperationLease::owner(), menu.deviceCheckWindow);
@@ -755,11 +764,10 @@ void DeviceOperationTests::submenuDropRechecksModeAndLease()
     menu.show();
     menu.buttons[MenuWidget::DeviceCheck]->click();
     awaitAdb(*menu.deviceCheckWindow);
-    menu.buttons[MenuWidget::Configuration]->click();
     QMimeData mime;
     mime.setUrls({QUrl::fromLocalFile(ResourceExtractor::getAdbPath())});
     QDragEnterEvent enter(QPoint(30, 80), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(menu.configWindow, &enter);
+    QApplication::sendEvent(menu.deviceCheckWindow, &enter);
     QVERIFY(enter.isAccepted());
     QObject other;
     if (change == 0) DeviceManager::instance()->setDetectedDevice(DeviceManager::None, {});
@@ -767,7 +775,7 @@ void DeviceOperationTests::submenuDropRechecksModeAndLease()
     if (change == 2) QVERIFY(DeviceOperationLease::acquire(&other));
     QDropEvent drop(QPointF(30, 80), change == 3 ? Qt::MoveAction : Qt::CopyAction,
                     &mime, Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(menu.configWindow, &drop);
+    QApplication::sendEvent(menu.deviceCheckWindow, &drop);
     QVERIFY(!drop.isAccepted());
     QCOMPARE(pushes().size(), 0);
     QVERIFY(!menu.deviceCheckWindow->operationInProgress);
@@ -824,8 +832,8 @@ void DeviceOperationTests::droppedFilesReachSharedStorage()
     QVERIFY(!window.executeButton->isEnabled());
     QVERIFY(window.statusLabel->text().contains("1/2"));
     QTRY_VERIFY_WITH_TIMEOUT(!window.operationInProgress, 5000);
-    QTRY_COMPARE(messages, 1);
-    QVERIFY(lastMessage.contains(QStringLiteral("成功：2，失败：0，未传输：0")));
+    QTest::qWait(50);
+    QCOMPARE(messages, 0);
     QCOMPARE(pushes().size(), 2);
     for (const QString &name : names) {
         const QString path = fixturePath + '/' + name;
@@ -971,7 +979,8 @@ void DeviceOperationTests::transferHideAndRepeatedDrop()
     QVERIFY(window.close());
     QVERIFY(!window.isVisible());
     QTRY_VERIFY(!window.operationInProgress);
-    QTRY_COMPARE(messages, 1);
+    QTest::qWait(50);
+    QCOMPARE(messages, 0);
     QCOMPARE(pushes().size(), 1);
     QVERIFY(QFile::exists(fixturePath + "/device/first.txt"));
 }

@@ -434,20 +434,22 @@ void DeviceCheckWindow::finishFileTransferProcess(QProcess *process, bool succes
 
 void DeviceCheckWindow::finishFileTransfer(const QString &interruption)
 {
+    if (fileTransfer.failures.isEmpty() && interruption.isEmpty()) {
+        finishOperation();
+        return;
+    }
     const int skipped = fileTransfer.files.size() - fileTransfer.next;
-    const bool success = fileTransfer.failures.isEmpty() && interruption.isEmpty();
     QString message = QStringLiteral("目标：手机共享存储根目录 /sdcard/\n成功：%1，失败：%2，未传输：%3")
                        .arg(fileTransfer.succeeded).arg(fileTransfer.failures.size()).arg(skipped);
     if (!interruption.isEmpty()) message += "\n" + interruption;
     // Bound the dialog size even when a large batch fails.
     for (const QString &error : fileTransfer.failures.mid(0, 5)) message += "\n" + error;
     if (fileTransfer.failures.size() > 5) message += QStringLiteral("\n其余失败文件未展开。");
-    // The persistent device window owns the queue, but feedback belongs to the
-    // submenu where the drop happened. A hidden/destroyed source cannot stop it.
+    // A hidden device page cannot interrupt an active transfer.
     const QPointer<QWidget> source = fileTransferSource;
     finishOperation();
-    UIHelper::showCenteredMessageBox(success ? QMessageBox::Information : QMessageBox::Warning,
-                                    success ? "文件传输完成" : "文件传输未全部完成", message, source.data());
+    UIHelper::showCenteredMessageBox(QMessageBox::Warning,
+                                    "文件传输未全部完成", message, source.data());
 }
 
 void DeviceCheckWindow::setupUI()

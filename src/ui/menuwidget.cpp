@@ -16,7 +16,6 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
-#include <QFileInfo>
 #include <QFont>
 #include <QGuiApplication>
 #include <QGridLayout>
@@ -243,7 +242,6 @@ void MenuWidget::setupUI()
 {
     setFixedSize(UIHelper::ControlCenterWidth, UIHelper::ControlCenterHeight);
     UIHelper::applyControlCenterSurface(this);
-    setAcceptDrops(true);
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     setStyleSheet(QString("QLabel {background:transparent; color:%1; font-family:'Segoe UI','Microsoft YaHei';}")
                   .arg(dark ? "#e9edf3" : "#2c3e50"));
@@ -579,7 +577,6 @@ RepairWindow *MenuWidget::ensureRepairWindow()
         repairWindow = new RepairWindow(pages);
         pages->addWidget(repairWindow);
         pageTitles.insert(repairWindow, QStringLiteral("秋白工作室"));
-        repairWindow->setAcceptDrops(true);
     }
     return repairWindow;
 }
@@ -590,7 +587,6 @@ PayloadWindow *MenuWidget::ensurePayloadWindow()
         payloadWindow = new PayloadWindow(pages);
         pages->addWidget(payloadWindow);
         pageTitles.insert(payloadWindow, QStringLiteral("Payload 分区提取"));
-        payloadWindow->setAcceptDrops(true);
         connect(payloadWindow, &QDialog::finished, this, [this](int) { showHome(); });
     }
     return payloadWindow;
@@ -613,7 +609,6 @@ ConfigWindow *MenuWidget::ensureConfigWindow()
         configWindow = new ConfigWindow(pages);
         pages->addWidget(configWindow);
         pageTitles.insert(configWindow, QStringLiteral("配置与工具"));
-        configWindow->setAcceptDrops(true);
     }
     return configWindow;
 }
@@ -640,24 +635,16 @@ QWidget *MenuWidget::fileDropSurface(QWidget *widget)
 {
     // Message boxes and file pickers keep their own interaction semantics.
     if (!widget) return nullptr;
-    if (qobject_cast<QDialog *>(widget->window()) && widget->window() != payloadWindow) return nullptr;
-    if (repairWindow && repairWindow->ownsToolWindow(widget->window())) return widget->window();
-    // 从最具体到最泛匹配：面板是各嵌入页的祖先，必须放在最后，
-    // 否则子页内的拖放会被误归到面板本体。
-    const QList<QWidget *> roots = {repairWindow, payloadWindow,
-                                   deviceCheckWindow, configWindow, this};
-    for (QWidget *root : roots) {
-        if (root && (widget == root || root->isAncestorOf(widget))) return root;
-    }
+    if (qobject_cast<QDialog *>(widget->window())) return nullptr;
+    if (deviceCheckWindow &&
+        (widget == deviceCheckWindow || deviceCheckWindow->isAncestorOf(widget)))
+        return deviceCheckWindow;
     return nullptr;
 }
 
 bool MenuWidget::canAcceptFileTransfer() const
 {
-    if (deviceCheckWindow) return deviceCheckWindow->canAcceptFileTransfer();
-    const auto *manager = DeviceManager::instance();
-    return manager->currentMode() == DeviceManager::ADB && !manager->deviceSerial().isEmpty()
-           && !DeviceOperationLease::busyFor();
+    return deviceCheckWindow && deviceCheckWindow->canAcceptFileTransfer();
 }
 
 bool MenuWidget::handleFileDrop(QWidget *surface, QEvent *event)
@@ -667,12 +654,6 @@ bool MenuWidget::handleFileDrop(QWidget *surface, QEvent *event)
     if (files.isEmpty()) {
         const auto *mime = drop->mimeData();
         if (!mime || !mime->hasUrls()) return false;
-        // Preserve the flash-package selector only for pure local-folder drops.
-        // Invalid/mixed batches must not fall through to native text editors.
-        bool foldersOnly = !mime->urls().isEmpty();
-        for (const QUrl &url : mime->urls())
-            foldersOnly &= url.isLocalFile() && QFileInfo(url.toLocalFile()).isDir();
-        if (foldersOnly) return false;
         drop->ignore();
         return true;
     }
@@ -681,7 +662,6 @@ bool MenuWidget::handleFileDrop(QWidget *surface, QEvent *event)
         return true;
     }
     if (event->type() == QEvent::Drop) {
-        ensureDeviceCheckWindow();
         if (!deviceCheckWindow->transferFiles(files, surface)) {
             drop->ignore();
             return true;
@@ -751,6 +731,14 @@ bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
         type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::Drop)
         return QWidget::eventFilter(watched, event);
     auto *widget = qobject_cast<QWidget *>(watched);
+    if (type == QEvent::Show || type == QEvent::Hide || type == QEvent::WindowStateChange) {
+        const QList<QWidget *> roots = {this, repairWindow, payloadWindow,
+                                       deviceCheckWindow, configWindow};
+        if (roots.contains(widget)) updateMenuSelection();
+        if (type == QEvent::Hide && widget != homePage && pageTitles.contains(widget) &&
+            pages->currentWidget() == widget && isVisible())
+            showHome();
+    }
     QWidget *surface = fileDropSurface(widget);
     if (surface) {
         if (event->type() == QEvent::Show && widget == surface) {
@@ -764,16 +752,6 @@ bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
         if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove ||
             event->type() == QEvent::Drop) {
             return handleFileDrop(surface, event);
-        }
-        if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
-            event->type() == QEvent::WindowStateChange) {
-            const QList<QWidget *> roots = {this, repairWindow, payloadWindow,
-                                           deviceCheckWindow, configWindow};
-            if (roots.contains(widget)) updateMenuSelection();
-            // 子页被关闭或隐藏时面板回主页，避免停留在空页。
-            if (type == QEvent::Hide && widget != homePage && pageTitles.contains(widget) &&
-                pages->currentWidget() == widget && isVisible())
-                showHome();
         }
     }
     return QWidget::eventFilter(watched, event);
