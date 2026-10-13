@@ -18,7 +18,7 @@
 
 namespace {
 const QString base = QStringLiteral("https://pan.xn--ucy.xyz");
-QString remoteRoot(bool module) { return module ? QStringLiteral("/模块") : QStringLiteral("/APK"); }
+QString remoteRoot(bool module) { return module ? QStringLiteral("/local/模块") : QStringLiteral("/local/APK"); }
 constexpr qint64 maxJson = 4 * 1024 * 1024;
 // A single HTTP connection can be the bottleneck on some OpenList/CDN setups.
 // Use a few ranged requests for larger files, while retaining a single-stream

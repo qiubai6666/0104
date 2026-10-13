@@ -16,7 +16,7 @@ namespace OpenList {
 struct Entry {
     QString name, relativePath, remotePath, modified;
     qint64 size = -1;
-    bool module = false; // Source category: Tools (/模块), not the installation file type.
+    bool module = false; // Source category: Tools (/local/模块), not the installation file type.
     bool directory = false;
 };
 QString redact(QString text);

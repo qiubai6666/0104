@@ -316,7 +316,7 @@ private slots:
         OpenList::Entry entry;
         entry.module = module; entry.name = module ? "alpha.zip" : "alpha.apk";
         entry.relativePath = QStringLiteral("中文 分类/") + entry.name;
-        entry.remotePath = (module ? QStringLiteral("/模块/") : QStringLiteral("/APK/")) + entry.relativePath;
+        entry.remotePath = (module ? QStringLiteral("/local/模块/") : QStringLiteral("/local/APK/")) + entry.relativePath;
         entry.size = bytes.size();
         OpenListService first(nullptr, &network, firstRoot), second(nullptr, &network, secondRoot);
         QSignalSpy firstReady(&first, &OpenListService::ready), secondReady(&second, &OpenListService::ready);
@@ -354,19 +354,19 @@ private slots:
     void recursiveListing(){
         Network network;int appPages=0;
         network.handler=[&](const QNetworkRequest&r,const QJsonObject&b){QString p=b.value("path").toString();QJsonArray a;
-            if(p==QStringLiteral("/APK")){int page=b.value("page").toInt();appPages++;if(page==1)a={entry("A.apk"),entry("sub",true),entry("readme.txt"),entry("../bad.apk")};else a={entry("B.APK")};return new Reply(r,api({{"content",a},{"total",101}}),200);}
+            if(p==QStringLiteral("/local/APK")){int page=b.value("page").toInt();appPages++;if(page==1)a={entry("A.apk"),entry("sub",true),entry("readme.txt"),entry("../bad.apk")};else a={entry("B.APK")};return new Reply(r,api({{"content",a},{"total",101}}),200);}
             if(p.endsWith("/sub"))return new Reply(r,api({{"content",QJsonArray{entry("A.apk")}}, {"total",1}}),200);
             return new Reply(r,api({{"content",QJsonValue(QJsonValue::Null)},{"total",0}}),200);
         };
         OpenListService service(nullptr,&network,"unused");QSignalSpy spy(&service,&OpenListService::listingReady);service.refresh();QTRY_COMPARE(spy.size(),2);QCOMPARE(appPages,2);
-        for(const auto&args:spy){bool module=args[0].toBool();auto xs=qvariant_cast<QList<OpenList::Entry>>(args[1]);if(module)QCOMPARE(xs.size(),0);else{QCOMPARE(xs.size(),4); QVERIFY(xs[1].directory); for (const auto &e : xs) QVERIFY(e.remotePath.startsWith("/APK/"));QVERIFY(!args[2].toString().isEmpty());}}
+        for(const auto&args:spy){bool module=args[0].toBool();auto xs=qvariant_cast<QList<OpenList::Entry>>(args[1]);if(module)QCOMPARE(xs.size(),0);else{QCOMPARE(xs.size(),4); QVERIFY(xs[1].directory); for (const auto &e : xs) QVERIFY(e.remotePath.startsWith("/local/APK/"));QVERIFY(!args[2].toString().isEmpty());}}
     }
     void toolsListingAllFormats() {
         Network network; int pages = 0;
         network.handler = [&](const QNetworkRequest &r,const QJsonObject &b) {
             const QString path=b.value("path").toString();
-            if (path==QStringLiteral("/APK")) return new Reply(r,api({{"content",QJsonArray{entry("app.apk"),entry("hide.sh"),entry("hide.txt")}}, {"total",3}}),200);
-            if (path==QStringLiteral("/模块")) {
+            if (path==QStringLiteral("/local/APK")) return new Reply(r,api({{"content",QJsonArray{entry("app.apk"),entry("hide.sh"),entry("hide.txt")}}, {"total",3}}),200);
+            if (path==QStringLiteral("/local/模块")) {
                 ++pages;
                 const QJsonArray content=b.value("page").toInt()==1 ?
                     QJsonArray{entry("tool.SH"),entry("app.APK"),entry("module.zip"),entry("readme.txt"),entry("LICENSE"),entry(QStringLiteral("中文文件夹"),true),entry("../bad.sh")} :
@@ -381,7 +381,7 @@ private slots:
             const bool tools=row[0].toBool(); const auto entries=qvariant_cast<QList<OpenList::Entry>>(row[1]);
             QCOMPARE(entries.size(),tools ? 9 : 1);
             for (const auto &item:entries) { QCOMPARE(item.module,tools); QVERIFY(!item.relativePath.contains("..")); }
-            if (tools) { QVERIFY(!row[2].toString().isEmpty()); QVERIFY(std::any_of(entries.cbegin(),entries.cend(),[](const OpenList::Entry &entry) { return entry.remotePath==QStringLiteral("/模块/中文文件夹/测试脚本.sh"); })); }
+            if (tools) { QVERIFY(!row[2].toString().isEmpty()); QVERIFY(std::any_of(entries.cbegin(),entries.cend(),[](const OpenList::Entry &entry) { return entry.remotePath==QStringLiteral("/local/模块/中文文件夹/测试脚本.sh"); })); }
         }
     }
     void toolsGenericDownload_data() {
@@ -398,7 +398,7 @@ private slots:
             return new Reply(req,bytes,200);
         };
         OpenList::Entry entry; entry.module=true; entry.name=name; entry.relativePath=QStringLiteral("中文/")+name;
-        entry.remotePath=QStringLiteral("/模块/")+entry.relativePath;
+        entry.remotePath=QStringLiteral("/local/模块/")+entry.relativePath;
         OpenListService service(nullptr,&network,dir.path()); QSignalSpy ready(&service,&OpenListService::ready);
         const QString original=dir.filePath(QStringLiteral("模块/")+entry.relativePath);
         QVERIFY(QDir().mkpath(QFileInfo(original).absolutePath())); QVERIFY(writeFile(original,"existing"));
@@ -510,10 +510,10 @@ private slots:
         OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z"); OpenListWindow window(nullptr,&service,&installer);
         QSignalSpy listed(&service,&OpenListService::listingReady); QTRY_COMPARE(listed.size(),2);
         auto *card=window.findChild<QGroupBox*>("openListToolsCard"); QVERIFY(card); QCOMPARE(card->title(),QString("Tools"));
-        OpenList::Entry folder; folder.module=true; folder.directory=true; folder.name="folder"; folder.relativePath=folder.name; folder.remotePath=QStringLiteral("/模块/folder");
+        OpenList::Entry folder; folder.module=true; folder.directory=true; folder.name="folder"; folder.relativePath=folder.name; folder.remotePath=QStringLiteral("/local/模块/folder");
         auto file=folder; file.directory=false; file.name=mode==0 ? "app.apk" : mode==1 || mode>=4 ? "script.sh" : "readme.txt";
-        file.relativePath=mode>=4 ? "folder/"+file.name : file.name; file.remotePath=QStringLiteral("/模块/")+file.relativePath;
-        auto text=file; text.name="readme.txt"; text.relativePath=mode>=4 ? "folder/readme.txt" : text.name; text.remotePath=QStringLiteral("/模块/")+text.relativePath;
+        file.relativePath=mode>=4 ? "folder/"+file.name : file.name; file.remotePath=QStringLiteral("/local/模块/")+file.relativePath;
+        auto text=file; text.name="readme.txt"; text.relativePath=mode>=4 ? "folder/readme.txt" : text.name; text.remotePath=QStringLiteral("/local/模块/")+text.relativePath;
         emit service.listingReady(true,mode>=4 ? QList<OpenList::Entry>{folder,file,text} : QList<OpenList::Entry>{file},{});
         auto *table=window.findChild<QTableWidget*>("openListModules"); QVERIFY(table); table->selectRow(0);
         const bool transfer=mode==2 || mode==5;
@@ -539,19 +539,19 @@ private slots:
         QCOMPARE(QFileInfo::exists(dir.filePath(QStringLiteral("模块/")+text.relativePath)),transfer);
     }
     void categoryFailureIndependent(){
-        Network network;network.handler=[](const QNetworkRequest&r,const QJsonObject&b){return new Reply(r,b.value("path").toString()==QStringLiteral("/模块")?QByteArray("bad"):api({{"content",QJsonArray{entry("ok.apk")}},{"total",1}}),200);};
+        Network network;network.handler=[](const QNetworkRequest&r,const QJsonObject&b){return new Reply(r,b.value("path").toString()==QStringLiteral("/local/模块")?QByteArray("bad"):api({{"content",QJsonArray{entry("ok.apk")}},{"total",1}}),200);};
         OpenListService s(nullptr,&network,"unused");QSignalSpy spy(&s,&OpenListService::listingReady);s.refresh();QTRY_COMPARE(spy.size(),2);for(auto a:spy)if(a[0].toBool())QVERIFY(!a[2].toString().isEmpty());else QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(a[1]).size(),1);
     }
     void download_data(){QTest::addColumn<int>("mode");for(int i=0;i<6;++i)QTest::newRow(qPrintable(QString::number(i)))<<i;}
     void download(){
         QFETCH(int,mode);QTemporaryDir dir;QVERIFY(dir.isValid());Network network;
         network.handler=[mode](const QNetworkRequest&r,const QJsonObject&body){
-            if(r.url().path()=="/api/fs/get" && body.value("path").toString()!=QStringLiteral("/APK/sub/ok.apk")) return new Reply(r,"bad path",400);
+            if(r.url().path()=="/api/fs/get" && body.value("path").toString()!=QStringLiteral("/local/APK/sub/ok.apk")) return new Reply(r,"bad path",400);
             if(r.url().path()=="/api/fs/get")return new Reply(r,api({{"raw_url",mode==1?"http://unsafe/file":"https://files.example.com/file"},{"size",3},{"hash_info",QJsonObject{{"sha256",mode==2?QString(64,'a'):QString(QCryptographicHash::hash("abc",QCryptographicHash::Sha256).toHex())}}}}),200);
             if(mode==3)return new Reply(r,{},302,QUrl("http://unsafe/file"));
             return new Reply(r,mode==4?"ab":"abc",200,{},mode==5);
         };
-        OpenListService s(nullptr,&network,dir.path());OpenList::Entry e;e.name="ok.apk";e.relativePath="sub/ok.apk";e.remotePath=QStringLiteral("/APK/sub/ok.apk");e.size=3;
+        OpenListService s(nullptr,&network,dir.path());OpenList::Entry e;e.name="ok.apk";e.relativePath="sub/ok.apk";e.remotePath=QStringLiteral("/local/APK/sub/ok.apk");e.size=3;
         QSignalSpy ready(&s,&OpenListService::ready),failed(&s,&OpenListService::failed),logs(&s,&OpenListService::log);QVERIFY(s.download(e));QVERIFY(!s.download(e));
         if(mode==5){QTRY_COMPARE(network.requests.size(),2);s.cancel();}
         if(mode==0){QTRY_COMPARE(ready.size(),1);auto file=ready[0][1].toString();QVERIFY(QFileInfo::exists(file));QVERIFY(writeFile(file,"old"));QVERIFY(s.download(e));QTRY_COMPARE(ready.size(),2);QVERIFY(ready[1][1].toString()!=file);QFile original(file);QVERIFY(original.open(QIODevice::ReadOnly));QCOMPARE(original.readAll(),QByteArray("old"));}
@@ -579,7 +579,7 @@ private slots:
         };
         OpenListService service(nullptr, &network, dir.path());
         OpenList::Entry entry; entry.name = "large.apk"; entry.relativePath = entry.name;
-        entry.remotePath = "/APK/large.apk";
+        entry.remotePath = "/local/APK/large.apk";
         QSignalSpy ready(&service, &OpenListService::ready);
         QSignalSpy failed(&service, &OpenListService::failed), logs(&service, &OpenListService::log);
         QVERIFY(service.download(entry));
@@ -948,10 +948,10 @@ private slots:
         OpenListWindow window(nullptr,&service,&installer);
         QSignalSpy listed(&service,&OpenListService::listingReady);
         QTRY_COMPARE(listed.size(),2);
-        OpenList::Entry first; first.name="first.apk"; first.relativePath=first.name; first.remotePath="/APK/"+first.name;
-        auto second=first; second.name="second.apk"; second.relativePath=second.name; second.remotePath="/APK/"+second.name;
-        OpenList::Entry folder; folder.name="folder"; folder.relativePath=folder.name; folder.remotePath="/APK/folder"; folder.directory=true;
-        if (mode==6) { second.name="module.zip"; second.relativePath=second.name; second.remotePath=QStringLiteral("/模块/")+second.name; second.module=true; }
+        OpenList::Entry first; first.name="first.apk"; first.relativePath=first.name; first.remotePath="/local/APK/"+first.name;
+        auto second=first; second.name="second.apk"; second.relativePath=second.name; second.remotePath="/local/APK/"+second.name;
+        OpenList::Entry folder; folder.name="folder"; folder.relativePath=folder.name; folder.remotePath="/local/APK/folder"; folder.directory=true;
+        if (mode==6) { second.name="module.zip"; second.relativePath=second.name; second.remotePath=QStringLiteral("/local/模块/")+second.name; second.module=true; }
         emit service.listingReady(false,mode==6 ? QList<OpenList::Entry>{first,folder} : QList<OpenList::Entry>{first,second,folder},{});
         if (mode==6) emit service.listingReady(true,{second},{});
         auto *table=window.findChild<QTableWidget*>("openListApps"); QVERIFY(table);
@@ -1022,7 +1022,7 @@ private slots:
             if (r.url().path() == "/api/fs/list") return new Reply(r, api({{"content", QJsonArray{}}, {"total", 0}}), 200);
             if (r.url().path() == "/api/fs/get") {
                 ++downloads;
-                if (body.value("path").toString() != QStringLiteral("/APK/folder/child.apk")) return new Reply(r, "bad path", 400);
+                if (body.value("path").toString() != QStringLiteral("/local/APK/folder/child.apk")) return new Reply(r, "bad path", 400);
                 return new Reply(r, api({{"raw_url", "https://files.example.com/child.apk"}, {"size", 3}}), 200);
             }
             return new Reply(r, QByteArray("abc"), 200);
@@ -1033,9 +1033,9 @@ private slots:
         QSignalSpy listed(&service, &OpenListService::listingReady);
         QTRY_COMPARE(listed.size(), 2);
         OpenList::Entry folder; folder.name = "folder"; folder.relativePath = folder.name;
-        folder.remotePath = "/APK/folder"; folder.directory = true;
+        folder.remotePath = "/local/APK/folder"; folder.directory = true;
         OpenList::Entry child; child.name = "child.apk"; child.relativePath = "folder/child.apk";
-        child.remotePath = "/APK/folder/child.apk";
+        child.remotePath = "/local/APK/folder/child.apk";
         emit service.listingReady(false, {folder, child}, {});
         auto *table = window.findChild<QTableWidget*>("openListApps"); QVERIFY(table);
         QCOMPARE(table->rowCount(), 1);
