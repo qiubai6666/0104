@@ -79,12 +79,18 @@ private slots:
     void onAdbCheckError(QProcess::ProcessError error);
     void onFastbootCheckFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void onFastbootCheckError(QProcess::ProcessError error);
+    // 探测看门狗：adb/fastboot 卡死时强制结束进程并复位 m_isChecking。
+    void onProbeWatchdog();
     void updateDeviceInfo();
 
 private:
     friend class DeviceOperationTests;
     friend class DeviceInformationTests;
     friend class ScreenCastTests;
+    // 统一的探测启动入口：断开旧连接、重连信号、启动看门狗并执行 `xx devices`。
+    void startProbe(QProcess *process, const QString &tool,
+                    void (DeviceManager::*onFinished)(int, QProcess::ExitStatus),
+                    void (DeviceManager::*onError)(QProcess::ProcessError));
     void setDetectedDevice(DeviceMode mode, const QString &serial);
     void setDetectedDevices(DeviceMode mode, const QStringList &serials);
     void cancelInfoQuery();
@@ -103,6 +109,7 @@ private:
     static DeviceManager* m_instance;
 
     QTimer *m_checkTimer;
+    QTimer *m_probeWatchdog = nullptr;
     QProcess *m_adbCheckProcess;
     QProcess *m_fastbootCheckProcess;
     QProcess *m_infoProcess;  // 用于异步获取设备信息

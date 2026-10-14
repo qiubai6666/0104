@@ -186,9 +186,10 @@ DeviceCheckWindow::~DeviceCheckWindow()
         disconnect(currentProcess, nullptr, this, nullptr);
         if (currentProcess->state() != QProcess::NotRunning) {
             currentProcess->kill();
-            currentProcess->waitForFinished(1000);
         }
-        delete currentProcess;
+        // 不阻塞等待进程退出（最长 1 秒的 GUI 冻结）；与
+        // releaseOperationProcess 相同，交由 deleteLater/父子关系清理。
+        currentProcess->deleteLater();
         currentProcess = nullptr;
     }
     finishOperation();

@@ -40,16 +40,50 @@ bool apiObject(QNetworkReply *r, QJsonObject *result) {
 }
 }
 
+namespace {
+// redact/safeComponent 会被大目录的成千上万个条目逐个调用，正则必须复用实例。
+const QRegularExpression &urlPattern()
+{
+    static const QRegularExpression re(QStringLiteral("(?:https?://|www\\.)[^\\s<>]+"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+const QRegularExpression &pathPattern()
+{
+    static const QRegularExpression re(QStringLiteral("/(?:www|data|storage|sdcard|mnt|home|tmp|var)/[^\\s<>]+"));
+    return re;
+}
+const QRegularExpression &secretParamPattern()
+{
+    static const QRegularExpression re(QStringLiteral("(?:raw_url|sign|token)\\s*[:=]\\s*[^\\s]+"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+const QRegularExpression &reservedNamePattern()
+{
+    static const QRegularExpression re(QStringLiteral("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|$)"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+const QRegularExpression &hashFormatPattern()
+{
+    static const QRegularExpression re(QStringLiteral("^[a-f0-9]{64}$"));
+    return re;
+}
+} // namespace
+
 QString OpenList::redact(QString text) {
-    text.replace(QRegularExpression("(?:https?://|www\\.)[^\\s<>]+", QRegularExpression::CaseInsensitiveOption), QStringLiteral("[地址已隐藏]"));
-    text.replace(QRegularExpression("/(?:www|data|storage|sdcard|mnt|home|tmp|var)/[^\\s<>]+"), QStringLiteral("[路径已隐藏]"));
-    text.replace(QRegularExpression("(?:raw_url|sign|token)\\s*[:=]\\s*[^\\s]+", QRegularExpression::CaseInsensitiveOption), QStringLiteral("[参数已隐藏]"));
+    text.replace(urlPattern(), QStringLiteral("[地址已隐藏]"));
+    text.replace(pathPattern(), QStringLiteral("[路径已隐藏]"));
+    text.replace(secretParamPattern(), QStringLiteral("[参数已隐藏]"));
     return text.left(4000);
 }
 bool OpenList::safeComponent(const QString &name) {
     if (name.isEmpty() || name == "." || name == ".." || name.endsWith(' ') || name.endsWith('.') || name.size() > 200) return false;
-    if (name.contains(QRegularExpression("[\\x00-\\x1f<>:\"/\\\\|?*]"))) return false;
-    return !QRegularExpression("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\.|$)", QRegularExpression::CaseInsensitiveOption).match(name).hasMatch();
+    for (const QChar ch : name) {
+        if (ch.unicode() < 0x20 || QStringLiteral("<>:\"/\\|?*").contains(ch)) return false;
+    }
+    return !reservedNamePattern().match(name).hasMatch();
 }
 bool OpenList::safeDirectory(const QString &path, bool create) {
     if (path.isEmpty() || !QDir::isAbsolutePath(path)) return false;
@@ -120,7 +154,7 @@ QString OpenListService::sha256(const QJsonObject &o) {
     for (auto it = hashes.begin(); it != hashes.end(); ++it) {
         QString key = it.key().toLower(); key.remove('-'); key.remove('_');
         QString value = it.value().toString().toLower();
-        if (key == "sha256" && QRegularExpression("^[a-f0-9]{64}$").match(value).hasMatch()) return value;
+        if (key == "sha256" && hashFormatPattern().match(value).hasMatch()) return value;
     }
     return {};
 }

@@ -59,9 +59,10 @@ void MtManagerService::fetchPage() {
     connect(m_reply, &QNetworkReply::finished, this, [this] { if (m_reply) parsePage(m_reply); });
 }
 bool MtManagerService::validDownloadUrl(const QUrl &url) {
+    static const QRegularExpression pathPattern(QStringLiteral("^/apk/[0-9]{6,}/clone-target28/?$"));
     return url.isValid() && url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0 &&
            url.host().compare(QStringLiteral("pan.mt2.cn"), Qt::CaseInsensitive) == 0 &&
-           QRegularExpression(QStringLiteral("^/apk/[0-9]{6,}/clone-target28/?$")).match(url.path()).hasMatch();
+           pathPattern.match(url.path()).hasMatch();
 }
 void MtManagerService::parsePage(QNetworkReply *reply) {
     // Retire the page reply BEFORE creating the APK reply. Page cleanup must
@@ -155,7 +156,9 @@ void MtManagerService::startDownload(const QUrl &url, const QString &version) {
 }
 bool MtManagerService::useParallel(QNetworkReply *reply) {
     if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 206) return false;
-    const auto match = QRegularExpression(QStringLiteral("^bytes 0-0/([0-9]+)$")).match(QString::fromLatin1(reply->rawHeader("Content-Range")));
+    // readyRead/metaDataChanged 每次触发都会进入这里探测，正则必须复用实例。
+    static const QRegularExpression contentRange(QStringLiteral("^bytes 0-0/([0-9]+)$"));
+    const auto match = contentRange.match(QString::fromLatin1(reply->rawHeader("Content-Range")));
     bool ok = false;
     const qint64 size = match.captured(1).toLongLong(&ok);
     const QUrl url = reply->url();

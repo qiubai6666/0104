@@ -9,6 +9,21 @@
 
 DeviceManager* DeviceManager::m_instance = nullptr;
 
+namespace {
+// 设备检测每秒轮询一次，探测超时与解析正则必须复用，避免反复构造。
+constexpr int kProbeTimeoutMs = 5000;
+const QRegularExpression &lineSplitter()
+{
+    static const QRegularExpression re(QStringLiteral("[\\r\\n]+"));
+    return re;
+}
+const QRegularExpression &fieldSplitter()
+{
+    static const QRegularExpression re(QStringLiteral("\\s+"));
+    return re;
+}
+} // namespace
+
 DeviceManager* DeviceManager::instance()
 {
     if (!m_instance) {
@@ -39,37 +54,19 @@ DeviceManager::DeviceManager(QObject *parent)
     m_infoTimer = new QTimer(this);
     m_infoTimer->setSingleShot(true);
     m_infoTimer->setInterval(5000);
+
+    // 探测看门狗：adb server 卡死（驱动异常、端口冲突）时 adb devices 永远不返回，
+    // 若不复位 m_isChecking，监控将永久停摆；超时后强制结束并恢复轮询。
+    m_probeWatchdog = new QTimer(this);
+    m_probeWatchdog->setSingleShot(true);
+    connect(m_probeWatchdog, &QTimer::timeout, this, &DeviceManager::onProbeWatchdog);
     qDebug() << "DeviceManager 单例已创建";
 }
 
 DeviceManager::~DeviceManager()
 {
+    // stopMonitoring 负责断开并终止全部探测/信息进程；进程对象由父子关系清理。
     stopMonitoring();
-    if (m_checkTimer && m_checkTimer->isActive()) {
-        m_checkTimer->stop();
-    }
-
-    if (m_adbCheckProcess) {
-        if (m_adbCheckProcess->state() == QProcess::Running) {
-            m_adbCheckProcess->kill();
-            m_adbCheckProcess->waitForFinished(100);
-        }
-    }
-
-    if (m_fastbootCheckProcess) {
-        if (m_fastbootCheckProcess->state() == QProcess::Running) {
-            m_fastbootCheckProcess->kill();
-            m_fastbootCheckProcess->waitForFinished(100);
-        }
-    }
-
-    if (m_infoProcess) {
-        if (m_infoProcess->state() == QProcess::Running) {
-            m_infoProcess->kill();
-            m_infoProcess->waitForFinished(100);
-        }
-    }
-
     qDebug() << "DeviceManager 已销毁";
 }
 
@@ -129,18 +126,7 @@ void DeviceManager::ensureAdbOnlyMonitoring()
             qDebug() << "DeviceManager 开始监控设备状态（全模式，因有" << m_fullModeRefCount << "个全模式请求）";
         }
         m_checkTimer->start(DEVICE_CHECK_INTERVAL);  // 每1秒检测一次
-        // 直接触发一次检测
-        if (!m_isChecking) {
-            m_isChecking = true;
-            QString adbPath = ResourceExtractor::getAdbPath();
-            m_adbCheckProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-            disconnect(m_adbCheckProcess, nullptr, this, nullptr);
-            connect(m_adbCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                    this, &DeviceManager::onAdbCheckFinished);
-            connect(m_adbCheckProcess, &QProcess::errorOccurred,
-                    this, &DeviceManager::onAdbCheckError);
-            m_adbCheckProcess->start(adbPath, QStringList() << "devices");
-        }
+        checkDeviceStatus();  // 立即检测一次（m_isChecking 与启动细节由其内部处理）
     }
     // 如果定时器已运行，不改变当前模式（尊重全模式优先级）
 }
@@ -166,12 +152,13 @@ void DeviceManager::stopMonitoring()
     m_checkTimer->stop();
     m_infoRefreshTimer.invalidate();
     cancelInfoQuery();
-    // Disconnect before killing, including processes still in Starting state.
+    m_probeWatchdog->stop();
+    // 只断开并终止进程，不阻塞等待：kill 后的退出是毫秒级异步操作，
+    // 阻塞等待会让 GUI 线程在停止监控时冻结最长 1 秒。
     for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
         disconnect(process, nullptr, this, nullptr);
         if (process->state() != QProcess::NotRunning) {
             process->kill();
-            process->waitForFinished(1000);
         }
     }
     m_isChecking = false;
@@ -183,11 +170,11 @@ void DeviceManager::pauseMonitoring()
     m_isPaused = true;
     m_infoRefreshTimer.invalidate();
     cancelInfoQuery();
+    m_probeWatchdog->stop();
     for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
         disconnect(process, nullptr, this, nullptr);
         if (process->state() != QProcess::NotRunning) {
             process->kill();
-            process->waitForFinished(1000);
         }
     }
     m_isChecking = false;
@@ -221,22 +208,44 @@ void DeviceManager::checkDeviceStatus()
     if (m_isChecking || m_isPaused) {
         return;
     }
+    // 上一次被看门狗强杀的进程可能仍在退出（ClosingState），
+    // 此时再次 start() 会被忽略；等待下一个定时周期即可。
+    if (m_adbCheckProcess->state() != QProcess::NotRunning) {
+        return;
+    }
 
     m_isChecking = true;
+    startProbe(m_adbCheckProcess, ResourceExtractor::getAdbPath(),
+               &DeviceManager::onAdbCheckFinished, &DeviceManager::onAdbCheckError);
+}
 
-    QString adbPath = ResourceExtractor::getAdbPath();
-    m_adbCheckProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
+void DeviceManager::startProbe(QProcess *process, const QString &tool,
+                               void (DeviceManager::*onFinished)(int, QProcess::ExitStatus),
+                               void (DeviceManager::*onError)(QProcess::ProcessError))
+{
+    disconnect(process, nullptr, this, nullptr);
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, onFinished);
+    connect(process, &QProcess::errorOccurred, this, onError);
+    process->setWorkingDirectory(ResourceExtractor::getResourcePath());
+    m_probeWatchdog->start(kProbeTimeoutMs);
+    process->start(tool, QStringList() << QStringLiteral("devices"));
+}
 
-    // 断开之前的连接
-    disconnect(m_adbCheckProcess, nullptr, this, nullptr);
-
-    // 连接完成信号
-    connect(m_adbCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &DeviceManager::onAdbCheckFinished);
-    connect(m_adbCheckProcess, &QProcess::errorOccurred,
-            this, &DeviceManager::onAdbCheckError);
-
-    m_adbCheckProcess->start(adbPath, QStringList() << "devices");
+void DeviceManager::onProbeWatchdog()
+{
+    bool killed = false;
+    for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
+        disconnect(process, nullptr, this, nullptr);
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+            killed = true;
+        }
+    }
+    if (killed) {
+        m_isChecking = false;
+        qWarning() << "DeviceManager 设备检测进程超时，已强制结束并恢复监控";
+    }
 }
 
 void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitStatus)
@@ -251,9 +260,9 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
 
     if (exitStatus == QProcess::NormalExit && exitCode == 0) {
         const QString adbOutput = QString::fromLocal8Bit(m_adbCheckProcess->readAllStandardOutput());
-        const QStringList lines = adbOutput.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
+        const QStringList lines = adbOutput.split(lineSplitter(), Qt::SkipEmptyParts);
         for (const QString &rawLine : lines) {
-            const QStringList fields = rawLine.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            const QStringList fields = rawLine.trimmed().split(fieldSplitter(), Qt::SkipEmptyParts);
             // ADB 输出的第二列必须是精确的 device，避免把序列号或其他文本中的
             // "device" 当成在线设备。
             if (fields.size() >= 2 && fields.at(1) == "device") {
@@ -266,21 +275,11 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
 
     // 如果没有 ADB 连接，且当前不是 ADB-only 模式，才检查 Fastboot
     if (!adbConnected && !m_adbOnly) {
-        QString fastbootPath = ResourceExtractor::getFastbootPath();
-        m_fastbootCheckProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-
-        // 断开之前的连接
-        disconnect(m_fastbootCheckProcess, nullptr, this, nullptr);
-
-        // 连接完成信号
-        connect(m_fastbootCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onFastbootCheckFinished);
-        connect(m_fastbootCheckProcess, &QProcess::errorOccurred,
-                this, &DeviceManager::onFastbootCheckError);
-
-        m_fastbootCheckProcess->start(fastbootPath, QStringList() << "devices");
+        startProbe(m_fastbootCheckProcess, ResourceExtractor::getFastbootPath(),
+                   &DeviceManager::onFastbootCheckFinished, &DeviceManager::onFastbootCheckError);
     } else {
-        // 有 ADB 连接或处于 ADB-only 模式
+        // 有 ADB 连接或处于 ADB-only 模式：本轮探测结束，停掉看门狗。
+        m_probeWatchdog->stop();
         setDetectedDevices(adbConnected ? ADB : None, adbSerials);
         if (m_currentMode == ADB) updatePolledDeviceInfo();
         m_isChecking = false;
@@ -300,17 +299,12 @@ void DeviceManager::onAdbCheckError(QProcess::ProcessError error)
 
     // ADB 启动失败时不能依赖 finished 信号恢复状态；全模式仍继续探测 Fastboot。
     if (!m_adbOnly) {
-        const QString fastbootPath = ResourceExtractor::getFastbootPath();
-        m_fastbootCheckProcess->setWorkingDirectory(ResourceExtractor::getResourcePath());
-        disconnect(m_fastbootCheckProcess, nullptr, this, nullptr);
-        connect(m_fastbootCheckProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &DeviceManager::onFastbootCheckFinished);
-        connect(m_fastbootCheckProcess, &QProcess::errorOccurred,
-                this, &DeviceManager::onFastbootCheckError);
-        m_fastbootCheckProcess->start(fastbootPath, QStringList() << "devices");
+        startProbe(m_fastbootCheckProcess, ResourceExtractor::getFastbootPath(),
+                   &DeviceManager::onFastbootCheckFinished, &DeviceManager::onFastbootCheckError);
         return;
     }
 
+    m_probeWatchdog->stop();
     setDetectedDevice(None, QString());
     m_isChecking = false;
 }
@@ -326,9 +320,9 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
 
     if (exitStatus == QProcess::NormalExit && exitCode == 0) {
         const QString fastbootOutput = QString::fromLocal8Bit(m_fastbootCheckProcess->readAllStandardOutput());
-        const QStringList lines = fastbootOutput.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
+        const QStringList lines = fastbootOutput.split(lineSplitter(), Qt::SkipEmptyParts);
         for (const QString &rawLine : lines) {
-            const QStringList fields = rawLine.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            const QStringList fields = rawLine.trimmed().split(fieldSplitter(), Qt::SkipEmptyParts);
             // fastboot devices 的第二列必须精确为 fastboot。
             if (fields.size() >= 2 && fields.at(1) == "fastboot") {
                 fastbootSerials.append(fields.at(0));
@@ -336,6 +330,8 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
         }
     }
 
+    // fastboot 探测是本轮检测的最后一步，结束后停掉看门狗。
+    m_probeWatchdog->stop();
     setDetectedDevices(fastbootSerials.isEmpty() ? None : Fastboot, fastbootSerials);
     if (m_currentMode != None) updatePolledDeviceInfo();
 
@@ -353,6 +349,7 @@ void DeviceManager::onFastbootCheckError(QProcess::ProcessError error)
         return;
     }
 
+    m_probeWatchdog->stop();
     setDetectedDevice(None, QString());
     m_isChecking = false;
 }
@@ -439,8 +436,8 @@ void DeviceManager::verifyOperationTarget(DeviceMode mode, const QString &serial
         }
         QStringList serials;
         const QString output = QString::fromLocal8Bit(process->readAllStandardOutput());
-        for (const QString &line : output.split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts)) {
-            const QStringList fields = line.trimmed().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        for (const QString &line : output.split(lineSplitter(), Qt::SkipEmptyParts)) {
+            const QStringList fields = line.trimmed().split(fieldSplitter(), Qt::SkipEmptyParts);
             if (fields.size() >= 2 && fields[1] == (mode == ADB ? "device" : "fastboot"))
                 serials.append(fields[0]);
         }
@@ -467,9 +464,10 @@ void DeviceManager::cancelInfoQuery()
     m_infoTimer->stop();
     disconnect(m_infoTimer, nullptr, this, nullptr);
     disconnect(m_infoProcess, nullptr, this, nullptr);
+    // 只终止不阻塞等待：迟到的输出由 generation + 进程指针双重校验拦截，
+    // 旧进程对象在 startInfoStep 换新时通过 deleteLater 释放。
     if (m_infoProcess->state() != QProcess::NotRunning) {
         m_infoProcess->kill();
-        m_infoProcess->waitForFinished(1000);
     }
 }
 
@@ -559,9 +557,9 @@ void DeviceManager::finishInfoStep(bool success, const QString &output)
     m_infoTimer->stop();
     disconnect(m_infoTimer, nullptr, this, nullptr);
     disconnect(m_infoProcess, nullptr, this, nullptr);
+    // 只终止不等待（超时路径需要杀进程；正常完成路径进程已退出，kill 为空操作）。
     if (m_infoProcess->state() != QProcess::NotRunning) {
         m_infoProcess->kill();
-        m_infoProcess->waitForFinished(1000);
     }
     QString value;
     bool found = success;
@@ -630,7 +628,6 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
     disconnect(m_infoProcess, nullptr, this, nullptr);
     if (m_infoProcess->state() != QProcess::NotRunning) {
         m_infoProcess->kill();
-        m_infoProcess->waitForFinished(1000);
     }
     const int step = m_infoStep;
     if (step == 3 && success) {

@@ -61,9 +61,13 @@ OugaFlashService::OugaFlashService(OugaCommandRunner *runner, QObject *parent)
             if (m_executing)
               updateTransferOutput(complete.mid(m_streamedOutput.size()) + '\n');
             if ((m_executing || m_logSession) && m_recordCommand) {
-              if (!m_channelOutputRecorded)
-                for (const QString &line : complete.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts))
-                  m_nativeOutput += QDateTime::currentDateTime().toString("[HH:mm:ss] ") + "[FASTBOOT OUTPUT] " + line + '\n';
+              if (!m_channelOutputRecorded) {
+                // 每批只取一次时间戳，避免逐行重复构造 QDateTime/QString。
+                static const QRegularExpression lineBreak(QStringLiteral("[\r\n]+"));
+                const QString timestamp = QDateTime::currentDateTime().toString("[HH:mm:ss] ");
+                for (const QString &line : complete.split(lineBreak, Qt::SkipEmptyParts))
+                  m_nativeOutput += timestamp + "[FASTBOOT OUTPUT] " + line + '\n';
+              }
               if (m_commandFlashTarget.size())
                 m_nativeOutput += QDateTime::currentDateTime().toString("[HH:mm:ss] ") + "[FLASH END] " +
                     m_commandFlashTarget + (commandSucceeded(code, normal, complete) ? QString() :
@@ -90,6 +94,9 @@ void OugaFlashService::updateTransferOutput(const QString &text) {
       "^\\s*\\S+:\\s+(\\d+(?:\\.\\d+)?)\\s*(KB|MB|GB|B)/",
       QRegularExpression::CaseInsensitiveOption);
   static const QRegularExpression failure("FAILED|\\berror\\b", QRegularExpression::CaseInsensitiveOption);
+  // 刷写期间每个 readyRead 分块都会进入下面的 while 循环，逐行查找换行符；
+  // 正则必须复用实例，否则每行都要重新编译一次模式。
+  static const QRegularExpression lineBreak(QStringLiteral("[\\r\\n]"));
   auto bytes = [](const QRegularExpressionMatch &match) {
     const QString unit = match.captured(2).toUpper();
     const double factor = unit == "GB" ? 1073741824.0 : unit == "MB" ? 1048576.0 : unit == "KB" ? 1024.0 : 1.0;
@@ -97,7 +104,7 @@ void OugaFlashService::updateTransferOutput(const QString &text) {
   };
   m_transferPending += text;
   int end;
-  while ((end = m_transferPending.indexOf(QRegularExpression("[\\r\\n]"))) >= 0) {
+  while ((end = m_transferPending.indexOf(lineBreak)) >= 0) {
     const QString line = m_transferPending.left(end);
     m_transferPending.remove(0, end + 1);
     const auto send = sending.match(line);
@@ -273,11 +280,13 @@ void OugaFlashService::endStep(bool success) {
   emit stepFinished(success);
 }
 void OugaFlashService::appendNative(const QString &text, bool error) {
+  static const QRegularExpression diagnostic(
+      "FAILED|error|cannot|invalid|remote:",
+      QRegularExpression::CaseInsensitiveOption);
   QStringList lines = text.split('\n', Qt::SkipEmptyParts), diagnostics;
   if (error) {
     for (const QString &line : lines)
-      if (line.contains(QRegularExpression("FAILED|error|cannot|invalid|remote:",
-                                             QRegularExpression::CaseInsensitiveOption)))
+      if (line.contains(diagnostic))
         diagnostics << line;
     lines = diagnostics.isEmpty() ? lines.mid(qMax(0, lines.size() - 3)) : diagnostics;
   }
@@ -315,7 +324,9 @@ bool OugaFlashService::saveLog(const QString &interfaceLog) {
   content += "\r\n=== 日志完整性信息 ===\r\nSHA-256: " + QString::fromLatin1(hash) + "\r\n";
   const QString file = QDir(directory).filePath(
       QString(sales ? "售后包刷机日志_" : "刷机日志_") +
-      QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + ".txt");
+      // 精确到毫秒：同秒内保存多份日志（如刷写结束自动保存 + 手动保存会话）
+      // 时 QSaveFile 会静默覆盖同名文件，丢失排查刷机问题的关键证据。
+      QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss-zzz") + ".txt");
   QSaveFile output(file);
   const QByteArray data = content.toUtf8();
   if (!output.open(QIODevice::WriteOnly) || output.write(data) != data.size() || !output.commit())
@@ -518,11 +529,13 @@ void OugaFlashService::queryCurrentSlot(std::function<void(const QString &)> rea
   }, true, 10000, false);
 }
 void OugaFlashService::queryMode(std::function<void(bool)> ready) {
-  const auto mode = [](const QString &output) -> std::optional<bool> {
+  static const QRegularExpression yesPattern("^(?:yes|true|1)$", QRegularExpression::CaseInsensitiveOption);
+  static const QRegularExpression noPattern("^(?:no|false|0)$", QRegularExpression::CaseInsensitiveOption);
+  const auto mode = [&yesPattern, &noPattern](const QString &output) -> std::optional<bool> {
     const auto value = parseDevice({}, output).variables.value("is-userspace");
-    if (QRegularExpression("^(?:yes|true|1)$", QRegularExpression::CaseInsensitiveOption).match(value).hasMatch())
+    if (yesPattern.match(value).hasMatch())
       return true;
-    if (QRegularExpression("^(?:no|false|0)$", QRegularExpression::CaseInsensitiveOption).match(value).hasMatch())
+    if (noPattern.match(value).hasMatch())
       return false;
     return {};
   };

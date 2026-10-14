@@ -75,8 +75,12 @@ void OpenListInstaller::streamLog(const QString &text,bool flush) {
     for (QString line : lines) {
         line = line.trimmed();
         if (line.isEmpty() || line == "Success" || line == "OL_INSTALL_SUCCESS" || line == m_scriptSuccessMarker) continue;
+        static const QRegularExpression failureKeywords(
+            "\\b(failure|failed|error|abort|aborted|denied|not found)\\b|失败|错误|拒绝",
+            QRegularExpression::CaseInsensitiveOption);
         const bool extraction = line.startsWith("Archive:") || line.startsWith("inflating:") || line.startsWith("creating:");
-        if (extraction && success(0,true,line,false)) continue;
+        // 提取行默认视为噪音不展示；只有包含失败关键词的提取行才保留给用户。
+        if (extraction && !failureKeywords.match(line).hasMatch()) continue;
         line.replace(m_file,QStringLiteral("[本次安装包]"));
         if (!m_remote.isEmpty()) line.replace(m_remote,QStringLiteral("[手机临时文件]"));
         emit log(OpenList::redact(line));
@@ -95,9 +99,18 @@ QStringList OpenListInstaller::authorizedDevices(const QString &output) {
 }
 bool OpenListInstaller::success(int code,bool normal,const QString &output,bool apk) {
     if (!normal || code != 0) return false;
-    if (QRegularExpression("\\b(failure|failed|error|abort|aborted|denied|not found)\\b|失败|错误|拒绝",
-                           QRegularExpression::CaseInsensitiveOption).match(output).hasMatch()) return false;
-    return !apk || QRegularExpression("(?:^|[\\r\\n])\\s*Success\\s*(?:$|[\\r\\n])").match(output).hasMatch();
+    if (apk) {
+        // APK 安装以 pm 输出为准：必须有 Success 行，且没有 Failure 行；
+        // 退出码 0 不足以确认安装结果。
+        static const QRegularExpression okLine("(?:^|[\\r\\n])\\s*Success\\s*(?:$|[\\r\\n])");
+        return okLine.match(output).hasMatch() && !output.contains(QLatin1String("Failure ["));
+    }
+    // 其余阶段（push/rm/探测/模块安装/脚本执行）以退出码为准：模块与脚本的
+    // 安装命令经常输出 "xxx not found, skip" 之类的正常检查信息，旧逻辑会用
+    // 关键词否决一个成功的退出码，导致已装好的模块被误报失败并触发降级推送。
+    // ModuleInstall 另有 OL_INSTALL_SUCCESS 标记行校验、ScriptRun 另有
+    // m_scriptSuccessMarker 标记行校验，结果无法确认时仍会被拒绝。
+    return true;
 }
 bool OpenListInstaller::validModuleListing(const QString &output) {
     int rootProps = 0;

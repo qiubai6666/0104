@@ -414,7 +414,7 @@ private slots:
     void scriptExecution_data() {
         QTest::addColumn<int>("mode");
         const char *names[]={"shell-root","su-c","su-s","root-denied","disconnected","push-failed",
-            "exit-nonzero","abnormal-exit","missing-marker","error-overrides-marker","remote-cleanup-failed",
+            "exit-nonzero","abnormal-exit","missing-marker","error-output-with-marker","remote-cleanup-failed",
             "local-cleanup-failed","root-lost","cleanup-error-output","repeat-execution-prohibited"};
         for (int i=0;i<15;++i) QTest::newRow(names[i]) << i;
     }
@@ -471,7 +471,9 @@ private slots:
 #endif
             }
         }
-        const bool success=mode==0 || mode==1 || mode==2 || mode==10 || mode==11 || mode==13;
+        // mode 9：脚本输出 error 字样但 rc==0 且有成功标记——退出码与标记行
+        // 优先于关键词（模块脚本常输出 "xxx not found, skip" 的正常检查信息）。
+        const bool success=mode==0 || mode==1 || mode==2 || mode==9 || mode==10 || mode==11 || mode==13;
         QCOMPARE(done.size(),1); QCOMPARE(done[0][0].toBool(),success);
         QCOMPARE(QFileInfo::exists(file),!success || mode==11); QVERIFY(QFileInfo::exists(old));
         if(mode==11) QVERIFY(done[0][1].toString().contains(QStringLiteral("清理失败")));
@@ -635,7 +637,11 @@ private slots:
     }
     void resultsAndModuleFormat(){
         QVERIFY(OpenListInstaller::success(0,true,"Success\n",true));QVERIFY(!OpenListInstaller::success(0,true,"Success\nFailure [bad]",true));QVERIFY(!OpenListInstaller::success(0,false,"Success",true));QVERIFY(!OpenListInstaller::success(0,true,"",true));
-        QVERIFY(!OpenListInstaller::success(0,true,"Done\nERROR: bad",false));
+        // 非 APK 阶段以退出码为准：输出中的 not found/error 等关键词来自
+        // 模块脚本"可选组件不存在则跳过"的正常分支，不再否决 rc==0 的结果。
+        QVERIFY(OpenListInstaller::success(0,true,"Done\nERROR: bad",false));
+        QVERIFY(!OpenListInstaller::success(1,true,"Done",false));
+        QVERIFY(!OpenListInstaller::success(0,false,"Done",false));
         QVERIFY(OpenListInstaller::validModuleListing("Path = module.prop\nEncrypted = -"));QVERIFY(!OpenListInstaller::validModuleListing("Path = nested/module.prop"));QVERIFY(!OpenListInstaller::validModuleListing("Path = module.prop\nEncrypted = +"));QVERIFY(!OpenListInstaller::validModuleListing("Path = module.prop\nPath = ../bad"));
         QVERIFY(OpenListInstaller::validModuleProperties("id=test.module\nname=Test"));QVERIFY(!OpenListInstaller::validModuleProperties("id=../test\nname=Test"));
         QCOMPARE(OpenListInstaller::authorizedDevices("List of devices attached\na\tdevice\nb\tunauthorized\nc\toffline\nd\tdevice\n"),QStringList({"a","d"}));
@@ -717,7 +723,7 @@ private slots:
         QTest::newRow("destination-unwritable") << 3;
         QTest::newRow("push-failed") << 4;
         QTest::newRow("push-crashed") << 5;
-        QTest::newRow("push-error-zero-exit") << 6;
+        QTest::newRow("push-keyword-with-zero-exit") << 6;
         QTest::newRow("partial-cleanup-failed") << 7;
     }
     void failedInstallTransfer() {
@@ -748,8 +754,10 @@ private slots:
                 QVERIFY(remote.contains(QFileInfo(file).completeBaseName()));
                 QCOMPARE(remote.split('/').size(),3);
                 QVERIFY(DeviceOperationLease::owner()==&s);
-                r.respond(mode==0 ? "1 file pushed" : "error: no space",mode==4 || mode==7 ? 1 : 0,mode!=5);
-                if(mode!=0) {
+                // mode 6：push 输出 error 字样但退出码 0——按退出码判定推送成功，
+                // 不再触发关键词误判后的降级清理。
+                r.respond(mode==0 || mode==6 ? "1 file pushed" : "error: no space",mode==4 || mode==7 ? 1 : 0,mode!=5);
+                if(mode!=0 && mode!=6) {
                     QVERIFY(r.calls.last().args.last().contains("rm -f"));
                     QVERIFY(!r.calls.last().args.last().contains("rmdir"));
                     r.respond(mode==7 ? "device offline" : "",mode==7 ? 1 : 0);
