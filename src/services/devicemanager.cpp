@@ -209,8 +209,10 @@ void DeviceManager::checkDeviceStatus()
         return;
     }
     // 上一次被看门狗强杀的进程可能仍在退出（ClosingState），
-    // 此时再次 start() 会被忽略；等待下一个定时周期即可。
-    if (m_adbCheckProcess->state() != QProcess::NotRunning) {
+    // 此时再次 start() 会被静默忽略且其信号已被 startProbe 断开，
+    // m_isChecking 将永久卡住；任一探测进程未退出前等待下一个定时周期。
+    if (m_adbCheckProcess->state() != QProcess::NotRunning ||
+        m_fastbootCheckProcess->state() != QProcess::NotRunning) {
         return;
     }
 
@@ -242,8 +244,11 @@ void DeviceManager::onProbeWatchdog()
             killed = true;
         }
     }
+    // 无条件复位 m_isChecking：探测进程可能已自然退出但 finished 信号被
+    // startProbe 断开（例如对收尾中的旧进程静默 start 失败），此时没有
+    // 进程可 kill，若不复位，监控将从此永久停摆。
+    m_isChecking = false;
     if (killed) {
-        m_isChecking = false;
         qWarning() << "DeviceManager 设备检测进程超时，已强制结束并恢复监控";
     }
 }
