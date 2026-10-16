@@ -14,11 +14,10 @@
 #endif
 
 namespace {
-// 按钮竖排布局：容器 8px 边距、按钮 78×34、间距 6。
-constexpr int kMargin = 8;
-constexpr int kSpacing = 6;
-constexpr int kButtonWidth = 78;
-constexpr int kButtonHeight = 34;
+// 紧凑竖条布局：容器 6px 边距、36px 图标按钮、间距 4，整体 48×128。
+constexpr int kMargin = 6;
+constexpr int kSpacing = 4;
+constexpr int kButtonSize = 36;
 constexpr int kPlacementGap = 8; // 与投屏窗口的间隙（物理像素）
 
 int actionKeyCode(ScreenCastNavBar::NavAction action)
@@ -63,8 +62,8 @@ void ScreenCastNavBar::buildButtons()
     const QColor hover(dark ? "#42616e" : "rgba(47,128,237,30)");
     const QColor pressed(dark ? "#4c6e7d" : "rgba(47,128,237,50)");
     const QString style = QStringLiteral(
-        "QPushButton { background:transparent; border:1px solid %1; border-radius:8px;"
-        " color:%2; font-size:13px; font-family:'Segoe UI','Microsoft YaHei'; }"
+        "QPushButton { background:transparent; border:1px solid %1; border-radius:9px;"
+        " color:%2; }"
         "QPushButton:hover { border-color:%3; background:%4; }"
         "QPushButton:pressed { background:%5; }")
         .arg(buttonBorder.name(), ink.name(), ink.name(), hover.name(QColor::HexArgb),
@@ -82,9 +81,10 @@ void ScreenCastNavBar::buildButtons()
     for (const Entry &entry : entries) {
         auto *button = new QPushButton(this);
         button->setAccessibleName(entry.label);
+        button->setToolTip(entry.label);
         button->setIcon(UIHelper::menuIcon(QString::fromLatin1(entry.icon), ink, devicePixelRatioF()));
-        button->setIconSize(QSize(15, 15));
-        button->setFixedSize(kButtonWidth, kButtonHeight);
+        button->setIconSize(QSize(16, 16));
+        button->setFixedSize(kButtonSize, kButtonSize);
         button->setCursor(Qt::PointingHandCursor);
         button->setStyleSheet(style);
         connect(button, &QPushButton::clicked, this, [this, entry] {
@@ -101,8 +101,8 @@ int ScreenCastNavBar::androidKeyCode(NavAction action)
 
 QSize ScreenCastNavBar::preferredSize()
 {
-    return QSize(kButtonWidth + kMargin * 2,
-                 kButtonHeight * 3 + kSpacing * 2 + kMargin * 2);
+    return QSize(kButtonSize + kMargin * 2,
+                 kButtonSize * 3 + kSpacing * 2 + kMargin * 2);
 }
 
 QRect ScreenCastNavBar::computePlacement(const QRect &castRect, const QRect &workArea, const QSize &navSize)

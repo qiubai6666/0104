@@ -387,22 +387,22 @@ private slots:
     }
     void navigationBarPlacementMath() {
         const QSize nav = ScreenCastNavBar::preferredSize();
-        QCOMPARE(nav, QSize(94, 130));
+        QCOMPARE(nav, QSize(48, 128));
         // 右侧有空间：贴右侧、相对投屏窗口垂直居中。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, 100, 400, 300), QRect(0, 0, 800, 600), nav),
-                 QRect(508, 185, 94, 130));
+                 QRect(508, 186, 48, 128));
         // 右侧越界、左侧有空间：回退到左侧。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(500, 100, 280, 400), QRect(0, 0, 800, 600), nav),
-                 QRect(398, 235, 94, 130));
+                 QRect(444, 236, 48, 128));
         // 两侧都放不下（全屏）：贴工作区右缘。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(0, 0, 800, 600), QRect(0, 0, 800, 600), nav),
-                 QRect(706, 235, 94, 130));
+                 QRect(752, 236, 48, 128));
         // 垂直越出工作区下方：钳制在工作区内。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, 400, 400, 500), QRect(0, 0, 800, 600), nav),
-                 QRect(508, 470, 94, 130));
+                 QRect(508, 472, 48, 128));
         // 垂直越出工作区上方：钳制在工作区内。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, -300, 400, 300), QRect(0, 0, 800, 600), nav),
-                 QRect(508, 0, 94, 130));
+                 QRect(508, 0, 48, 128));
     }
     void navigationKeysFollowSessionLifecycle() {
         QVERIFY(writeFile(fixturePath + "/devices.txt", "PHONE_A\tdevice\n"));
