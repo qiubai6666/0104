@@ -26,6 +26,7 @@
 #include <QStyleFactory>
 #include "devicecheckwindow.h"
 #include "screencastcontroller.h"
+#include "screencastnavbar.h"
 #include "devicemanager.h"
 #include "deviceoperationlease.h"
 #include "processmanager.h"
@@ -378,6 +379,71 @@ private slots:
         QTest::qWait(100);
         QCOMPARE(controller.state(), ScreenCastController::Idle);
         QVERIFY(scrcpyCommands().isEmpty());
+    }
+    void navigationKeyCodesMatchAndroidConstants() {
+        QCOMPARE(ScreenCastNavBar::androidKeyCode(ScreenCastNavBar::NavAction::Back), 4);
+        QCOMPARE(ScreenCastNavBar::androidKeyCode(ScreenCastNavBar::NavAction::Home), 3);
+        QCOMPARE(ScreenCastNavBar::androidKeyCode(ScreenCastNavBar::NavAction::Recents), 187);
+    }
+    void navigationBarPlacementMath() {
+        const QSize nav = ScreenCastNavBar::preferredSize();
+        QCOMPARE(nav, QSize(94, 130));
+        // 右侧有空间：贴右侧、相对投屏窗口垂直居中。
+        QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, 100, 400, 300), QRect(0, 0, 800, 600), nav),
+                 QRect(508, 185, 94, 130));
+        // 右侧越界、左侧有空间：回退到左侧。
+        QCOMPARE(ScreenCastNavBar::computePlacement(QRect(500, 100, 280, 400), QRect(0, 0, 800, 600), nav),
+                 QRect(398, 235, 94, 130));
+        // 两侧都放不下（全屏）：贴工作区右缘。
+        QCOMPARE(ScreenCastNavBar::computePlacement(QRect(0, 0, 800, 600), QRect(0, 0, 800, 600), nav),
+                 QRect(706, 235, 94, 130));
+        // 垂直越出工作区下方：钳制在工作区内。
+        QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, 400, 400, 500), QRect(0, 0, 800, 600), nav),
+                 QRect(508, 470, 94, 130));
+        // 垂直越出工作区上方：钳制在工作区内。
+        QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, -300, 400, 300), QRect(0, 0, 800, 600), nav),
+                 QRect(508, 0, 94, 130));
+    }
+    void navigationKeysFollowSessionLifecycle() {
+        QVERIFY(writeFile(fixturePath + "/devices.txt", "PHONE_A\tdevice\n"));
+        MenuWidget menu;
+        auto *controller = menu.screenCastController;
+        auto *navbar = menu.screenCastNavBar;
+        navbar->setAttribute(Qt::WA_DontShowOnScreen);
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(controller->state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        // 会话开始即进入跟踪；替身 scrcpy 无窗口，导航条等待而不显示。
+        QVERIFY(navbar->isTracking());
+        QVERIFY(!navbar->hasCastWindow());
+        QVERIFY(!navbar->isVisible());
+        // 点击导航条按钮：通过 adb input keyevent 发送对应按键。
+        QPushButton *back = nullptr; QPushButton *home = nullptr; QPushButton *recents = nullptr;
+        for (QPushButton *button : navbar->findChildren<QPushButton *>()) {
+            if (button->accessibleName() == QStringLiteral("返回")) back = button;
+            if (button->accessibleName() == QStringLiteral("主页")) home = button;
+            if (button->accessibleName() == QStringLiteral("多任务")) recents = button;
+        }
+        QVERIFY(back && home && recents);
+        back->click();
+        QTRY_COMPARE(adbKeyCommands().size(), 1);
+        QCOMPARE(adbKeyCommands().first(), QJsonArray({"adb", "-s", "PHONE_A",
+            "shell", "input", "keyevent", "4"}));
+        home->click();
+        recents->click();
+        QTRY_COMPARE(adbKeyCommands().size(), 3);
+        QVERIFY(adbKeyCommands().contains(QJsonArray({"adb", "-s", "PHONE_A",
+            "shell", "input", "keyevent", "3"})));
+        QVERIFY(adbKeyCommands().contains(QJsonArray({"adb", "-s", "PHONE_A",
+            "shell", "input", "keyevent", "187"})));
+        // 会话结束：停止跟踪，按键不再发送。
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(controller->state(), ScreenCastController::Idle);
+        QVERIFY(!navbar->isTracking());
+        QVERIFY(!navbar->hasCastWindow());
+        back->click();
+        QTest::qWait(200);
+        QCOMPARE(adbKeyCommands().size(), 3);
     }
     void failedStartKeepsAutoCastAndRetries() {
         QVERIFY(QFile::rename(fixturePath + "/scrcpy.exe", fixturePath + "/missing-scrcpy.exe"));
@@ -827,6 +893,15 @@ private:
         for (const QFileInfo &file : QDir(fixturePath).entryInfoList({"command-*.json"}, QDir::Files)) {
             auto array = QJsonDocument::fromJson(readFile(file.absoluteFilePath())).array();
             if (!array.isEmpty() && array.at(0).toString() == "scrcpy") commands.append(array);
+        }
+        return commands;
+    }
+    QList<QJsonArray> adbKeyCommands() const {
+        QList<QJsonArray> commands;
+        for (const QFileInfo &file : QDir(fixturePath).entryInfoList({"command-*.json"}, QDir::Files)) {
+            auto array = QJsonDocument::fromJson(readFile(file.absoluteFilePath())).array();
+            if (!array.isEmpty() && array.at(0).toString() == "adb" &&
+                array.contains(QStringLiteral("keyevent"))) commands.append(array);
         }
         return commands;
     }

@@ -78,6 +78,7 @@ void ScreenCastController::tryStart()
         if (m_state == Stopping) { process->kill(); return; }
         m_startTimer.stop();
         setState(Streaming, QStringLiteral("正在投屏；断开后自动重连，再次点击取消自动投屏"));
+        emit sessionWindowAppeared(process->processId());
     });
     connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart)
@@ -121,6 +122,27 @@ void ScreenCastController::finish(QProcess *process, const QString &status, bool
     } else {
         setState(Idle, QStringLiteral("点击开始投屏"));
     }
+    emit sessionEnded();
+}
+
+void ScreenCastController::sendNavigationKey(int keyCode)
+{
+    if (m_state != Streaming || m_serial.isEmpty()) return;
+    auto *manager = DeviceManager::instance();
+    if (manager->currentMode() != DeviceManager::ADB) return;
+    QProcess *process = ProcessManager::createProcess(this);
+    process->setWorkingDirectory(ResourceExtractor::getResourcePath());
+    connect(process, &QProcess::readyReadStandardOutput, process, [process] { process->readAllStandardOutput(); });
+    connect(process, &QProcess::readyReadStandardError, process, [process] { process->readAllStandardError(); });
+    // 一次性按键命令：即发即忘，结束后自清理，不阻塞 UI。
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            process, &QObject::deleteLater);
+    connect(process, &QProcess::errorOccurred, process, [process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) process->deleteLater();
+    });
+    process->start(ResourceExtractor::getAdbPath(),
+                   {QStringLiteral("-s"), m_serial, QStringLiteral("shell"),
+                    QStringLiteral("input"), QStringLiteral("keyevent"), QString::number(keyCode)});
 }
 
 void ScreenCastController::stop()

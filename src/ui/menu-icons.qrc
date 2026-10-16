@@ -13,6 +13,9 @@
     <file alias="heart.svg">../../assets/menu/heart.svg</file>
     <file alias="chevron-left.svg">../../assets/menu/chevron-left.svg</file>
     <file alias="chevron-right.svg">../../assets/menu/chevron-right.svg</file>
+    <file alias="corner-up-left.svg">../../assets/menu/corner-up-left.svg</file>
+    <file alias="home.svg">../../assets/menu/home.svg</file>
+    <file alias="recents.svg">../../assets/menu/recents.svg</file>
     <file alias="usb.svg">../../assets/menu/usb.svg</file>
     <file alias="folder.svg">../../assets/menu/folder.svg</file>
     <file alias="package.svg">../../assets/menu/package.svg</file>

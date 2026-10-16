@@ -17,6 +17,7 @@ class PayloadWindow;
 class DeviceCheckWindow;
 class ConfigWindow;
 class FloatingBall;
+class ScreenCastNavBar;
 
 // 控制中心面板：平时隐藏，由悬浮球（FloatingBall）唤起。
 // 主页提供投屏开关行、设备行与六个功能 tile；四个子窗口以嵌入页方式翻页展示。
@@ -91,6 +92,8 @@ private:
     FloatingBall *ball = nullptr;
     QVector<QPushButton*> buttons;
     ScreenCastController *screenCastController;
+    // 投屏导航条（返回/主页/多任务），生命周期跟随 screenCastController 会话。
+    ScreenCastNavBar *screenCastNavBar = nullptr;
     QTimer *screenCastSpinnerTimer;
     int screenCastSpinnerAngle = 0;
     RepairWindow *repairWindow;

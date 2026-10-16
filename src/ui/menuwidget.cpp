@@ -3,6 +3,7 @@
 #include "configwindow.h"
 #include "devicecheckwindow.h"
 #include "screencastcontroller.h"
+#include "screencastnavbar.h"
 #include "payloadwindow.h"
 #include "repairwindow.h"
 #include "processmanager.h"
@@ -225,7 +226,8 @@ MenuWidget::~MenuWidget()
     screenCastSpinnerTimer->stop();
     delete screenCastController;
     DeviceManager::instance()->releaseAdbOnlyMonitoring();
-    const QList<QWidget *> windows = {ball, repairWindow, payloadWindow, deviceCheckWindow, configWindow};
+    const QList<QWidget *> windows = {ball, repairWindow, payloadWindow, deviceCheckWindow,
+                                      configWindow, screenCastNavBar};
     for (QWidget *window : windows) {
         if (window) {
             window->hide();
@@ -299,6 +301,14 @@ void MenuWidget::setupUI()
     });
     connect(screenCastController, &ScreenCastController::stateChanged,
             this, &MenuWidget::updateScreenCastButton);
+    // 导航条跟随投屏会话：按键请求转回控制器发送，会话窗口出现/结束驱动显隐。
+    screenCastNavBar = new ScreenCastNavBar;
+    connect(screenCastNavBar, &ScreenCastNavBar::keyRequested,
+            screenCastController, &ScreenCastController::sendNavigationKey);
+    connect(screenCastController, &ScreenCastController::sessionWindowAppeared,
+            screenCastNavBar, &ScreenCastNavBar::attachToSession);
+    connect(screenCastController, &ScreenCastController::sessionEnded,
+            screenCastNavBar, &ScreenCastNavBar::detach);
     connect(DeviceManager::instance(), &DeviceManager::deviceModeChanged,
             this, &MenuWidget::updateDeviceRow);
     updateDeviceRow();

@@ -19,9 +19,15 @@ public:
     QString statusText() const { return m_statusText; }
     void toggle();
     void stop();
+    // 导航条按键：向当前会话设备发送 adb input keyevent；
+    // 仅在流式会话中有效，其余状态静默忽略。
+    void sendNavigationKey(int keyCode);
 
 signals:
     void stateChanged();
+    // 会话窗口（scrcpy 进程）出现/结束，供投屏导航条跟随显示与隐藏。
+    void sessionWindowAppeared(qint64 pid);
+    void sessionEnded();
 
 private:
     friend class ScreenCastTests;
