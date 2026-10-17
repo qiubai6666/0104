@@ -1121,7 +1121,7 @@ private slots:
         QWidget launcher;
         OpenListWindow w(&launcher);
         QVERIFY(!w.parentWidget());
-        QCOMPARE(w.minimumSize(), QSize(qRound(866 * 0.9), qRound(729 * 0.9)));
+        QCOMPARE(w.minimumSize(), QSize(1000, 700));
         w.show(); QTest::qWait(50);
         QCOMPARE(w.size(), w.minimumSize());
         QVERIFY((w.frameGeometry().center() - launcher.screen()->availableGeometry().center()).manhattanLength() <= 2);

@@ -27,5 +27,11 @@
     <file alias="shield.svg">../../assets/menu/shield.svg</file>
     <file alias="external.svg">../../assets/menu/external.svg</file>
     <file alias="file.svg">../../assets/menu/file.svg</file>
+    <file alias="refresh.svg">../../assets/menu/refresh.svg</file>
+    <file alias="search.svg">../../assets/menu/search.svg</file>
+    <file alias="archive.svg">../../assets/menu/archive.svg</file>
+    <file alias="terminal.svg">../../assets/menu/terminal.svg</file>
+    <file alias="check.svg">../../assets/menu/check.svg</file>
+    <file alias="x.svg">../../assets/menu/x.svg</file>
   </qresource>
 </RCC>
