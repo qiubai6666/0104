@@ -224,8 +224,13 @@ bool OpenListService::prepareFile() {
     const QStringList parts = m_entry.relativePath.split('/');
     if (parts.isEmpty()) return false;
     for (const auto &part : parts) if (!OpenList::safeComponent(part)) return false;
-    QString dir = QDir(m_root).filePath(QStringLiteral("软件"));
-    for (int i = 0; i + 1 < parts.size(); ++i) dir += '/' + parts[i];
+    QString dir;
+    if (m_targetDirectory.isEmpty()) {
+        dir = QDir(m_root).filePath(QStringLiteral("软件"));
+        for (int i = 0; i + 1 < parts.size(); ++i) dir += '/' + parts[i];
+    } else {
+        dir = QDir::cleanPath(m_targetDirectory);
+    }
     if (!OpenList::safeDirectory(dir, true)) return false;
     const QString name = parts.last();
     m_path = QDir(dir).filePath(name);
@@ -244,8 +249,9 @@ bool OpenListService::prepareFile() {
     }
     return true;
 }
-bool OpenListService::download(const OpenList::Entry &entry) {
+bool OpenListService::download(const OpenList::Entry &entry, const QString &directory) {
     if (m_active || entry.directory) return false;
+    m_targetDirectory = directory;
     m_active = true; const auto generation = ++m_downloadGeneration;
     m_parallel = false; m_parallelFallback = false; m_segments.clear(); m_parallelReceived = 0;
     m_entry = entry; m_path.clear(); m_part.clear(); m_hash.reset(); m_expectedHash.clear();
@@ -276,6 +282,7 @@ bool OpenListService::download(const OpenList::Entry &entry) {
 }
 bool OpenListService::downloadDirect(const OpenList::Entry &entry, const QUrl &url) {
     if (m_active || entry.directory || entry.size < 0 || !https(url)) return false;
+    m_targetDirectory.clear();
     m_active = true;
     const auto generation = ++m_downloadGeneration;
     m_parallel = false; m_parallelFallback = false; m_segments.clear(); m_parallelReceived = 0;
@@ -360,7 +367,7 @@ void OpenListService::startParallel(const QUrl &url, quint64 generation) {
             if (!OpenList::safeDirectory(QFileInfo(m_path).absolutePath(), false) || QFileInfo::exists(m_path) || !QFile::rename(m_part, m_path)) {
                 fail(QStringLiteral("下载文件保存失败，未覆盖既有文件。")); return;
             }
-            m_part.clear(); m_active = false;
+            m_part.clear(); m_targetDirectory.clear(); m_active = false;
             emit ready(m_entry, m_path);
         });
     }
@@ -422,7 +429,7 @@ void OpenListService::getFile(const QUrl &url, int redirects, quint64 generation
         if (!OpenList::safeDirectory(QFileInfo(m_path).absolutePath(),false) || QFileInfo::exists(m_path) || !QFile::rename(m_part,m_path)) {
             fail(QStringLiteral("下载文件保存失败，未覆盖既有文件。")); return;
         }
-        m_part.clear(); m_active = false;
+        m_part.clear(); m_targetDirectory.clear(); m_active = false;
         emit ready(m_entry,m_path);
     });
 }
@@ -442,7 +449,8 @@ void OpenListService::fail(const QString &reason) {
     m_file.close();
     QString message = reason;
     if (!m_part.isEmpty() && OpenList::safeDirectory(QFileInfo(m_part).absolutePath(),false) && QFileInfo::exists(m_part) && !QFile::remove(m_part)) message += QStringLiteral(" 未完成文件清理失败。");
-    m_part.clear(); emit failed(message);
+    m_part.clear(); m_targetDirectory.clear();
+    emit failed(message);
 }
 void OpenListService::cancel() { fail(QStringLiteral("下载已取消，未执行安装。")); }
 

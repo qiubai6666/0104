@@ -4,12 +4,15 @@
 #include "uihelper.h"
 #include <QCloseEvent>
 #include <QResizeEvent>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QScreen>
 #include <QShowEvent>
 #include <QShortcut>
+#include <QStandardPaths>
 #include <QStyle>
 #include <QDateTime>
+#include <QDir>
 #include <QTime>
 #include <QFileInfo>
 #include <QFrame>
@@ -30,7 +33,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QTimer>
-#include <algorithm>
+#include <functional>
 
 namespace {
 // 日志分级：WARN 命中失败/取消类关键词，OK 命中成功/完成，其余 INFO。
@@ -47,11 +50,66 @@ void stylePill(QLabel *pill, const QString &text, const QString &fg, const QStri
     pill->setStyleSheet(QStringLiteral("color:%1;background:%2;border:1px solid %3;border-radius:11px;padding:0 9px;")
                             .arg(fg, bg, border));
 }
+// 点击语义：普通单击只保留当前文件；只有按住 Ctrl 才切换多选。
+// Shift 不参与范围选择，避免出现未按 Ctrl 的多选。
+class OpenListFilesTable final : public QTableWidget {
+public:
+    explicit OpenListFilesTable(QWidget *parent = nullptr) : QTableWidget(parent) {}
+    std::function<void()> selectionWillBeReplaced;
+protected:
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() != Qt::LeftButton) { QTableWidget::mousePressEvent(event); return; }
+        const bool extend = event->modifiers().testFlag(Qt::ControlModifier);
+        const QModelIndex index = indexAt(event->position().toPoint());
+        auto *nameItem = index.isValid() ? item(index.row(), 0) : nullptr;
+        // 文件夹行不参与选择：双击进入目录时不要清空已选资源。
+        if (!extend && nameItem && nameItem->flags().testFlag(Qt::ItemIsSelectable)) {
+            if (selectionWillBeReplaced) selectionWillBeReplaced();
+            clearSelection();
+        }
+        if (event->modifiers() != (extend ? Qt::ControlModifier : Qt::NoModifier)) {
+            QMouseEvent normalized(event->type(), event->position(), event->globalPosition(),
+                                   event->button(), event->buttons(),
+                                   extend ? Qt::ControlModifier : Qt::NoModifier, event->pointingDevice());
+            QTableWidget::mousePressEvent(&normalized);
+            return;
+        }
+        QTableWidget::mousePressEvent(event);
+    }
+    void keyPressEvent(QKeyEvent *event) override {
+        const bool control = event->modifiers().testFlag(Qt::ControlModifier);
+        // 空格在没有 Ctrl 时只切换当前文件，不允许累积多选；Ctrl+空格保留切换语义。
+        if (event->key() == Qt::Key_Space && !control) {
+            const int row = currentRow();
+            auto *nameItem = row >= 0 ? item(row, 0) : nullptr;
+            if (nameItem && nameItem->flags().testFlag(Qt::ItemIsSelectable)) {
+                const bool wasSelected = nameItem->isSelected();
+                if (selectionWillBeReplaced) selectionWillBeReplaced();
+                clearSelection();
+                if (!wasSelected) selectRow(row);
+                event->accept();
+                return;
+            }
+        }
+        // Shift+方向键不扩展范围；只有 Ctrl 参与多选。
+        if (!control && event->modifiers().testFlag(Qt::ShiftModifier)) {
+            QKeyEvent normalized(event->type(), event->key(), event->modifiers() & ~Qt::ShiftModifier,
+                                 event->text(), event->isAutoRepeat(), event->count());
+            QTableWidget::keyPressEvent(&normalized);
+            return;
+        }
+        QTableWidget::keyPressEvent(event);
+    }
+};
 }
 
-OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenListInstaller *installer)
+OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenListInstaller *installer,
+                               const QString &desktopDirectory)
     : QWidget(nullptr), m_launcher(parent), m_service(service ? service : new OpenListService(this)),
-      m_installer(installer ? installer : new OpenListInstaller(this)), m_mtService(new MtManagerService(this)) {
+      m_installer(installer ? installer : new OpenListInstaller(this)), m_mtService(new MtManagerService(this)),
+      m_desktopDirectory(desktopDirectory.isEmpty()
+                             ? QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)
+                             : QDir::cleanPath(desktopDirectory)) {
     if (parent) connect(parent, &QObject::destroyed, this, &QObject::deleteLater);
     setWindowTitle(QStringLiteral("Openlist"));
     setAttribute(Qt::WA_DeleteOnClose,false); setAttribute(Qt::WA_QuitOnClose,false);
@@ -64,8 +122,9 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         else if (m_mtTask) m_mtService->cancel();
         else advanceBatch();
     });
-    connect(m_installSelected,&QPushButton::clicked,this,[this] { startSelection(false); });
-    connect(m_transferSelected,&QPushButton::clicked,this,[this] { startSelection(true); });
+    connect(m_installSelected,&QPushButton::clicked,this,[this] { startSelection(BatchMode::Install); });
+    connect(m_transferSelected,&QPushButton::clicked,this,[this] { startSelection(BatchMode::PhoneTransfer); });
+    connect(m_transferDesktop,&QPushButton::clicked,this,[this] { startSelection(BatchMode::DesktopTransfer); });
     connect(m_installMt,&QPushButton::clicked,this,[this] {
         if (m_busy) return;
         m_mtTask = true; m_mtFile.clear(); setBusy(true);
@@ -96,13 +155,17 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         if (!error.isEmpty()) { m_count->setText(error); log(error); }
         else m_updatedAt->setText(QStringLiteral("更新于 %1").arg(QTime::currentTime().toString("HH:mm")));
         if (m_pending > 0 && --m_pending == 0 && !m_busy) {
-            m_status->setText(QStringLiteral("资源已就绪 · 可多选后安装或传输，双击文件直接安装"));
+            m_status->setText(QStringLiteral("资源已就绪 · 单击单选，按住 Ctrl 多选，双击文件直接安装"));
             m_refresh->setEnabled(true);
         }
     });
     connect(m_service,&OpenListService::progress,this,[this](qint64 received,qint64 total,double speed) {
-        updateRunProgress(received, total, speed, QStringLiteral("正在下载 %1（%2/%3）")
-            .arg(m_selected.name).arg(m_queueIndex).arg(m_queue.size()));
+        if (m_batchMode == BatchMode::DesktopTransfer)
+            updateRunProgress(received, total, speed, QStringLiteral("正在下载到电脑桌面（%1/%2）：%3")
+                .arg(m_queueIndex).arg(m_queue.size()).arg(m_selected.name));
+        else
+            updateRunProgress(received, total, speed, QStringLiteral("正在下载 %1（%2/%3）")
+                .arg(m_selected.name).arg(m_queueIndex).arg(m_queue.size()));
     });
     connect(m_service,&OpenListService::log,this,&OpenListWindow::log);
     connect(m_service,&OpenListService::failed,this,[this](const QString &error) {
@@ -115,7 +178,10 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         if (!m_busy || !m_downloading) return;
         m_downloading = false;
         m_downloaded.append({entry,file});
-        log(QStringLiteral("下载完成（%1/%2）：%3").arg(m_queueIndex).arg(m_queue.size()).arg(entry.name));
+        if (m_batchMode == BatchMode::DesktopTransfer)
+            log(QStringLiteral("已传输到电脑桌面：%1").arg(QFileInfo(file).fileName()));
+        else
+            log(QStringLiteral("下载完成（%1/%2）：%3").arg(m_queueIndex).arg(m_queue.size()).arg(entry.name));
         QTimer::singleShot(0,this,&OpenListWindow::advanceBatch);
     });
     connect(m_installer,&OpenListInstaller::devicesReady,this,[this](const QStringList &serials) {
@@ -246,7 +312,12 @@ void OpenListWindow::setupUi() {
     captionLayout->addWidget(captionMeta); captionLayout->addWidget(m_selectAll);
     cardLayout->addWidget(caption);
 
-    auto *table = new QTableWidget(card); m_table = table;
+    auto *table = new OpenListFilesTable(card); m_table = table;
+    // 未按 Ctrl 的普通单击只保留当前文件；勾选顺序在选中状态变化时记录。
+    table->selectionWillBeReplaced = [this] {
+        m_selectedPaths.clear();
+        m_selectionOrder.clear();
+    };
     table->setObjectName("openListFiles");
     // 与旧版一致的 4 列：名称（类型图标 + 原生复选框）/ 目录 / 大小 / 更新。
     table->setColumnCount(4);
@@ -278,8 +349,8 @@ void OpenListWindow::setupUi() {
             if (index < 0 || index >= m_entries.size()) continue;
             if (m_entries[index].directory) continue; // 文件夹不参与选中，避免双击进入被当作选择文件。
             const QString &path = m_entries[index].remotePath;
-            if (item->isSelected()) m_selectedPaths.insert(path);
-            else m_selectedPaths.remove(path);
+            if (item->isSelected()) markSelected(path);
+            else markDeselected(path);
         }
         syncChecks(); updateCount();
     });
@@ -294,8 +365,8 @@ void OpenListWindow::setupUi() {
             m_table->blockSignals(true);
             item->setSelected(checked);
             m_table->blockSignals(false);
-            if (checked) m_selectedPaths.insert(m_entries[index].remotePath);
-            else m_selectedPaths.remove(m_entries[index].remotePath);
+            if (checked) markSelected(m_entries[index].remotePath);
+            else markDeselected(m_entries[index].remotePath);
             updateCount(); updateSelectionPanel();
         }
     });
@@ -360,7 +431,7 @@ void OpenListWindow::setupUi() {
     auto *emptyCopy = new QVBoxLayout; emptyCopy->setContentsMargins(0,0,0,0); emptyCopy->setSpacing(2);
     auto *emptyTitle = new QLabel(QStringLiteral("尚未选择文件"), m_selectionEmpty);
     emptyTitle->setStyleSheet("font-size:10px;font-weight:600;color:#71869B;");
-    auto *emptyHint = new QLabel(QStringLiteral("点击左侧文件行即可勾选，支持跨目录保留"), m_selectionEmpty);
+    auto *emptyHint = new QLabel(QStringLiteral("单击文件行勾选，按住 Ctrl 点击可多选"), m_selectionEmpty);
     emptyHint->setStyleSheet("font-size:9px;color:#A0AFBE;"); emptyHint->setWordWrap(true);
     emptyCopy->addWidget(emptyTitle); emptyCopy->addWidget(emptyHint);
     selectionEmptyLayout->addWidget(emptyOrb); selectionEmptyLayout->addLayout(emptyCopy,1);
@@ -385,11 +456,17 @@ void OpenListWindow::setupUi() {
 
     m_installSelected = new QPushButton(QStringLiteral("安装选中"), m_idleView);
     m_installSelected->setObjectName("openListInstallSelected"); m_installSelected->setCursor(Qt::PointingHandCursor);
-    m_installSelected->setToolTip(QStringLiteral("安装 APK、模块 ZIP；SH 以 Root 执行，请仅运行信任的脚本。"));
+    m_installSelected->setToolTip(QStringLiteral("按勾选顺序安装 APK、模块 ZIP；SH 以 Root 执行，请仅运行信任的脚本。"));
     m_transferSelected = new QPushButton(QStringLiteral("传输到手机"), m_idleView);
     m_transferSelected->setObjectName("openListTransferSelected"); m_transferSelected->setCursor(Qt::PointingHandCursor);
+    m_transferSelected->setToolTip(QStringLiteral("下载选中文件并传输到手机内部存储。"));
+    m_transferDesktop = new QPushButton(QStringLiteral("传输到桌面"), m_idleView);
+    m_transferDesktop->setObjectName("openListTransferDesktop"); m_transferDesktop->setCursor(Qt::PointingHandCursor);
+    m_transferDesktop->setToolTip(QStringLiteral("按勾选顺序下载选中文件到电脑桌面，不需要连接手机。"));
     idleLayout->addSpacing(8); idleLayout->addWidget(m_installSelected);
-    idleLayout->addSpacing(6); idleLayout->addWidget(m_transferSelected);
+    auto *transferRow = new QHBoxLayout; transferRow->setContentsMargins(0,0,0,0); transferRow->setSpacing(6);
+    transferRow->addWidget(m_transferSelected); transferRow->addWidget(m_transferDesktop);
+    idleLayout->addSpacing(6); idleLayout->addLayout(transferRow);
     auto *actionHint = new QLabel(QStringLiteral("APK / ZIP 直接安装；SH 以 Root 执行，仅运行信任的脚本"), m_idleView);
     actionHint->setStyleSheet("font-size:9px;color:#9EACBB;");
     auto *hintHolder = new QVBoxLayout; hintHolder->setContentsMargins(0,5,0,0); hintHolder->addWidget(actionHint);
@@ -429,9 +506,9 @@ void OpenListWindow::setupUi() {
     m_cancel = new QPushButton(QStringLiteral("取消下载"), m_runView); m_cancel->setObjectName("openListCancel");
     m_cancel->setEnabled(false); m_cancel->setCursor(Qt::PointingHandCursor);
     runLayout->addSpacing(13); runLayout->addWidget(m_cancel);
-    auto *runNote = new QLabel(QStringLiteral("取消后，已下载完成的文件会保留在本地「软件」目录"), m_runView);
-    runNote->setStyleSheet("font-size:9px;color:#93A5B8;"); runNote->setWordWrap(true);
-    auto *noteHolder = new QVBoxLayout; noteHolder->setContentsMargins(0,9,0,0); noteHolder->addWidget(runNote);
+    m_cancelNote = new QLabel(QStringLiteral("取消后，已下载完成的文件会保留在本地「软件」目录"), m_runView);
+    m_cancelNote->setStyleSheet("font-size:9px;color:#93A5B8;"); m_cancelNote->setWordWrap(true);
+    auto *noteHolder = new QVBoxLayout; noteHolder->setContentsMargins(0,9,0,0); noteHolder->addWidget(m_cancelNote);
     runLayout->addLayout(noteHolder);
     panelLayout->addWidget(m_runView, 1);
 
@@ -561,7 +638,7 @@ void OpenListWindow::setupUi() {
     connect(logClose,&QPushButton::clicked,this,[this] { toggleLogSheet(false); });
     connect(m_logButton,&QPushButton::clicked,this,[this] { toggleLogSheet(!m_logOpen); });
     connect(m_openLogInline,&QPushButton::clicked,this,[this] { toggleLogSheet(true); });
-    connect(m_clearSelection,&QPushButton::clicked,this,[this] { m_table->clearSelection(); });
+    connect(m_clearSelection,&QPushButton::clicked,this,&OpenListWindow::clearSelectionState);
     connect(m_backToSelection,&QPushButton::clicked,this,[this] { showTaskView(0); });
     auto *escapeShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     connect(escapeShortcut,&QShortcut::activated,this,[this] { if (m_logOpen) toggleLogSheet(false); });
@@ -614,9 +691,9 @@ void OpenListWindow::setupUi() {
         QPushButton#openListInstallSelected { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #4B97FA,stop:0.54 #2F80ED,stop:1 #226EDB); color:#FFFFFF; border:1px solid #2C7CE9; border-radius:10px; min-height:36px; font-size:11.5px; font-weight:600; }
         QPushButton#openListInstallSelected:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #5AA3FF,stop:0.54 #3B8BF2,stop:1 #2A77E3); }
         QPushButton#openListInstallSelected:disabled { background:#EFF4F9; color:#A6B5C4; border-color:#E7EEF6; }
-        QPushButton#openListTransferSelected, QPushButton#openListBackToSelection { background:#FFFFFF; color:#536A81; border:1px solid #E1EBF5; border-radius:9px; min-height:30px; font-size:10.5px; }
-        QPushButton#openListTransferSelected:hover, QPushButton#openListBackToSelection:hover { color:#2F80ED; border-color:#C2DCFA; background:#F8FBFF; }
-        QPushButton#openListTransferSelected:disabled { color:#B3C0CD; background:#FAFCFE; border-color:#EDF2F7; }
+        QPushButton#openListTransferSelected, QPushButton#openListTransferDesktop, QPushButton#openListBackToSelection { background:#FFFFFF; color:#536A81; border:1px solid #E1EBF5; border-radius:9px; min-height:30px; font-size:10.5px; }
+        QPushButton#openListTransferSelected:hover, QPushButton#openListTransferDesktop:hover, QPushButton#openListBackToSelection:hover { color:#2F80ED; border-color:#C2DCFA; background:#F8FBFF; }
+        QPushButton#openListTransferSelected:disabled, QPushButton#openListTransferDesktop:disabled { color:#B3C0CD; background:#FAFCFE; border-color:#EDF2F7; }
         QPushButton#openListClearSelection { background:transparent; border:0; color:#92A3B5; font-size:9.5px; padding:2px 5px; border-radius:5px; }
         QPushButton#openListClearSelection:hover { color:#D05B5B; background:#FFF4F4; }
         QPushButton#openListCancel { background:#FFFAFA; color:#BC5C5C; border:1px solid #F5DEDE; border-radius:9px; min-height:31px; font-size:10px; }
@@ -657,7 +734,7 @@ void OpenListWindow::setupUi() {
 void OpenListWindow::refresh() {
     if (m_busy) return;
     m_pending = 1; m_refresh->setEnabled(false); m_status->setText(QStringLiteral("正在读取资源…"));
-    m_currentDirectory.clear(); m_entries.clear(); m_selectedPaths.clear();
+    m_currentDirectory.clear(); m_entries.clear(); m_selectedPaths.clear(); m_selectionOrder.clear();
     render(); m_count->setText(QStringLiteral("正在读取…"));
     m_service->refresh();
 }
@@ -762,58 +839,105 @@ void OpenListWindow::activate(int row) {
 void OpenListWindow::appendSelection(const OpenList::Entry &selection, QList<OpenList::Entry> &expanded, QSet<QString> &paths) const {
     if (!paths.contains(selection.remotePath)) { paths.insert(selection.remotePath); expanded.append(selection); }
 }
-void OpenListWindow::startSelection(bool transferOnly) {
-    if (m_busy) return;
-    QList<OpenList::Entry> selected;
-    for (const auto &entry : m_entries)
-        if (m_selectedPaths.contains(entry.remotePath)) selected.append(entry);
-    if (selected.isEmpty()) log(QStringLiteral("请先选择文件；选择会跨目录保留，点击文件行即可勾选。"));
-    else startBatch(selected,transferOnly);
+void OpenListWindow::markSelected(const QString &path) {
+    if (m_selectedPaths.contains(path)) return;
+    m_selectedPaths.insert(path);
+    m_selectionOrder.append(path);
 }
-void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries,bool transferOnly) {
+void OpenListWindow::markDeselected(const QString &path) {
+    m_selectedPaths.remove(path);
+    m_selectionOrder.removeAll(path);
+}
+void OpenListWindow::clearSelectionState() {
+    m_selectedPaths.clear();
+    m_selectionOrder.clear();
+    m_table->clearSelection();
+    updateCount();
+}
+void OpenListWindow::startSelection(BatchMode mode) {
+    if (m_busy) return;
+    QHash<QString, const OpenList::Entry*> byPath;
+    for (const auto &entry : m_entries) byPath.insert(entry.remotePath, &entry);
+    QList<OpenList::Entry> selected;
+    // 按勾选顺序收集，而不是按服务器列表顺序；批量下载和安装都沿用该顺序。
+    for (const auto &path : m_selectionOrder) {
+        const auto it = byPath.constFind(path);
+        if (it != byPath.constEnd() && m_selectedPaths.contains(path)) selected.append(*it.value());
+    }
+    if (selected.isEmpty()) log(QStringLiteral("请先选择文件；单击单选，按住 Ctrl 点击可多选。"));
+    else startBatch(selected, mode);
+}void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries, BatchMode mode) {
     if (m_busy || entries.isEmpty()) return;
     m_queue.clear();
     QSet<QString> paths;
     for (const auto &entry : entries) appendSelection(entry, m_queue, paths);
-    if (!transferOnly) {
+    if (mode == BatchMode::Install) {
         QList<OpenList::Entry> supported;
         for (const auto &entry : m_queue) {
             const QString extension = QFileInfo(entry.name).suffix().toLower();
             if (extension == "apk" || extension == "zip" || extension == "sh") supported.append(entry);
-            else log(QStringLiteral("已跳过不支持安装或执行的文件：%1；可使用“传输到手机”。").arg(entry.name));
+            else log(QStringLiteral("已跳过不支持安装或执行的文件：%1；可使用“传输到手机”或“传输到桌面”。").arg(entry.name));
         }
         m_queue = supported;
     }
     if (m_queue.isEmpty()) return;
-    m_transferOnly = transferOnly;
+    if (mode == BatchMode::DesktopTransfer && !OpenList::safeDirectory(m_desktopDirectory, true)) {
+        const QString message = QStringLiteral("电脑桌面目录不可用，未开始传输。");
+        log(message); m_status->setText(message); return;
+    }
+    m_batchMode = mode;
     m_downloaded.clear(); m_serial.clear(); m_queueIndex = 0; m_installIndex = 0;
     m_succeeded = 0; m_failed = 0; m_installingBatch = false; m_cancelled = false;
     setBusy(true);
     m_runTile->setPixmap(typeTilePixmap(m_queue.first(),35));
     m_runFileName->setText(QStringLiteral("准备中"));
-    m_runFileSub->setText(QStringLiteral("正在检测已授权手机…"));
-    m_status->setText(QStringLiteral("正在检测已授权手机…（共 %1 个文件）").arg(m_queue.size()));
-    m_installer->inspectDevices();
+    if (mode == BatchMode::DesktopTransfer) {
+        m_runFileSub->setText(QStringLiteral("正在下载到电脑桌面…"));
+        m_status->setText(QStringLiteral("正在准备下载到电脑桌面…（共 %1 个文件）").arg(m_queue.size()));
+        m_cancelNote->setText(QStringLiteral("取消后，已下载完成的文件会保留在电脑桌面"));
+        QTimer::singleShot(0, this, &OpenListWindow::advanceBatch);
+    } else {
+        m_runFileSub->setText(QStringLiteral("正在检测已授权手机…"));
+        m_status->setText(QStringLiteral("正在检测已授权手机…（共 %1 个文件）").arg(m_queue.size()));
+        m_cancelNote->setText(QStringLiteral("取消后，已下载完成的文件会保留在本地「软件」目录"));
+        m_installer->inspectDevices();
+    }
 }
 void OpenListWindow::advanceBatch() {
     if (!m_busy || m_downloading || m_installer->busy()) return;
+    const bool desktop = m_batchMode == BatchMode::DesktopTransfer;
     if (m_cancelled) {
         for (const auto &download : m_downloaded)
             log(QStringLiteral("已取消，下载文件保留在：%1").arg(download.file));
-        finish(QStringLiteral("批量任务已取消，未开始手机操作；已完成的下载保留。"),false); return;
+        finish(QStringLiteral("批量任务已取消；已完成的下载保留。"),false); return;
     }
     if (!m_installingBatch && m_queueIndex < m_queue.size()) {
         m_selected = m_queue[m_queueIndex++]; m_downloading = true; m_cancel->setEnabled(true);
         m_runTile->setPixmap(typeTilePixmap(m_selected,35));
         m_runFileName->setText(m_selected.name);
-        m_runFileSub->setText(QStringLiteral("云端下载 · 第 %1/%2 个").arg(m_queueIndex).arg(m_queue.size()));
+        m_runFileSub->setText(desktop ? QStringLiteral("下载到电脑桌面 · 第 %1/%2 个").arg(m_queueIndex).arg(m_queue.size())
+                                      : QStringLiteral("云端下载 · 第 %1/%2 个").arg(m_queueIndex).arg(m_queue.size()));
         m_runPercent->setText(QStringLiteral("…"));
         m_runStatsLeft->setText(QString()); m_runStatsRight->setText(QString());
         m_progress->setRange(0,100); m_progress->setValue(0);
-        m_status->setText(QStringLiteral("正在准备下载（%1/%2）：%3").arg(m_queueIndex).arg(m_queue.size()).arg(m_selected.name));
+        m_status->setText(desktop
+            ? QStringLiteral("正在下载到电脑桌面（%1/%2）：%3").arg(m_queueIndex).arg(m_queue.size()).arg(m_selected.name)
+            : QStringLiteral("正在准备下载（%1/%2）：%3").arg(m_queueIndex).arg(m_queue.size()).arg(m_selected.name));
         rebuildQueue();
-        m_service->download(m_selected); return;
+        if (desktop) m_service->download(m_selected, m_desktopDirectory);
+        else m_service->download(m_selected);
+        return;
     }
+    if (desktop) {
+        m_installingBatch = true; m_cancel->setEnabled(false);
+        m_succeeded = m_downloaded.size();
+        const QString summary = m_failed == 0
+            ? QStringLiteral("已传输 %1 个文件到电脑桌面。").arg(m_downloaded.size())
+            : QStringLiteral("已传输 %1 个文件到电脑桌面，失败 %2 个。").arg(m_downloaded.size()).arg(m_failed);
+        finish(summary, m_failed == 0);
+        return;
+    }
+    const bool phone = m_batchMode == BatchMode::PhoneTransfer;
     m_installingBatch = true; m_cancel->setEnabled(false);
     if (m_installIndex < m_downloaded.size()) {
         const auto download = m_downloaded[m_installIndex++];
@@ -823,12 +947,12 @@ void OpenListWindow::advanceBatch() {
         m_runFileSub->setText(QStringLiteral("目标手机 %1").arg(m_serial));
         m_runPercent->setText(QStringLiteral("…"));
         const bool script = QFileInfo(download.file).suffix().compare("sh",Qt::CaseInsensitive) == 0;
-        m_runStatsLeft->setText(m_transferOnly ? QStringLiteral("传输中") : script ? QStringLiteral("执行脚本中") : QStringLiteral("安装中"));
+        m_runStatsLeft->setText(phone ? QStringLiteral("传输中") : script ? QStringLiteral("执行脚本中") : QStringLiteral("安装中"));
         m_runStatsRight->setText(QStringLiteral("第 %1/%2 个").arg(m_installIndex).arg(m_downloaded.size()));
-        m_status->setText((m_transferOnly ? QStringLiteral("正在传输（%1/%2）：%3；目标手机：%4") : (script ? QStringLiteral("正在执行脚本（%1/%2）：%3；目标手机：%4") : QStringLiteral("正在安装（%1/%2）：%3；目标手机：%4")))
+        m_status->setText((phone ? QStringLiteral("正在传输（%1/%2）：%3；目标手机：%4") : (script ? QStringLiteral("正在执行脚本（%1/%2）：%3；目标手机：%4") : QStringLiteral("正在安装（%1/%2）：%3；目标手机：%4")))
             .arg(m_installIndex).arg(m_downloaded.size()).arg(download.entry.name,m_serial));
         rebuildQueue();
-        if (m_transferOnly) m_installer->transfer(download.file,m_serial);
+        if (phone) m_installer->transfer(download.file,m_serial);
         else m_installer->install(download.file,m_serial);
         return;
     }
@@ -837,7 +961,7 @@ void OpenListWindow::advanceBatch() {
     finish(summary,m_failed == 0);
 }
 void OpenListWindow::setBusy(bool busy) {
-    m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy); m_transferSelected->setEnabled(!busy); m_installMt->setEnabled(!busy);
+    m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy); m_transferSelected->setEnabled(!busy); m_transferDesktop->setEnabled(!busy); m_installMt->setEnabled(!busy);
     m_table->setEnabled(!busy); m_search->setEnabled(!busy); m_up->setEnabled(!busy && !m_currentDirectory.isEmpty());
     m_cancel->setEnabled(busy && m_downloading);
     if (busy) {
@@ -856,9 +980,9 @@ void OpenListWindow::setBusy(bool busy) {
 void OpenListWindow::finish(const QString &message,bool ok) {
     const bool batch = m_installingBatch;
     const QString stats = batch ? QStringLiteral("成功 %1 · 失败 %2 · 共 %3 个文件").arg(m_succeeded).arg(m_failed).arg(m_queue.size()) : QString();
-    m_selectedPaths.clear();
-    m_table->clearSelection();
+    clearSelectionState();
     m_downloading = false; m_queue.clear(); m_downloaded.clear(); setBusy(false); m_progress->setRange(0,100); m_progress->setValue(ok ? 100 : 0);
+    m_batchMode = BatchMode::Install;
     const QString safe = OpenList::redact(message);
     m_status->setText(safe);
     m_successOrb->setPixmap(ok ? tilePixmap("check", QColor("#FFFFFF"), QColor("#22B96E"), QColor(), 52, 26)
@@ -984,8 +1108,8 @@ void OpenListWindow::syncChecks() {
 void OpenListWindow::updateSelectionPanel() {
     QHash<QString, const OpenList::Entry*> byPath;
     for (const auto &entry : m_entries) byPath.insert(entry.remotePath, &entry);
-    QList<QString> paths = m_selectedPaths.values();
-    std::sort(paths.begin(), paths.end());
+    // 已选面板按勾选顺序显示，和实际批量下载 / 安装顺序一致。
+    const QList<QString> &paths = m_selectionOrder;
     QList<const OpenList::Entry*> picked;
     qint64 total = 0; bool unknown = false;
     for (const auto &path : paths) {

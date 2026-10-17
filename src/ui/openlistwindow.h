@@ -11,7 +11,7 @@ class OpenListWindow final : public QWidget {
     Q_OBJECT
 public:
     explicit OpenListWindow(QWidget *parent = nullptr, OpenListService *service = nullptr,
-                            OpenListInstaller *installer = nullptr);
+                            OpenListInstaller *installer = nullptr, const QString &desktopDirectory = QString());
     bool isBusy() const { return m_busy; }
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -29,20 +29,23 @@ private:
     QLabel *m_directory;
     QString m_currentDirectory;
     QLabel *m_count, *m_status;
-    QPushButton *m_refresh, *m_cancel, *m_installSelected, *m_transferSelected, *m_installMt;
+    QPushButton *m_refresh, *m_cancel, *m_installSelected, *m_transferSelected, *m_transferDesktop, *m_installMt;
     QProgressBar *m_progress;
     QPlainTextEdit *m_log;
     QList<OpenList::Entry> m_entries;
     QSet<QString> m_selectedPaths; // 跨目录保留的选中项（remotePath）。
+    QList<QString> m_selectionOrder; // 勾选顺序；批量下载与安装按此顺序执行。
     OpenList::Entry m_selected;
     struct Downloaded { OpenList::Entry entry; QString file; };
     QList<OpenList::Entry> m_queue;
     QList<Downloaded> m_downloaded;
     QString m_serial;
+    QString m_desktopDirectory;
     bool m_busy = false, m_downloading = false, m_mtTask = false;
     QString m_mtFile;
     int m_queueIndex = 0, m_installIndex = 0, m_pending = 0, m_succeeded = 0, m_failed = 0;
-    bool m_transferOnly = false;
+    enum class BatchMode { Install, PhoneTransfer, DesktopTransfer };
+    BatchMode m_batchMode = BatchMode::Install;
     bool m_installingBatch = false, m_cancelled = false;
     // 预览稿（TEMP/openlist-ui-preview-20261017）新增 UI 成员。
     QLabel *m_pill;                       // 面包屑右侧「N 项」计数胶囊。
@@ -57,7 +60,7 @@ private:
     QLabel *m_runTile, *m_runFileName, *m_runFileSub, *m_runPercent, *m_runStatsLeft, *m_runStatsRight;
     QLabel *m_successOrb, *m_successTitle, *m_successMessage, *m_successStats;
     QLabel *m_targetName, *m_targetState;
-    QLabel *m_footerDot, *m_updatedAt, *m_logCount, *m_logTotal;
+    QLabel *m_footerDot, *m_updatedAt, *m_logCount, *m_logTotal, *m_cancelNote;
     QPushButton *m_logButton, *m_openLogInline;
     QLabel *m_recentRow[3];
     QFrame *m_scrim, *m_logSheet;
@@ -70,9 +73,12 @@ private:
     void refresh();
     void render();
     void activate(int row);
-    void startSelection(bool transferOnly);
-    void startBatch(const QList<OpenList::Entry> &entries, bool transferOnly = false);
+    void startSelection(BatchMode mode);
+    void startBatch(const QList<OpenList::Entry> &entries, BatchMode mode = BatchMode::Install);
     void appendSelection(const OpenList::Entry &selection, QList<OpenList::Entry> &expanded, QSet<QString> &paths) const;
+    void markSelected(const QString &path);
+    void markDeselected(const QString &path);
+    void clearSelectionState();
     void advanceBatch();
     void setBusy(bool busy);
     void finish(const QString &message, bool ok = false);

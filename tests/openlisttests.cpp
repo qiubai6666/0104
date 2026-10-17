@@ -1,5 +1,6 @@
 #include <QtTest>
 #include <QApplication>
+#include <QGuiApplication>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QNetworkAccessManager>
@@ -19,6 +20,9 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QScreen>
+#include <QStyle>
+#include <QStyleOptionViewItem>
+#include <QItemSelectionModel>
 #include <QProcess>
 #include <QThread>
 #include <QScopeGuard>
@@ -70,9 +74,10 @@ class Network final : public QNetworkAccessManager {
 public:
     std::function<Reply*(const QNetworkRequest&,const QJsonObject&)> handler;
     QList<QNetworkRequest> requests;
+    QList<QJsonObject> bodies;
 protected:
     QNetworkReply *createRequest(Operation,const QNetworkRequest &r,QIODevice *body) override {
-        requests.append(r); auto o=body?QJsonDocument::fromJson(body->readAll()).object():QJsonObject();
+        requests.append(r); auto o=body?QJsonDocument::fromJson(body->readAll()).object():QJsonObject(); bodies.append(o);
         return handler(r,o);
     }
 };
@@ -549,6 +554,27 @@ private slots:
         QDir d(dir.path()+QStringLiteral("/软件/sub"));QVERIFY(d.entryList({"*.part"},QDir::Files).isEmpty());
         for(const auto&r:network.requests){QVERIFY(r.rawHeader("Authorization").isEmpty());QVERIFY(r.rawHeader("Cookie").isEmpty());}
     }
+    void downloadToExplicitDirectory() {
+        QTemporaryDir root, target; QVERIFY(root.isValid()); QVERIFY(target.isValid());
+        Network network;
+        network.handler=[](const QNetworkRequest &r,const QJsonObject &){
+            if (r.url().path()=="/api/fs/get")
+                return new Reply(r,api({{"raw_url","https://files.example.com/x"},{"size",3}}),200);
+            return new Reply(r,QByteArray("abc"),200);
+        };
+        OpenListService service(nullptr,&network,root.path());
+        OpenList::Entry entry; entry.name="x.apk"; entry.relativePath="sub/x.apk";
+        entry.remotePath=QStringLiteral("/A秋白工作室/sub/x.apk"); entry.size=3;
+        QSignalSpy ready(&service,&OpenListService::ready), failed(&service,&OpenListService::failed);
+        QVERIFY(service.download(entry,target.path()));
+        QTRY_COMPARE(ready.size(),1); QVERIFY(failed.isEmpty());
+        QCOMPARE(QFileInfo(ready[0][1].toString()).absolutePath(),QDir(target.path()).absolutePath());
+        QVERIFY(!QFileInfo::exists(root.filePath(QStringLiteral("软件/sub/x.apk"))));
+        // 显式目录仅影响本次下载；后续任务仍回到默认的“软件”目录。
+        QVERIFY(service.download(entry));
+        QTRY_COMPARE(ready.size(),2);
+        QCOMPARE(QFileInfo(ready[1][1].toString()).absolutePath(),QDir(root.filePath(QStringLiteral("软件/sub"))).absolutePath());
+    }
     void parallelDownload() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         const QByteArray payload(17 * 1024 * 1024 + 123, 'P');
@@ -998,6 +1024,164 @@ private slots:
         QCOMPARE(QFileInfo::exists(firstFile),mode==1 || mode==4 || mode==7);
         QCOMPARE(QFileInfo::exists(secondFile),mode==4 || mode==7);
     }
+    void ctrlOnlyMultiSelection() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;
+        network.handler=[](const QNetworkRequest &r,const QJsonObject &){
+            if (r.url().path()=="/api/fs/list") return new Reply(r,api({{"content",QJsonArray{}},{"total",0}}),200);
+            return new Reply(r,QByteArray("abc"),200);
+        };
+        OpenListService service(nullptr,&network,dir.path()); Runner runner;
+        OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z");
+        OpenListWindow window(nullptr,&service,&installer,dir.path());
+        QSignalSpy listed(&service,&OpenListService::listingReady); QTRY_COMPARE(listed.size(),1);
+        QList<OpenList::Entry> entries;
+        for (const QString &name : {QStringLiteral("a.apk"),QStringLiteral("b.apk"),QStringLiteral("c.apk")}) {
+            OpenList::Entry entry; entry.name=name; entry.relativePath=name;
+            entry.remotePath=QStringLiteral("/A秋白工作室/")+name; entry.size=3; entries.append(entry);
+        }
+        emit service.listingReady(entries,{});
+        auto *table=window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table);
+        window.show(); QTest::qWait(40);
+        auto selectedRows=[&] {
+            int count=0;
+            for (int row=0;row<table->rowCount();++row) if (table->item(row,0)->isSelected()) ++count;
+            return count;
+        };
+        auto clickRow=[&](int row,Qt::KeyboardModifiers modifiers) {
+            const QRect rect=table->visualItemRect(table->item(row,0));
+            QTest::mouseClick(table->viewport(),Qt::LeftButton,modifiers,rect.center());
+            QTest::qWait(10);
+        };
+        auto checkRect=[&](int row) {
+            QStyleOptionViewItem option;
+            option.initFrom(table);
+            option.rect=table->visualItemRect(table->item(row,0));
+            option.features |= QStyleOptionViewItem::HasCheckIndicator;
+            option.checkState=table->item(row,0)->checkState();
+            return table->style()->subElementRect(QStyle::SE_ItemViewItemCheckIndicator,&option,table);
+        };
+        auto clickCheck=[&](int row,Qt::KeyboardModifiers modifiers) {
+            const QRect rect=checkRect(row);
+            QVERIFY(table->visualItemRect(table->item(row,0)).contains(rect));
+            QTest::mouseClick(table->viewport(),Qt::LeftButton,modifiers,rect.center());
+            QTest::qWait(10);
+        };
+        clickRow(0,Qt::NoModifier);
+        QCOMPARE(selectedRows(),1); QVERIFY(table->item(0,0)->isSelected());
+        clickRow(1,Qt::NoModifier);
+        QCOMPARE(selectedRows(),1); QVERIFY(!table->item(0,0)->isSelected()); QVERIFY(table->item(1,0)->isSelected());
+        clickRow(0,Qt::ControlModifier);
+        QCOMPARE(selectedRows(),2); QVERIFY(table->item(0,0)->isSelected()); QVERIFY(table->item(1,0)->isSelected());
+        // Shift 不参与范围选择：未按 Ctrl 时仍然是单选。
+        clickRow(2,Qt::ShiftModifier);
+        QCOMPARE(selectedRows(),1); QVERIFY(table->item(2,0)->isSelected());
+        clickRow(1,Qt::ControlModifier|Qt::ShiftModifier);
+        QCOMPARE(selectedRows(),2); QVERIFY(table->item(1,0)->isSelected()); QVERIFY(table->item(2,0)->isSelected());
+        QVERIFY(!table->item(0,0)->isSelected());
+        // 复选框与行点击语义一致：普通点击单选，Ctrl+点击才增减多选。
+        clickCheck(0,Qt::NoModifier);
+        QCOMPARE(selectedRows(),1); QVERIFY(table->item(0,0)->isSelected());
+        QCOMPARE(table->item(0,0)->checkState(),Qt::Checked);
+        clickCheck(1,Qt::ControlModifier);
+        QCOMPARE(selectedRows(),2); QVERIFY(table->item(1,0)->isSelected());
+        QCOMPARE(table->item(1,0)->checkState(),Qt::Checked);
+        clickCheck(1,Qt::ControlModifier);
+        QCOMPARE(selectedRows(),1); QVERIFY(!table->item(1,0)->isSelected());
+        QCOMPARE(table->item(1,0)->checkState(),Qt::Unchecked);
+        // 键盘 Shift+方向键同样不扩展范围。
+        table->setFocus();
+        QTest::keyClick(table,Qt::Key_Down,Qt::ShiftModifier);
+        QTest::qWait(10);
+        QCOMPARE(selectedRows(),1);
+        QTest::keyRelease(table,Qt::Key_Shift);
+        QCOMPARE(QGuiApplication::keyboardModifiers(),Qt::KeyboardModifiers(Qt::NoModifier));
+        window.close();
+    }
+    void desktopTransfer() {
+        QTemporaryDir root; QVERIFY(root.isValid());
+        const QString desktop=root.filePath("Desktop"); QVERIFY(QDir().mkpath(desktop));
+        Network network; int downloads=0;
+        network.handler=[&](const QNetworkRequest &r,const QJsonObject &body){
+            if (r.url().path()=="/api/fs/list") return new Reply(r,api({{"content",QJsonArray{}},{"total",0}}),200);
+            if (r.url().path()=="/api/fs/get") {
+                ++downloads;
+                return new Reply(r,api({{"raw_url","https://files.example.com/"+body.value("path").toString().section('/',-1)},{"size",3}}),200);
+            }
+            return new Reply(r,QByteArray("abc"),200);
+        };
+        OpenListService service(nullptr,&network,root.path()); Runner runner;
+        OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z");
+        OpenListWindow window(nullptr,&service,&installer,desktop);
+        QSignalSpy listed(&service,&OpenListService::listingReady); QTRY_COMPARE(listed.size(),1);
+        OpenList::Entry text; text.name="说明.txt"; text.relativePath=text.name;
+        text.remotePath=QStringLiteral("/A秋白工作室/")+text.name; text.size=3;
+        auto apk=text; apk.name="app.apk"; apk.relativePath=apk.name;
+        apk.remotePath=QStringLiteral("/A秋白工作室/")+apk.name;
+        emit service.listingReady({text,apk},{});
+        auto *table=window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table);
+        table->selectAll();
+        auto *button=window.findChild<QPushButton*>("openListTransferDesktop"); QVERIFY(button);
+        button->click();
+        QVERIFY(window.isBusy());
+        QVERIFY2(runner.calls.isEmpty(),"桌面传输不应检测手机");
+        QTRY_COMPARE(downloads,2);
+        QTRY_VERIFY(!window.isBusy());
+        QVERIFY(runner.calls.isEmpty());
+        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("说明.txt")));
+        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("app.apk")));
+        QVERIFY(!QFileInfo::exists(root.filePath(QStringLiteral("软件/说明.txt"))));
+        QVERIFY(!QFileInfo::exists(root.filePath(QStringLiteral("软件/app.apk"))));
+        QVERIFY(table->selectedItems().isEmpty());
+    }
+    void installOrderFollowsSelectionOrder() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network; int downloads=0;
+        network.handler=[&](const QNetworkRequest &r,const QJsonObject &body){
+            if (r.url().path()=="/api/fs/list") return new Reply(r,api({{"content",QJsonArray{}},{"total",0}}),200);
+            if (r.url().path()=="/api/fs/get") {
+                ++downloads;
+                return new Reply(r,api({{"raw_url","https://files.example.com/"+body.value("path").toString().section('/',-1)},{"size",3}}),200);
+            }
+            return new Reply(r,QByteArray("abc"),200);
+        };
+        OpenListService service(nullptr,&network,dir.path()); Runner runner;
+        OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z");
+        OpenListWindow window(nullptr,&service,&installer,dir.path());
+        QSignalSpy listed(&service,&OpenListService::listingReady); QTRY_COMPARE(listed.size(),1);
+        OpenList::Entry first; first.name="first.apk"; first.relativePath=first.name;
+        first.remotePath=QStringLiteral("/A秋白工作室/")+first.name; first.size=3;
+        auto second=first; second.name="second.apk"; second.relativePath=second.name;
+        second.remotePath=QStringLiteral("/A秋白工作室/")+second.name;
+        auto third=first; third.name="third.apk"; third.relativePath=third.name;
+        third.remotePath=QStringLiteral("/A秋白工作室/")+third.name;
+        emit service.listingReady({first,second,third},{});
+        auto *table=window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table);
+        auto selectRow=[&](int row) {
+            table->selectionModel()->select(table->model()->index(row,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
+        };
+        // 与列表顺序相反：先勾选 third，再勾选 first。
+        selectRow(2); selectRow(0);
+        QCOMPARE(table->selectedItems().size(),8);
+        auto *button=window.findChild<QPushButton*>("openListInstallSelected"); QVERIFY(button);
+        button->click(); QVERIFY(window.isBusy());
+        runner.respond("phone\tdevice");
+        QTRY_COMPARE(downloads,2);
+        QStringList requested;
+        for (int i=0;i<network.requests.size() && i<network.bodies.size();++i)
+            if (network.requests[i].url().path()=="/api/fs/get")
+                requested.append(network.bodies[i].value("path").toString().section('/',-1));
+        QCOMPARE(requested,QStringList({QStringLiteral("third.apk"),QStringLiteral("first.apk")}));
+        QStringList installed;
+        for (int i=0;i<2;++i) {
+            runner.respond("phone\tdevice");
+            runner.denyApkRoot();
+            QVERIFY(runner.calls.last().args.contains("install"));
+            installed.append(QFileInfo(runner.calls.last().args.last()).fileName());
+            runner.respond("Success");
+            if (i+1<2) QTRY_VERIFY(runner.active);
+        }
+        QTRY_VERIFY(!window.isBusy());
+        QCOMPARE(installed,QStringList({QStringLiteral("third.apk"),QStringLiteral("first.apk")}));
+    }
     void fileSelectionInsideFolder_data() {
         QTest::addColumn<bool>("transferOnly");
         QTest::newRow("install-file") << false;
@@ -1032,7 +1216,12 @@ private slots:
         QVERIFY(!table->item(0,0)->flags().testFlag(Qt::ItemIsSelectable));
         emit table->cellDoubleClicked(0, 0);
         QCOMPARE(table->rowCount(), 1);
+        QCOMPARE(table->item(0,0)->text(), QStringLiteral("child.apk"));
+        QVERIFY(table->isEnabled()); QVERIFY(!window.isBusy());
+        QVERIFY2(table->item(0,0)->flags().testFlag(Qt::ItemIsSelectable),"child row should be selectable");
         table->selectRow(0); // 选中文件夹内的 child.apk。
+        QVERIFY2(table->item(0,0)->isSelected(),"child row should be selected");
+        QCOMPARE(table->selectedItems().size(),4);
         auto *button = window.findChild<QPushButton*>(transferOnly ? "openListTransferSelected" : "openListInstallSelected"); QVERIFY(button);
         button->click(); QVERIFY(window.isBusy()); QCOMPARE(runner.calls.size(), 1);
         runner.respond("phone\tdevice");
@@ -1185,19 +1374,23 @@ private slots:
         auto *target = w.findChild<QWidget *>("openListTargetStrip");
         auto *install = w.findChild<QPushButton *>("openListInstallSelected");
         auto *transfer = w.findChild<QPushButton *>("openListTransferSelected");
-        QVERIFY(scroll && target && install && transfer);
+        auto *desktop = w.findChild<QPushButton *>("openListTransferDesktop");
+        QVERIFY(scroll && target && install && transfer && desktop);
         QVERIFY(scroll->isVisible());
         QVERIFY(scroll->verticalScrollBar()->isVisible());
         const QRect scrollRect(scroll->mapTo(&w, QPoint(0, 0)), scroll->size());
         const QRect targetRect(target->mapTo(&w, QPoint(0, 0)), target->size());
         const QRect installRect(install->mapTo(&w, QPoint(0, 0)), install->size());
         const QRect transferRect(transfer->mapTo(&w, QPoint(0, 0)), transfer->size());
+        const QRect desktopRect(desktop->mapTo(&w, QPoint(0, 0)), desktop->size());
         // 多选时已选列表必须被滚动区约束，不能与下方目标设备 / 操作按钮重叠。
         QVERIFY(!scrollRect.intersects(targetRect));
         QVERIFY(!scrollRect.intersects(installRect));
         QVERIFY(!scrollRect.intersects(transferRect));
+        QVERIFY(!scrollRect.intersects(desktopRect));
         QVERIFY(targetRect.bottom() < installRect.top());
         QVERIFY(installRect.bottom() < transferRect.top());
+        QCOMPARE(transferRect.top(), desktopRect.top());
         w.close();
     }
 

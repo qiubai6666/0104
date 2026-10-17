@@ -35,7 +35,9 @@ public:
                              const QString &downloadRoot = QString());
     ~OpenListService() override;
     void refresh();
-    bool download(const OpenList::Entry &entry);
+    // directory 非空时直接保存到该目录（文件名扁平化，不保留云端子目录）；
+    // 为空时沿用默认下载根的“软件”目录并保留相对路径。
+    bool download(const OpenList::Entry &entry, const QString &directory = QString());
     // Direct HTTPS downloads share the same range, validation and cleanup engine.
     bool downloadDirect(const OpenList::Entry &entry, const QUrl &url);
     void cancel();
@@ -74,6 +76,7 @@ private:
     void fail(const QString &reason);
     bool prepareFile();
     QString m_root, m_path, m_part;
+    QString m_targetDirectory;
     QNetworkAccessManager *m_network;
     QPointer<QNetworkReply> m_reply;
     QList<QPointer<QNetworkReply>> m_lists;
