@@ -18,7 +18,7 @@
 
 namespace {
 const QString base = QStringLiteral("https://pan.xn--ucy.xyz");
-QString remoteRoot(bool module) { return module ? QStringLiteral("/local/模块") : QStringLiteral("/local/APK"); }
+QString remoteRoot() { return QStringLiteral("/A秋白工作室"); }
 constexpr qint64 maxJson = 4 * 1024 * 1024;
 // A single HTTP connection can be the bottleneck on some OpenList/CDN setups.
 // Use a few ranged requests for larger files, while retaining a single-stream
@@ -163,19 +163,17 @@ void OpenListService::refresh() {
     const quint64 generation = ++m_listGeneration;
     const auto replies = m_lists; m_lists.clear();
     for (auto r : replies) if (r) { r->abort(); r->deleteLater(); }
-    for (int i = 0; i < 2; ++i) {
-        m_listing[i] = Listing();
-        m_listing[i].pending.enqueue({remoteRoot(i), 1, 0});
-        m_listing[i].visited.insert(remoteRoot(i));
-        pump(i, generation);
-    }
+    m_listing = Listing();
+    m_listing.pending.enqueue({remoteRoot(), 1, 0});
+    m_listing.visited.insert(remoteRoot());
+    pump(generation);
 }
-void OpenListService::pump(bool module, quint64 generation) {
-    auto &listing = m_listing[module];
-    if (listing.pending.isEmpty()) { emit listingReady(module, listing.entries, listing.error); return; }
+void OpenListService::pump(quint64 generation) {
+    auto &listing = m_listing;
+    if (listing.pending.isEmpty()) { emit listingReady(listing.entries, listing.error); return; }
     if (++listing.requests > 2048) {
         listing.pending.clear(); listing.error = QStringLiteral("目录过多，列表不完整");
-        emit listingReady(module, listing.entries, listing.error); return;
+        emit listingReady(listing.entries, listing.error); return;
     }
     Page page = listing.pending.dequeue();
     auto req = request(QUrl(base + "/api/fs/list")); req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -183,10 +181,10 @@ void OpenListService::pump(bool module, quint64 generation) {
     auto *r = m_network->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     r->setReadBufferSize(maxJson + 1); m_lists.append(r);
     connect(r, &QNetworkReply::readyRead, this, [r]{ if (r->bytesAvailable() > maxJson) r->abort(); });
-    connect(r, &QNetworkReply::finished, this, [this, r, page, module, generation] {
+    connect(r, &QNetworkReply::finished, this, [this, r, page, generation] {
         r->deleteLater(); m_lists.removeAll(r);
         if (generation != m_listGeneration) return;
-        auto &list = m_listing[module]; QJsonObject data;
+        auto &list = m_listing; QJsonObject data;
         if (!apiObject(r, &data)) list.error = QStringLiteral("部分目录读取失败，列表不完整");
         else {
             const auto value = data.value("content");
@@ -201,17 +199,17 @@ void OpenListService::pump(bool module, quint64 generation) {
                     if (!list.visited.contains(full)) {
                         list.visited.insert(full); list.pending.enqueue({full, 1, page.depth + 1});
                         OpenList::Entry folder; folder.name = name; folder.remotePath = full;
-                        folder.relativePath = full.mid(remoteRoot(module).size() + 1);
-                        folder.modified = o.value("modified").toString(); folder.module = module; folder.directory = true;
+                        folder.relativePath = full.mid(remoteRoot().size() + 1);
+                        folder.modified = o.value("modified").toString(); folder.directory = true;
                         if (list.entries.size() < 50000) list.entries.append(folder);
                         else list.error = QStringLiteral("资源过多，列表不完整");
                     }
-                } else if (module || name.endsWith(".apk", Qt::CaseInsensitive)) {
+                } else {
                     OpenList::Entry entry;
                     entry.name = name; entry.remotePath = full;
-                    entry.relativePath = full.mid(remoteRoot(module).size() + 1);
+                    entry.relativePath = full.mid(remoteRoot().size() + 1);
                     entry.size = static_cast<qint64>(o.value("size").toDouble(-1));
-                    entry.modified = o.value("modified").toString(); entry.module = module;
+                    entry.modified = o.value("modified").toString();
                     if (list.entries.size() < 50000) list.entries.append(entry);
                     else list.error = QStringLiteral("文件过多，列表不完整");
                 }
@@ -219,14 +217,14 @@ void OpenListService::pump(bool module, quint64 generation) {
             const int total = data.value("total").toInt();
             if (!content.isEmpty() && page.page * 100 < total) list.pending.enqueue({page.path, page.page + 1, page.depth});
         }
-        pump(module, generation);
+        pump(generation);
     });
 }
 bool OpenListService::prepareFile() {
     const QStringList parts = m_entry.relativePath.split('/');
     if (parts.isEmpty()) return false;
     for (const auto &part : parts) if (!OpenList::safeComponent(part)) return false;
-    QString dir = QDir(m_root).filePath(m_entry.module ? QStringLiteral("模块") : QStringLiteral("软件"));
+    QString dir = QDir(m_root).filePath(QStringLiteral("软件"));
     for (int i = 0; i + 1 < parts.size(); ++i) dir += '/' + parts[i];
     if (!OpenList::safeDirectory(dir, true)) return false;
     const QString name = parts.last();
@@ -251,7 +249,7 @@ bool OpenListService::download(const OpenList::Entry &entry) {
     m_active = true; const auto generation = ++m_downloadGeneration;
     m_parallel = false; m_parallelFallback = false; m_segments.clear(); m_parallelReceived = 0;
     m_entry = entry; m_path.clear(); m_part.clear(); m_hash.reset(); m_expectedHash.clear();
-    if (!entry.remotePath.startsWith(remoteRoot(entry.module) + '/') || entry.remotePath != remoteRoot(entry.module) + '/' + entry.relativePath || !prepareFile()) {
+    if (!entry.remotePath.startsWith(remoteRoot() + '/') || entry.remotePath != remoteRoot() + '/' + entry.relativePath || !prepareFile()) {
         fail(QStringLiteral("下载目录不可用或文件路径不安全。")); return false;
     }
     auto req = request(QUrl(base + "/api/fs/get")); req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");

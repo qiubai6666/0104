@@ -18,7 +18,6 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QSplitter>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QTimer>
@@ -49,10 +48,10 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     connect(m_mtService,&MtManagerService::log,this,&OpenListWindow::log);
     connect(m_mtService,&MtManagerService::failed,this,[this](const QString &message) { if (!m_mtTask) return; m_mtTask=false; finish(message); });
     connect(m_mtService,&MtManagerService::ready,this,[this](const QString &version,const QString &file) { if (!m_mtTask) return; m_progress->setRange(0,100); m_progress->setValue(100); m_mtFile=file; log(QStringLiteral("MT 管理器下载完成（版本 %1），正在检测手机…").arg(version)); m_installer->inspectDevices(); });
-    connect(m_service,&OpenListService::listingReady,this,[this](bool module,const QList<OpenList::Entry> &entries,const QString &error) {
-        m_entries[module] = entries; render(module);
-        if (!error.isEmpty()) m_counts[module]->setText(error);
-        if (!error.isEmpty()) log((module ? QStringLiteral("Tools：") : QStringLiteral("软件：")) + error);
+    connect(m_service,&OpenListService::listingReady,this,[this](const QList<OpenList::Entry> &entries,const QString &error) {
+        m_entries = entries; render();
+        if (!error.isEmpty()) m_count->setText(error);
+        if (!error.isEmpty()) log(error);
         if (m_pending > 0 && --m_pending == 0 && !m_busy) { m_status->setText(QStringLiteral("资源读取完成；可多选后安装或传输到手机，双击文件直接安装")); m_refresh->setEnabled(true); }
     });
     connect(m_service,&OpenListService::progress,this,[this](qint64 received,qint64 total,double speed) {
@@ -133,36 +132,34 @@ void OpenListWindow::setupUi() {
     m_transferSelected->setObjectName("openListTransferSelected"); top->addWidget(m_transferSelected);
     m_installMt = new QPushButton(QStringLiteral("安装 MT 管理器"),this); m_installMt->setObjectName("openListInstallMt"); top->addWidget(m_installMt);
     layout->addLayout(top);
-    auto *split = new QSplitter(Qt::Horizontal,this); split->setChildrenCollapsible(false); layout->addWidget(split,3);
-    for (int i = 0; i < 2; ++i) {
-        auto *card = new QGroupBox(i ? QStringLiteral("Tools") : QStringLiteral("软件 · Android APK"),split);
-        card->setObjectName(i ? "openListToolsCard" : "openListAppsCard");
-        auto *inner = new QVBoxLayout(card); inner->setContentsMargins(12,18,12,10);
-        m_search[i] = new QLineEdit(card); m_search[i]->setPlaceholderText(QStringLiteral("搜索名称或子目录")); inner->addWidget(m_search[i]);
-        auto *navigation = new QHBoxLayout;
-        m_up[i] = new QPushButton(QStringLiteral("返回上级"), card);
-        m_up[i]->setObjectName(i ? "openListModulesUp" : "openListAppsUp");
-        m_directory[i] = new QLabel(QStringLiteral("根目录"), card);
-        m_directory[i]->setWordWrap(true);
-        navigation->addWidget(m_up[i]); navigation->addWidget(m_directory[i], 1); inner->addLayout(navigation);
-        connect(m_up[i], &QPushButton::clicked, this, [this, i] {
-            if (m_busy) return;
-            const int slash = m_currentDirectory[i].lastIndexOf('/');
-            m_currentDirectory[i] = slash < 0 ? QString() : m_currentDirectory[i].left(slash);
-            m_search[i]->clear(); render(i);
-        });
-        auto *table = new QTableWidget(card); m_tables[i] = table;
-        table->setObjectName(i ? "openListModules" : "openListApps");
-        table->setColumnCount(4); table->setHorizontalHeaderLabels({QStringLiteral("名称"),QStringLiteral("目录"),QStringLiteral("大小"),QStringLiteral("更新时间")});
-        table->setSelectionBehavior(QAbstractItemView::SelectRows); table->setSelectionMode(QAbstractItemView::ExtendedSelection);
-        table->setEditTriggers(QAbstractItemView::NoEditTriggers); table->setAlternatingRowColors(true); table->setWordWrap(false);
-        table->verticalHeader()->hide(); table->verticalHeader()->setDefaultSectionSize(32);
-        table->horizontalHeader()->setSectionResizeMode(0,QHeaderView::Stretch);
-        table->setColumnWidth(1,65); table->setColumnWidth(2,65); table->setColumnWidth(3,100);
-        inner->addWidget(table,1); m_counts[i] = new QLabel(QStringLiteral("正在读取…"),card); inner->addWidget(m_counts[i]);
-        connect(m_search[i],&QLineEdit::textChanged,this,[this,i] { render(i); });
-        connect(table,&QTableWidget::cellDoubleClicked,this,[this,i](int row,int) { activate(i,row); });
-    }
+    auto *card = new QGroupBox(QStringLiteral("秋白工作室 · 资源列表"),this);
+    card->setObjectName("openListFilesCard");
+    auto *inner = new QVBoxLayout(card); inner->setContentsMargins(12,18,12,10);
+    m_search = new QLineEdit(card); m_search->setPlaceholderText(QStringLiteral("搜索名称或子目录")); inner->addWidget(m_search);
+    auto *navigation = new QHBoxLayout;
+    m_up = new QPushButton(QStringLiteral("返回上级"), card);
+    m_up->setObjectName("openListUp");
+    m_directory = new QLabel(QStringLiteral("根目录"), card);
+    m_directory->setWordWrap(true);
+    navigation->addWidget(m_up); navigation->addWidget(m_directory, 1); inner->addLayout(navigation);
+    connect(m_up, &QPushButton::clicked, this, [this] {
+        if (m_busy) return;
+        const int slash = m_currentDirectory.lastIndexOf('/');
+        m_currentDirectory = slash < 0 ? QString() : m_currentDirectory.left(slash);
+        m_search->clear(); render();
+    });
+    auto *table = new QTableWidget(card); m_table = table;
+    table->setObjectName("openListFiles");
+    table->setColumnCount(4); table->setHorizontalHeaderLabels({QStringLiteral("名称"),QStringLiteral("目录"),QStringLiteral("大小"),QStringLiteral("更新时间")});
+    table->setSelectionBehavior(QAbstractItemView::SelectRows); table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers); table->setAlternatingRowColors(true); table->setWordWrap(false);
+    table->verticalHeader()->hide(); table->verticalHeader()->setDefaultSectionSize(32);
+    table->horizontalHeader()->setSectionResizeMode(0,QHeaderView::Stretch);
+    table->setColumnWidth(1,110); table->setColumnWidth(2,80); table->setColumnWidth(3,120);
+    inner->addWidget(table,1); m_count = new QLabel(QStringLiteral("正在读取…"),card); inner->addWidget(m_count);
+    connect(m_search,&QLineEdit::textChanged,this,[this] { render(); });
+    connect(table,&QTableWidget::cellDoubleClicked,this,[this](int row,int) { activate(row); });
+    layout->addWidget(card,3);
     m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选文件或文件夹后安装或传输；传输至内部存储根目录，不安装"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
     auto *progress = new QHBoxLayout; m_progress = new QProgressBar(this); m_progress->setValue(0); progress->addWidget(m_progress,1);
     m_cancel = new QPushButton(QStringLiteral("取消下载"),this); m_cancel->setEnabled(false);
@@ -194,19 +191,19 @@ void OpenListWindow::setupUi() {
 }
 void OpenListWindow::refresh() {
     if (m_busy) return;
-    m_pending = 2; m_refresh->setEnabled(false); m_status->setText(QStringLiteral("正在读取资源…"));
-    for (int i=0;i<2;++i) { m_currentDirectory[i].clear(); m_entries[i].clear(); render(i); m_counts[i]->setText(QStringLiteral("正在读取…")); }
+    m_pending = 1; m_refresh->setEnabled(false); m_status->setText(QStringLiteral("正在读取资源…"));
+    m_currentDirectory.clear(); m_entries.clear(); render(); m_count->setText(QStringLiteral("正在读取…"));
     m_service->refresh();
 }
-void OpenListWindow::render(bool module) {
-    auto *table = m_tables[module]; table->setSortingEnabled(false); table->setRowCount(0);
-    const auto filter = m_search[module]->text().trimmed();
-    m_up[module]->setEnabled(!m_busy && !m_currentDirectory[module].isEmpty());
-    m_directory[module]->setText(m_currentDirectory[module].isEmpty() ? QStringLiteral("根目录") : m_currentDirectory[module]);
-    for (int index=0;index<m_entries[module].size();++index) {
-        const auto &entry = m_entries[module][index];
+void OpenListWindow::render() {
+    auto *table = m_table; table->setSortingEnabled(false); table->setRowCount(0);
+    const auto filter = m_search->text().trimmed();
+    m_up->setEnabled(!m_busy && !m_currentDirectory.isEmpty());
+    m_directory->setText(m_currentDirectory.isEmpty() ? QStringLiteral("根目录") : m_currentDirectory);
+    for (int index=0;index<m_entries.size();++index) {
+        const auto &entry = m_entries[index];
         const QString parent = entry.relativePath.contains('/') ? entry.relativePath.left(entry.relativePath.lastIndexOf('/')) : QString();
-        if (filter.isEmpty() && parent != m_currentDirectory[module]) continue;
+        if (filter.isEmpty() && parent != m_currentDirectory) continue;
         if (!filter.isEmpty() && !entry.relativePath.contains(filter,Qt::CaseInsensitive)) continue;
         const int row = table->rowCount(); table->insertRow(row);
         auto *name = new QTableWidgetItem(entry.name);
@@ -230,44 +227,39 @@ void OpenListWindow::render(bool module) {
         table->setItem(row,3,new QTableWidgetItem(date.isValid() ? date.toLocalTime().toString("yyyy-MM-dd HH:mm") : QStringLiteral("未知")));
         for (int col=1;col<4;++col) table->item(row,col)->setToolTip(table->item(row,col)->text());
     }
-    if (table->rowCount() == 0) m_counts[module]->setText(filter.isEmpty() ? QStringLiteral("暂无资源") : QStringLiteral("没有匹配的资源"));
-    else m_counts[module]->setText(QStringLiteral("%1 项 · 选中文件夹后可安装其中 APK / ZIP / SH 或传输全部文件").arg(table->rowCount()));
+    if (table->rowCount() == 0) m_count->setText(filter.isEmpty() ? QStringLiteral("暂无资源") : QStringLiteral("没有匹配的资源"));
+    else m_count->setText(QStringLiteral("%1 项 · 选中文件夹后可安装其中 APK / ZIP / SH 或传输全部文件").arg(table->rowCount()));
 }
-void OpenListWindow::activate(bool module,int row) {
-    if (m_busy || row < 0 || row >= m_tables[module]->rowCount()) return;
-    const int index = m_tables[module]->item(row,0)->data(Qt::UserRole).toInt();
-    if (index < 0 || index >= m_entries[module].size()) return;
-    const auto entry = m_entries[module][index];
+void OpenListWindow::activate(int row) {
+    if (m_busy || row < 0 || row >= m_table->rowCount()) return;
+    const int index = m_table->item(row,0)->data(Qt::UserRole).toInt();
+    if (index < 0 || index >= m_entries.size()) return;
+    const auto entry = m_entries[index];
     if (entry.directory) {
-        m_currentDirectory[module] = entry.relativePath; m_search[module]->clear(); render(module); return;
+        m_currentDirectory = entry.relativePath; m_search->clear(); render(); return;
     }
     startBatch({entry});
 }
 void OpenListWindow::appendSelection(const OpenList::Entry &selection, QList<OpenList::Entry> &expanded, QSet<QString> &paths) const {
-    const int category = selection.module ? 1 : 0;
     if (selection.directory) {
         const QString prefix = selection.relativePath + QStringLiteral("/");
-        for (const auto &entry : m_entries[category]) {
+        for (const auto &entry : m_entries) {
             if (!entry.directory && entry.relativePath.startsWith(prefix)) {
-                const QString key = QString::number(entry.module) + entry.remotePath;
-                if (!paths.contains(key)) { paths.insert(key); expanded.append(entry); }
+                if (!paths.contains(entry.remotePath)) { paths.insert(entry.remotePath); expanded.append(entry); }
             }
         }
         return;
     }
-    const QString key = QString::number(selection.module) + selection.remotePath;
-    if (!paths.contains(key)) { paths.insert(key); expanded.append(selection); }
+    if (!paths.contains(selection.remotePath)) { paths.insert(selection.remotePath); expanded.append(selection); }
 }
 void OpenListWindow::startSelection(bool transferOnly) {
     if (m_busy) return;
     QList<OpenList::Entry> selected;
-    for (int category = 0; category < 2; ++category) {
-        for (int row = 0; row < m_tables[category]->rowCount(); ++row) {
-            if (!m_tables[category]->item(row,0)->isSelected()) continue;
-            const int index = m_tables[category]->item(row,0)->data(Qt::UserRole).toInt();
-            if (index >= 0 && index < m_entries[category].size())
-                selected.append(m_entries[category][index]);
-        }
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        if (!m_table->item(row,0)->isSelected()) continue;
+        const int index = m_table->item(row,0)->data(Qt::UserRole).toInt();
+        if (index >= 0 && index < m_entries.size())
+            selected.append(m_entries[index]);
     }
     if (selected.isEmpty()) log(QStringLiteral("请先选择文件或文件夹；按 Ctrl / Shift 可多选。"));
     else startBatch(selected,transferOnly);
@@ -330,11 +322,11 @@ void OpenListWindow::advanceBatch() {
 }
 void OpenListWindow::setBusy(bool busy) {
     m_busy = busy; m_refresh->setEnabled(!busy && m_pending == 0); m_installSelected->setEnabled(!busy); m_transferSelected->setEnabled(!busy); m_installMt->setEnabled(!busy);
-    for (int i=0;i<2;++i) { m_tables[i]->setEnabled(!busy); m_search[i]->setEnabled(!busy); m_up[i]->setEnabled(!busy && !m_currentDirectory[i].isEmpty()); }
+    m_table->setEnabled(!busy); m_search->setEnabled(!busy); m_up->setEnabled(!busy && !m_currentDirectory.isEmpty());
     m_cancel->setEnabled(busy && m_downloading);
 }
 void OpenListWindow::finish(const QString &message,bool ok) {
-    for (auto *table : m_tables) table->clearSelection();
+    m_table->clearSelection();
     m_downloading = false; m_queue.clear(); m_downloaded.clear(); setBusy(false); m_progress->setRange(0,100); m_progress->setValue(ok ? 100 : 0);
     m_status->setText(OpenList::redact(message)); log(message); updateDevice();
 }

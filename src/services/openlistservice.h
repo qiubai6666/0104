@@ -16,7 +16,6 @@ namespace OpenList {
 struct Entry {
     QString name, relativePath, remotePath, modified;
     qint64 size = -1;
-    bool module = false; // Source category: Tools (/local/模块), not the installation file type.
     bool directory = false;
 };
 QString redact(QString text);
@@ -44,7 +43,7 @@ public:
     static bool https(const QUrl &url);
     static QString sha256(const QJsonObject &metadata);
 signals:
-    void listingReady(bool module, const QList<OpenList::Entry> &entries, const QString &error);
+    void listingReady(const QList<OpenList::Entry> &entries, const QString &error);
     void progress(qint64 received, qint64 total, double bytesPerSecond);
     void ready(const OpenList::Entry &entry, const QString &file);
     void failed(const QString &message);
@@ -58,7 +57,7 @@ private:
         QString error;
         int requests = 0;
     };
-    void pump(bool module, quint64 generation);
+    void pump(quint64 generation);
     QNetworkRequest request(const QUrl &url) const;
     struct Segment {
         QPointer<QNetworkReply> reply;
@@ -82,7 +81,7 @@ private:
     qint64 m_parallelReceived = 0;
     bool m_parallel = false;
     bool m_parallelFallback = false;
-    Listing m_listing[2];
+    Listing m_listing;
     quint64 m_listGeneration = 0, m_downloadGeneration = 0;
     bool m_active = false;
     OpenList::Entry m_entry;
