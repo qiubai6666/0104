@@ -16,6 +16,8 @@
 #include <QLabel>
 #include <QGroupBox>
 #include <QLineEdit>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QScreen>
 #include <QProcess>
 #include <QThread>
@@ -1155,6 +1157,50 @@ private slots:
         QVERIFY(!service->download(dir)); QVERIFY(failed.isEmpty());
         w.close();
     }
+    void selectionPanelDoesNotOverlapActions() {
+        OpenListWindow w;
+        w.show();
+        QTest::qWait(20);
+        auto *service = w.findChild<OpenListService *>();
+        QVERIFY(service);
+        QList<OpenList::Entry> entries;
+        for (int i = 1; i <= 9; ++i) {
+            OpenList::Entry entry;
+            entry.name = QStringLiteral("selected-%1.apk").arg(i);
+            entry.relativePath = entry.name;
+            entry.remotePath = QStringLiteral("/A秋白工作室/") + entry.name;
+            entry.size = 1200000 + i;
+            entry.modified = QStringLiteral("2026-10-18T00:20:00.000");
+            entries.append(entry);
+        }
+        emit service->listingReady(entries, QString());
+        auto *table = w.findChild<QTableWidget *>("openListFiles");
+        QVERIFY(table);
+        QCOMPARE(table->rowCount(), 9);
+        table->selectAll();
+        QTest::qWait(30);
+        QCOMPARE(table->selectedItems().size(), 36);
+
+        auto *scroll = w.findChild<QScrollArea *>("openListSelectionScroll");
+        auto *target = w.findChild<QWidget *>("openListTargetStrip");
+        auto *install = w.findChild<QPushButton *>("openListInstallSelected");
+        auto *transfer = w.findChild<QPushButton *>("openListTransferSelected");
+        QVERIFY(scroll && target && install && transfer);
+        QVERIFY(scroll->isVisible());
+        QVERIFY(scroll->verticalScrollBar()->isVisible());
+        const QRect scrollRect(scroll->mapTo(&w, QPoint(0, 0)), scroll->size());
+        const QRect targetRect(target->mapTo(&w, QPoint(0, 0)), target->size());
+        const QRect installRect(install->mapTo(&w, QPoint(0, 0)), install->size());
+        const QRect transferRect(transfer->mapTo(&w, QPoint(0, 0)), transfer->size());
+        // 多选时已选列表必须被滚动区约束，不能与下方目标设备 / 操作按钮重叠。
+        QVERIFY(!scrollRect.intersects(targetRect));
+        QVERIFY(!scrollRect.intersects(installRect));
+        QVERIFY(!scrollRect.intersects(transferRect));
+        QVERIFY(targetRect.bottom() < installRect.top());
+        QVERIFY(installRect.bottom() < transferRect.top());
+        w.close();
+    }
+
     void uiSnapshot(){OpenListWindow w;w.show();QTest::qWait(30);auto *files=w.findChild<QTableWidget*>("openListFiles");QVERIFY(files);for(auto*label:w.findChildren<QLabel*>())QVERIFY(!label->text().contains("pan.xn--ucy"));OpenList::Entry e; e.name=QStringLiteral("很长的中文软件名称用于检查缩放和省略显示.apk"); e.relativePath=e.name; e.size=12345678;
         auto *service=w.findChild<OpenListService*>(); QVERIFY(service);
         auto tool=e; tool.name=QStringLiteral("中文工具脚本.sh"); tool.relativePath=tool.name;

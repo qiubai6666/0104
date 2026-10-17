@@ -348,8 +348,10 @@ void OpenListWindow::setupUi() {
     m_selectionScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_selectionScroll->setFocusPolicy(Qt::NoFocus);
     m_selectionScroll->setMinimumHeight(1); // 抵消 QScrollArea 默认 minimumSizeHint，避免抬高窗口最小高度。
+    m_selectionScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_selectionScroll->setMaximumHeight(0);
     m_selectionScroll->setWidget(m_selectionList);
-    idleLayout->addWidget(m_selectionScroll);
+    idleLayout->addWidget(m_selectionScroll, 1);
     m_selectionEmpty = new QFrame(m_idleView); m_selectionEmpty->setObjectName("openListSelectionEmpty");
     auto *selectionEmptyLayout = new QHBoxLayout(m_selectionEmpty); selectionEmptyLayout->setContentsMargins(9,6,9,6); selectionEmptyLayout->setSpacing(9);
     auto *emptyOrb = new QLabel(m_selectionEmpty); emptyOrb->setFixedSize(26,26); emptyOrb->setAlignment(Qt::AlignCenter);
@@ -366,6 +368,7 @@ void OpenListWindow::setupUi() {
     idleLayout->addLayout(emptyHolder);
 
     auto *targetStrip = new QFrame(m_idleView); targetStrip->setObjectName("openListTargetStrip");
+    targetStrip->setFixedHeight(40);
     auto *targetLayout = new QHBoxLayout(targetStrip); targetLayout->setContentsMargins(8,5,8,5); targetLayout->setSpacing(8);
     auto *targetIcon = new QLabel(targetStrip); targetIcon->setFixedSize(28,28); targetIcon->setAlignment(Qt::AlignCenter);
     targetIcon->setPixmap(tilePixmap("smartphone", QColor("#4C8EDC"), QColor("#FFFFFF"), QColor("#E2EEFB"), 28, 8));
@@ -391,7 +394,7 @@ void OpenListWindow::setupUi() {
     actionHint->setStyleSheet("font-size:9px;color:#9EACBB;");
     auto *hintHolder = new QVBoxLayout; hintHolder->setContentsMargins(0,5,0,0); hintHolder->addWidget(actionHint);
     idleLayout->addLayout(hintHolder);
-    panelLayout->addWidget(m_idleView);
+    panelLayout->addWidget(m_idleView, 1);
 
     // 执行视图：当前文件 + 进度 + 队列 + 取消。
     m_runView = new QWidget(panel); m_runView->setVisible(false);
@@ -430,7 +433,7 @@ void OpenListWindow::setupUi() {
     runNote->setStyleSheet("font-size:9px;color:#93A5B8;"); runNote->setWordWrap(true);
     auto *noteHolder = new QVBoxLayout; noteHolder->setContentsMargins(0,9,0,0); noteHolder->addWidget(runNote);
     runLayout->addLayout(noteHolder);
-    panelLayout->addWidget(m_runView);
+    panelLayout->addWidget(m_runView, 1);
 
     // 结束视图：成功 / 失败徽章 + 结果。
     m_successView = new QWidget(panel); m_successView->setVisible(false);
@@ -449,21 +452,9 @@ void OpenListWindow::setupUi() {
     successLayout->addSpacing(4); successLayout->addWidget(m_successMessage);
     successLayout->addSpacing(9); successLayout->addWidget(m_successStats);
     successLayout->addSpacing(12); successLayout->addWidget(m_backToSelection);
-    panelLayout->addWidget(m_successView);
+    panelLayout->addWidget(m_successView, 1);
 
-    // 水印 + 分隔线 + MT 行 + 最近动态。
-    panelLayout->addStretch(1);
-    auto *watermark = new QWidget(panel);
-    auto *wmLayout = new QVBoxLayout(watermark); wmLayout->setContentsMargins(0,0,0,0); wmLayout->setSpacing(5);
-    auto *wmBadge = new QLabel(watermark); wmBadge->setFixedSize(26,26); wmBadge->setAlignment(Qt::AlignCenter);
-    wmBadge->setPixmap(tilePixmap("cloud", QColor("#79ADE2"), QColor("#EFF6FF"), QColor("#CBE0F7"), 26, 9));
-    auto *wmText = new QLabel(QStringLiteral("秋白工作室"), watermark);
-    QFont wmFont = wmText->font(); wmFont.setPixelSize(12); wmFont.setBold(true);
-    wmFont.setLetterSpacing(QFont::AbsoluteSpacing, 3.8);
-    wmText->setFont(wmFont); wmText->setStyleSheet("color:#A5C8EA;");
-    wmLayout->addWidget(wmBadge,0,Qt::AlignHCenter); wmLayout->addWidget(wmText,0,Qt::AlignHCenter);
-    panelLayout->addWidget(watermark);
-    panelLayout->addStretch(1);
+    // 分隔线 + MT 行 + 最近动态；当前视图占满剩余高度，避免固定高度列表与下方控件重叠。
     auto *divider = new QFrame(panel); divider->setFixedHeight(1); divider->setStyleSheet("background:#EEF4FA;");
     panelLayout->addSpacing(10); panelLayout->addWidget(divider);
     m_installMt = new QPushButton(panel); m_installMt->setObjectName("openListInstallMt");
@@ -1033,12 +1024,17 @@ void OpenListWindow::updateSelectionPanel() {
         rowLayout->addWidget(sizeLabel);
         listLayout->addWidget(row);
     }
-    // 滚动区高度：内容不足 5 行时贴合内容，超出则固定 5 行高度并滚动。
+    // 已选列表高度由布局分配：空间充足时最多显示三行完整条目，
+    // 空间不足时缩小滚动；不能固定高度，否则会与下方控件重叠。
     m_selectionScroll->setVisible(!picked.isEmpty());
-    const int rows = qMin(picked.size(), 5);
     if (!picked.isEmpty()) {
-        const int contentH = rows * 26 + (rows - 1) * 4 + 5;
-        m_selectionScroll->setFixedHeight(qMin(contentH, 5 * 26 + 4 * 4 + 5));
+        constexpr int MaxVisibleRows = 3;
+        const int visibleRows = qMin(picked.size(), MaxVisibleRows);
+        const int naturalHeight = visibleRows * 26 + (visibleRows - 1) * 4 + 5;
+        m_selectionScroll->setMaximumHeight(naturalHeight);
+        m_selectionScroll->setMinimumHeight(1);
+    } else {
+        m_selectionScroll->setMaximumHeight(0);
     }
     // 全选本页 chip 高亮：当前目录内所有文件行都被选中时置亮。
     int fileRows = 0, selectedRows = 0;
