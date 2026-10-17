@@ -65,7 +65,6 @@ private:
     QList<LogEntry> m_logEntries;
     int m_logFilter = 0;
     QList<QPushButton*> m_logFilters;
-    QIcon m_boxOn, m_boxOff;              // 文件行自绘选中标记。
     void setupUi();
     void refresh();
     void render();
@@ -82,7 +81,6 @@ private:
     // 新增 UI 辅助。
     QPixmap glyphPixmap(const QString &name, const QColor &color, int size) const;
     QPixmap tilePixmap(const QString &name, const QColor &glyph, const QColor &bg, const QColor &border, int size, int radius) const;
-    QPixmap boxMark(bool checked) const;
     QPixmap typeTilePixmap(const OpenList::Entry &entry, int size) const;
     void syncChecks();
     void updateSelectionPanel();

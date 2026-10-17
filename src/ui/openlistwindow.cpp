@@ -161,9 +161,10 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
 }
 void OpenListWindow::setupUi() {
     setObjectName("openListWindow");
-    setMinimumSize(1000, 700); resize(1000, 700);
+    // 与欧加线刷 / 小米线刷窗口保持一致的打开尺寸。
+    const QSize initialSize(qRound(866 * 0.9), qRound(729 * 0.9));
+    setMinimumSize(initialSize); resize(initialSize);
     QFont font(QStringLiteral("Microsoft YaHei UI")); font.setPixelSize(12); setFont(font);
-    m_boxOn = QIcon(boxMark(true)); m_boxOff = QIcon(boxMark(false));
 
     auto *rootLayout = new QVBoxLayout(this); rootLayout->setContentsMargins(0,0,0,0); rootLayout->setSpacing(0);
 
@@ -209,7 +210,7 @@ void OpenListWindow::setupUi() {
     card->setObjectName("openListFilesCard");
     auto *cardLayout = new QVBoxLayout(card); cardLayout->setContentsMargins(1,1,1,1); cardLayout->setSpacing(0);
     auto *head = new QFrame(card); head->setObjectName("openListBrowserHead");
-    auto *headLayout = new QVBoxLayout(head); headLayout->setContentsMargins(15,15,16,12); headLayout->setSpacing(11);
+    auto *headLayout = new QVBoxLayout(head); headLayout->setContentsMargins(13,12,13,10); headLayout->setSpacing(10);
     auto *crumbRow = new QHBoxLayout; crumbRow->setContentsMargins(0,0,0,0); crumbRow->setSpacing(10);
     m_up = new QPushButton(head); m_up->setObjectName("openListUp");
     m_up->setFixedSize(28,28); m_up->setIconSize(QSize(14,14));
@@ -219,7 +220,7 @@ void OpenListWindow::setupUi() {
     m_directory->setStyleSheet("font-size:12.5px;font-weight:600;color:#2A3C51;");
     m_pill = new QLabel(QStringLiteral("—"), head); m_pill->setObjectName("openListCountPill");
     crumbRow->addWidget(m_up); crumbRow->addWidget(m_directory); crumbRow->addStretch(); crumbRow->addWidget(m_pill);
-    auto *searchBox = new QFrame(head); searchBox->setObjectName("openListSearchBox"); searchBox->setFixedHeight(42);
+    auto *searchBox = new QFrame(head); searchBox->setObjectName("openListSearchBox"); searchBox->setFixedHeight(38);
     auto *searchLayout = new QHBoxLayout(searchBox); searchLayout->setContentsMargins(12,0,9,0); searchLayout->setSpacing(8);
     auto *searchIcon = new QLabel(searchBox); searchIcon->setFixedSize(15,15);
     searchIcon->setPixmap(glyphPixmap("search", QColor("#9AABBE"), 15));
@@ -246,24 +247,23 @@ void OpenListWindow::setupUi() {
 
     auto *table = new QTableWidget(card); m_table = table;
     table->setObjectName("openListFiles");
-    table->setColumnCount(3);
-    table->setHorizontalHeaderLabels({QStringLiteral("资源名称"),QStringLiteral("大小"),QStringLiteral("更新")});
+    // 与旧版一致的 4 列：名称（类型图标 + 原生复选框）/ 目录 / 大小 / 更新。
+    table->setColumnCount(4);
+    table->setHorizontalHeaderLabels({QStringLiteral("名称"),QStringLiteral("目录"),QStringLiteral("大小"),QStringLiteral("更新")});
     table->horizontalHeader()->hide(); table->verticalHeader()->hide();
-    table->verticalHeader()->setDefaultSectionSize(54);
+    table->verticalHeader()->setDefaultSectionSize(44);
     table->setSelectionBehavior(QAbstractItemView::SelectRows); table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers); table->setWordWrap(false);
     table->setShowGrid(false); table->setFrameShape(QFrame::NoFrame);
-    table->setIconSize(QSize(34,34));
+    table->setIconSize(QSize(20,20));
     table->horizontalHeader()->setSectionResizeMode(0,QHeaderView::Stretch);
-    table->setColumnWidth(1,96); table->setColumnWidth(2,106);
+    table->setColumnWidth(1,96); table->setColumnWidth(2,64); table->setColumnWidth(3,88);
     cardLayout->addWidget(table,1);
 
     auto *cardFooter = new QFrame(card); cardFooter->setObjectName("openListCardFooter"); cardFooter->setFixedHeight(38);
     auto *cardFooterLayout = new QHBoxLayout(cardFooter); cardFooterLayout->setContentsMargins(16,0,16,0); cardFooterLayout->setSpacing(8);
     m_count = new QLabel(QStringLiteral("正在读取…"), cardFooter); m_count->setStyleSheet("font-size:10px;color:#93A4B6;");
-    auto *cardTip = new QLabel(QStringLiteral("点击文件夹进入 · 支持 APK / ZIP / SH"), cardFooter);
-    cardTip->setStyleSheet("font-size:10px;color:#93A4B6;");
-    cardFooterLayout->addWidget(m_count); cardFooterLayout->addStretch(); cardFooterLayout->addWidget(cardTip);
+    cardFooterLayout->addWidget(m_count); cardFooterLayout->addStretch();
     cardLayout->addWidget(cardFooter);
 
     connect(m_search,&QLineEdit::textChanged,this,[this,searchKbd] { searchKbd->setVisible(m_search->text().isEmpty()); render(); });
@@ -282,6 +282,22 @@ void OpenListWindow::setupUi() {
         }
         syncChecks(); updateCount();
     });
+    // 点击原生复选框：把勾选状态同步为该行的选中状态（选中集合仍是唯一真源）。
+    connect(table,&QTableWidget::itemChanged,this,[this](QTableWidgetItem *item) {
+        if (!item || item->column() != 0) return;
+        const int index = item->data(Qt::UserRole).toInt();
+        if (index < 0 || index >= m_entries.size()) return;
+        if (m_entries[index].directory) return;
+        const bool checked = item->checkState() == Qt::Checked;
+        if (checked != item->isSelected()) {
+            m_table->blockSignals(true);
+            item->setSelected(checked);
+            m_table->blockSignals(false);
+            if (checked) m_selectedPaths.insert(m_entries[index].remotePath);
+            else m_selectedPaths.remove(m_entries[index].remotePath);
+            updateCount(); updateSelectionPanel();
+        }
+    });
     connect(m_up, &QPushButton::clicked, this, [this] {
         if (m_busy) return;
         const int slash = m_currentDirectory.lastIndexOf('/');
@@ -294,14 +310,14 @@ void OpenListWindow::setupUi() {
     bodyLayout->addWidget(card,1);
 
     // ---------- 右侧任务面板 ----------
-    auto *panel = new QFrame(this); panel->setObjectName("openListTaskPanel"); panel->setFixedWidth(304);
-    auto *panelLayout = new QVBoxLayout(panel); panelLayout->setContentsMargins(17,17,17,14); panelLayout->setSpacing(0);
+    auto *panel = new QFrame(this); panel->setObjectName("openListTaskPanel"); panel->setFixedWidth(280);
+    auto *panelLayout = new QVBoxLayout(panel); panelLayout->setContentsMargins(15,14,15,12); panelLayout->setSpacing(0);
     auto *taskHead = new QHBoxLayout; taskHead->setContentsMargins(0,0,0,0); taskHead->setSpacing(8);
-    auto *taskTitleBox = new QVBoxLayout; taskTitleBox->setContentsMargins(0,0,0,0); taskTitleBox->setSpacing(5);
+    auto *taskTitleBox = new QVBoxLayout; taskTitleBox->setContentsMargins(0,0,0,0); taskTitleBox->setSpacing(3);
     auto *taskOverline = new QLabel(QStringLiteral("当前任务"), panel);
     taskOverline->setStyleSheet("font-size:9px;font-weight:700;color:#95A7BA;");
     auto *taskTitle = new QLabel(QStringLiteral("安装任务"), panel);
-    taskTitle->setStyleSheet("font-size:15px;font-weight:600;color:#26394F;");
+    taskTitle->setStyleSheet("font-size:13px;font-weight:600;color:#26394F;");
     taskTitleBox->addWidget(taskOverline); taskTitleBox->addWidget(taskTitle);
     m_statusPill = new QLabel(panel); m_statusPill->setObjectName("openListStatusPill"); m_statusPill->setFixedHeight(23);
     m_statusPill->setAlignment(Qt::AlignCenter);
@@ -312,7 +328,7 @@ void OpenListWindow::setupUi() {
     // 空闲视图：已选资源 + 目标设备 + 主按钮。
     m_idleView = new QWidget(panel);
     auto *idleLayout = new QVBoxLayout(m_idleView); idleLayout->setContentsMargins(0,0,0,0); idleLayout->setSpacing(0);
-    auto *selectionHead = new QHBoxLayout; selectionHead->setContentsMargins(0,10,0,0); selectionHead->setSpacing(7);
+    auto *selectionHead = new QHBoxLayout; selectionHead->setContentsMargins(0,6,0,0); selectionHead->setSpacing(7);
     auto *selectionLabel = new QLabel(QStringLiteral("已选资源"), m_idleView);
     selectionLabel->setStyleSheet("font-size:9.5px;font-weight:700;color:#8295A9;");
     m_selectionMeta = new QLabel(m_idleView); m_selectionMeta->setStyleSheet("font-size:9.5px;color:#A0AFBE;");
@@ -321,13 +337,13 @@ void OpenListWindow::setupUi() {
     selectionHead->addWidget(selectionLabel); selectionHead->addWidget(m_selectionMeta,1); selectionHead->addWidget(m_clearSelection);
     idleLayout->addLayout(selectionHead);
     m_selectionList = new QWidget(m_idleView);
-    auto *selectionListLayout = new QVBoxLayout(m_selectionList); selectionListLayout->setContentsMargins(0,7,0,0); selectionListLayout->setSpacing(4);
+    auto *selectionListLayout = new QVBoxLayout(m_selectionList); selectionListLayout->setContentsMargins(0,5,0,0); selectionListLayout->setSpacing(4);
     idleLayout->addWidget(m_selectionList);
     m_selectionEmpty = new QFrame(m_idleView); m_selectionEmpty->setObjectName("openListSelectionEmpty");
-    auto *selectionEmptyLayout = new QHBoxLayout(m_selectionEmpty); selectionEmptyLayout->setContentsMargins(10,7,10,7); selectionEmptyLayout->setSpacing(9);
-    auto *emptyOrb = new QLabel(m_selectionEmpty); emptyOrb->setFixedSize(30,30); emptyOrb->setAlignment(Qt::AlignCenter);
-    emptyOrb->setStyleSheet("background:#F0F8FF;border:1px dashed #CFE4FA;border-radius:9px;");
-    emptyOrb->setPixmap(glyphPixmap("folder", QColor("#77A9DF"), 15));
+    auto *selectionEmptyLayout = new QHBoxLayout(m_selectionEmpty); selectionEmptyLayout->setContentsMargins(9,6,9,6); selectionEmptyLayout->setSpacing(9);
+    auto *emptyOrb = new QLabel(m_selectionEmpty); emptyOrb->setFixedSize(26,26); emptyOrb->setAlignment(Qt::AlignCenter);
+    emptyOrb->setStyleSheet("background:#F0F8FF;border:1px dashed #CFE4FA;border-radius:8px;");
+    emptyOrb->setPixmap(glyphPixmap("folder", QColor("#77A9DF"), 14));
     auto *emptyCopy = new QVBoxLayout; emptyCopy->setContentsMargins(0,0,0,0); emptyCopy->setSpacing(2);
     auto *emptyTitle = new QLabel(QStringLiteral("尚未选择文件"), m_selectionEmpty);
     emptyTitle->setStyleSheet("font-size:10px;font-weight:600;color:#71869B;");
@@ -339,7 +355,7 @@ void OpenListWindow::setupUi() {
     idleLayout->addLayout(emptyHolder);
 
     auto *targetStrip = new QFrame(m_idleView); targetStrip->setObjectName("openListTargetStrip");
-    auto *targetLayout = new QHBoxLayout(targetStrip); targetLayout->setContentsMargins(9,6,9,6); targetLayout->setSpacing(8);
+    auto *targetLayout = new QHBoxLayout(targetStrip); targetLayout->setContentsMargins(8,5,8,5); targetLayout->setSpacing(8);
     auto *targetIcon = new QLabel(targetStrip); targetIcon->setFixedSize(28,28); targetIcon->setAlignment(Qt::AlignCenter);
     targetIcon->setPixmap(tilePixmap("smartphone", QColor("#4C8EDC"), QColor("#FFFFFF"), QColor("#E2EEFB"), 28, 8));
     auto *targetCopy = new QVBoxLayout; targetCopy->setContentsMargins(0,0,0,0); targetCopy->setSpacing(1);
@@ -350,7 +366,7 @@ void OpenListWindow::setupUi() {
     m_targetState = new QLabel(targetStrip);
     targetLayout->addWidget(targetIcon); targetLayout->addLayout(targetCopy);
     targetLayout->addStretch(); targetLayout->addWidget(m_targetState);
-    auto *targetHolder = new QVBoxLayout; targetHolder->setContentsMargins(0,11,0,0); targetHolder->addWidget(targetStrip);
+    auto *targetHolder = new QVBoxLayout; targetHolder->setContentsMargins(0,7,0,0); targetHolder->addWidget(targetStrip);
     idleLayout->addLayout(targetHolder);
 
     m_installSelected = new QPushButton(QStringLiteral("安装选中"), m_idleView);
@@ -358,11 +374,11 @@ void OpenListWindow::setupUi() {
     m_installSelected->setToolTip(QStringLiteral("安装 APK、模块 ZIP；SH 以 Root 执行，请仅运行信任的脚本。"));
     m_transferSelected = new QPushButton(QStringLiteral("传输到手机"), m_idleView);
     m_transferSelected->setObjectName("openListTransferSelected"); m_transferSelected->setCursor(Qt::PointingHandCursor);
-    idleLayout->addSpacing(10); idleLayout->addWidget(m_installSelected);
-    idleLayout->addSpacing(7); idleLayout->addWidget(m_transferSelected);
+    idleLayout->addSpacing(8); idleLayout->addWidget(m_installSelected);
+    idleLayout->addSpacing(6); idleLayout->addWidget(m_transferSelected);
     auto *actionHint = new QLabel(QStringLiteral("APK / ZIP 直接安装；SH 以 Root 执行，仅运行信任的脚本"), m_idleView);
     actionHint->setStyleSheet("font-size:9px;color:#9EACBB;");
-    auto *hintHolder = new QVBoxLayout; hintHolder->setContentsMargins(0,6,0,0); hintHolder->addWidget(actionHint);
+    auto *hintHolder = new QVBoxLayout; hintHolder->setContentsMargins(0,5,0,0); hintHolder->addWidget(actionHint);
     idleLayout->addLayout(hintHolder);
     panelLayout->addWidget(m_idleView);
 
@@ -428,8 +444,8 @@ void OpenListWindow::setupUi() {
     panelLayout->addStretch(1);
     auto *watermark = new QWidget(panel);
     auto *wmLayout = new QVBoxLayout(watermark); wmLayout->setContentsMargins(0,0,0,0); wmLayout->setSpacing(5);
-    auto *wmBadge = new QLabel(watermark); wmBadge->setFixedSize(32,32); wmBadge->setAlignment(Qt::AlignCenter);
-    wmBadge->setPixmap(tilePixmap("cloud", QColor("#79ADE2"), QColor("#EFF6FF"), QColor("#CBE0F7"), 32, 11));
+    auto *wmBadge = new QLabel(watermark); wmBadge->setFixedSize(26,26); wmBadge->setAlignment(Qt::AlignCenter);
+    wmBadge->setPixmap(tilePixmap("cloud", QColor("#79ADE2"), QColor("#EFF6FF"), QColor("#CBE0F7"), 26, 9));
     auto *wmText = new QLabel(QStringLiteral("秋白工作室"), watermark);
     QFont wmFont = wmText->font(); wmFont.setPixelSize(12); wmFont.setBold(true);
     wmFont.setLetterSpacing(QFont::AbsoluteSpacing, 3.8);
@@ -438,12 +454,12 @@ void OpenListWindow::setupUi() {
     panelLayout->addWidget(watermark);
     panelLayout->addStretch(1);
     auto *divider = new QFrame(panel); divider->setFixedHeight(1); divider->setStyleSheet("background:#EEF4FA;");
-    panelLayout->addSpacing(13); panelLayout->addWidget(divider);
+    panelLayout->addSpacing(10); panelLayout->addWidget(divider);
     m_installMt = new QPushButton(panel); m_installMt->setObjectName("openListInstallMt");
-    m_installMt->setFixedHeight(44); m_installMt->setCursor(Qt::PointingHandCursor); m_installMt->setFlat(true);
-    auto *mtLayout = new QHBoxLayout(m_installMt); mtLayout->setContentsMargins(7,8,10,8); mtLayout->setSpacing(9);
-    auto *mtIcon = new QLabel(m_installMt); mtIcon->setFixedSize(31,31); mtIcon->setAlignment(Qt::AlignCenter);
-    mtIcon->setPixmap(tilePixmap("zap", QColor("#D08115"), QColor("#FFFAF0"), QColor("#F7E7C7"), 31, 9));
+    m_installMt->setFixedHeight(40); m_installMt->setCursor(Qt::PointingHandCursor); m_installMt->setFlat(true);
+    auto *mtLayout = new QHBoxLayout(m_installMt); mtLayout->setContentsMargins(7,6,10,6); mtLayout->setSpacing(9);
+    auto *mtIcon = new QLabel(m_installMt); mtIcon->setFixedSize(28,28); mtIcon->setAlignment(Qt::AlignCenter);
+    mtIcon->setPixmap(tilePixmap("zap", QColor("#D08115"), QColor("#FFFAF0"), QColor("#F7E7C7"), 28, 8));
     auto *mtCopy = new QVBoxLayout; mtCopy->setContentsMargins(0,0,0,0); mtCopy->setSpacing(2);
     auto *mtTitle = new QLabel(QStringLiteral("安装 MT 管理器"), m_installMt);
     mtTitle->setStyleSheet("font-size:10.5px;font-weight:600;color:#566B80;");
@@ -454,10 +470,10 @@ void OpenListWindow::setupUi() {
     mtArrow->setPixmap(glyphPixmap("chevron-right", QColor("#B8C6D4"), 13));
     mtArrow->setStyleSheet("background:transparent;");
     mtLayout->addWidget(mtIcon); mtLayout->addLayout(mtCopy,1); mtLayout->addWidget(mtArrow);
-    panelLayout->addSpacing(7); panelLayout->addWidget(m_installMt);
+    panelLayout->addSpacing(6); panelLayout->addWidget(m_installMt);
 
     auto *recent = new QFrame(panel); recent->setObjectName("openListRecent");
-    auto *recentLayout = new QVBoxLayout(recent); recentLayout->setContentsMargins(9,7,9,7); recentLayout->setSpacing(4);
+    auto *recentLayout = new QVBoxLayout(recent); recentLayout->setContentsMargins(8,6,8,6); recentLayout->setSpacing(4);
     auto *recentHead = new QHBoxLayout; recentHead->setContentsMargins(0,0,0,0); recentHead->setSpacing(6);
     auto *recentLabel = new QLabel(QStringLiteral("最近动态"), recent);
     recentLabel->setStyleSheet("font-size:9px;font-weight:700;color:#8FA2B5;");
@@ -587,10 +603,10 @@ void OpenListWindow::setupUi() {
         QLabel#openListStatusPill { font-size:9.5px; font-weight:600; padding:0 9px; }
         QFrame#openListSelectionEmpty { border:1px dashed #DCE8F5; border-radius:10px; background:#FAFDFF; }
         QFrame#openListTargetStrip { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #F7FBFF,stop:1 #F4F9FF); border:1px solid #E9F2FB; border-radius:10px; }
-        QPushButton#openListInstallSelected { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #4B97FA,stop:0.54 #2F80ED,stop:1 #226EDB); color:#FFFFFF; border:1px solid #2C7CE9; border-radius:11px; min-height:40px; font-size:11.5px; font-weight:600; }
+        QPushButton#openListInstallSelected { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #4B97FA,stop:0.54 #2F80ED,stop:1 #226EDB); color:#FFFFFF; border:1px solid #2C7CE9; border-radius:10px; min-height:36px; font-size:11.5px; font-weight:600; }
         QPushButton#openListInstallSelected:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #5AA3FF,stop:0.54 #3B8BF2,stop:1 #2A77E3); }
         QPushButton#openListInstallSelected:disabled { background:#EFF4F9; color:#A6B5C4; border-color:#E7EEF6; }
-        QPushButton#openListTransferSelected, QPushButton#openListBackToSelection { background:#FFFFFF; color:#536A81; border:1px solid #E1EBF5; border-radius:10px; min-height:33px; font-size:10.5px; }
+        QPushButton#openListTransferSelected, QPushButton#openListBackToSelection { background:#FFFFFF; color:#536A81; border:1px solid #E1EBF5; border-radius:9px; min-height:30px; font-size:10.5px; }
         QPushButton#openListTransferSelected:hover, QPushButton#openListBackToSelection:hover { color:#2F80ED; border-color:#C2DCFA; background:#F8FBFF; }
         QPushButton#openListTransferSelected:disabled { color:#B3C0CD; background:#FAFCFE; border-color:#EDF2F7; }
         QPushButton#openListClearSelection { background:transparent; border:0; color:#92A3B5; font-size:9.5px; padding:2px 5px; border-radius:5px; }
@@ -651,8 +667,28 @@ void OpenListWindow::render() {
         if (!filter.isEmpty() && !entry.relativePath.contains(filter,Qt::CaseInsensitive)) continue;
         const int row = table->rowCount(); table->insertRow(row);
         auto *name = new QTableWidgetItem(entry.name);
+        // 目录行 accent 蓝文件夹图标；文件按类型着色（APK 绿 / ZIP 蓝 / SH 琥珀 / 其他墨灰）。
+        if (entry.directory) {
+            name->setIcon(glyphPixmap(QStringLiteral("folder"), QColor(QStringLiteral("#2F80ED")), 20));
+        } else {
+            const QString lower = entry.name.toLower();
+            QString tone = QStringLiteral("#647585");
+            if (lower.endsWith(QStringLiteral(".apk"))) tone = QStringLiteral("#16A34A");
+            else if (lower.endsWith(QStringLiteral(".zip"))) tone = QStringLiteral("#2F80ED");
+            else if (lower.endsWith(QStringLiteral(".sh"))) tone = QStringLiteral("#D97706");
+            name->setIcon(glyphPixmap(QStringLiteral("file"), QColor(tone), 20));
+        }
         name->setData(Qt::UserRole,index); name->setToolTip(entry.relativePath);
-        table->setItem(row,0,name); // 列0：勾选图标 + 名称文本（测试 rowOf 依赖列0文本）
+        if (!entry.directory) {
+            // 原生复选框（与欧加线刷一致），仅文件行可勾选。
+            name->setFlags(name->flags() | Qt::ItemIsUserCheckable);
+            name->setCheckState(m_selectedPaths.contains(entry.remotePath) ? Qt::Checked : Qt::Unchecked);
+        }
+        table->setItem(row,0,name);
+        QString dir = QFileInfo(entry.relativePath).path(); if (dir == QStringLiteral(".")) dir = QStringLiteral("根目录");
+        auto *dirItem = new QTableWidgetItem(dir);
+        dirItem->setForeground(QColor("#5E7287")); dirItem->setToolTip(dir);
+        table->setItem(row,1,dirItem);
         QString sizeText;
         if (entry.directory) {
             int children = 0;
@@ -669,18 +705,18 @@ void OpenListWindow::render() {
         sizeItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         sizeItem->setForeground(QColor("#5E7287"));
         sizeItem->setToolTip(sizeText);
-        table->setItem(row,1,sizeItem);
+        table->setItem(row,2,sizeItem);
         const auto date = QDateTime::fromString(entry.modified,Qt::ISODateWithMs);
         auto *dateItem = new QTableWidgetItem(date.isValid() ? date.toLocalTime().toString("MM-dd HH:mm") : QStringLiteral("—"));
         dateItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         dateItem->setForeground(QColor("#9BABBB"));
         if (date.isValid()) dateItem->setToolTip(date.toLocalTime().toString("yyyy-MM-dd HH:mm"));
-        table->setItem(row,2,dateItem);
+        table->setItem(row,3,dateItem);
         if (entry.directory) {
             // 文件夹仅支持双击进入，不可选中：进入目录永远不会被当作选择文件。
-            for (int col=0;col<3;++col) table->item(row,col)->setFlags(table->item(row,col)->flags() & ~Qt::ItemIsSelectable);
+            for (int col=0;col<4;++col) table->item(row,col)->setFlags(table->item(row,col)->flags() & ~Qt::ItemIsSelectable);
         } else if (m_selectedPaths.contains(entry.remotePath)) {
-            for (int col=0;col<3;++col) table->item(row,col)->setSelected(true);
+            for (int col=0;col<4;++col) table->item(row,col)->setSelected(true);
         }
     }
     table->blockSignals(false);
@@ -925,35 +961,16 @@ QPixmap OpenListWindow::typeTilePixmap(const OpenList::Entry &entry, int size) c
     return tilePixmap("file", QColor("#64778D"), QColor("#F6F9FC"), QColor("#E6EDF4"), size, radius);
 }
 
-QPixmap OpenListWindow::boxMark(bool checked) const {
-    const qreal dpr = devicePixelRatioF();
-    const int size = 19;
-    QPixmap canvas(qRound(size * dpr), qRound(size * dpr));
-    canvas.setDevicePixelRatio(dpr); canvas.fill(Qt::transparent);
-    QPainter painter(&canvas); painter.setRenderHint(QPainter::Antialiasing);
-    const QRectF rect(1, 1, size - 2, size - 2);
-    if (checked) {
-        painter.setPen(Qt::NoPen); painter.setBrush(QColor("#2F80ED"));
-        painter.drawRoundedRect(rect, 5.5, 5.5);
-        QPen pen(Qt::white, 2); pen.setCapStyle(Qt::RoundCap); pen.setJoinStyle(Qt::RoundJoin);
-        painter.setPen(pen); painter.setBrush(Qt::NoBrush);
-        QPainterPath path; path.moveTo(5.5, 9.8); path.lineTo(8.4, 12.6); path.lineTo(13.6, 6.8);
-        painter.drawPath(path);
-    } else {
-        painter.setBrush(Qt::white);
-        painter.setPen(QPen(QColor("#D8E4EF"), 1.5));
-        painter.drawRoundedRect(rect, 5.5, 5.5);
-    }
-    return canvas;
-}
-
 void OpenListWindow::syncChecks() {
+    // 勾选状态由行选中状态驱动（选中集合是唯一真源），blockSignals 防止 itemChanged 递归。
+    m_table->blockSignals(true);
     for (int row = 0; row < m_table->rowCount(); ++row) {
-        auto *nameItem = m_table->item(row, 0); // 列0：名称文本 + 勾选图标
+        auto *nameItem = m_table->item(row, 0);
         if (!nameItem) continue;
-        if (!(nameItem->flags() & Qt::ItemIsSelectable)) continue; // 文件夹行没有勾选标记。
-        nameItem->setIcon(nameItem->isSelected() ? m_boxOn : m_boxOff);
+        if (!nameItem->flags().testFlag(Qt::ItemIsUserCheckable)) continue; // 文件夹行没有复选框。
+        nameItem->setCheckState(nameItem->isSelected() ? Qt::Checked : Qt::Unchecked);
     }
+    m_table->blockSignals(false);
 }
 
 void OpenListWindow::updateSelectionPanel() {
