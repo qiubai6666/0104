@@ -159,6 +159,19 @@ void OpenListWindow::setupUi() {
     inner->addWidget(table,1); m_count = new QLabel(QStringLiteral("正在读取…"),card); inner->addWidget(m_count);
     connect(m_search,&QLineEdit::textChanged,this,[this] { render(); });
     connect(table,&QTableWidget::cellDoubleClicked,this,[this](int row,int) { activate(row); });
+    // 选中状态以 remotePath 集合为准：切换目录 / 搜索后重新渲染时回显，跨目录保留。
+    connect(table,&QTableWidget::itemSelectionChanged,this,[this] {
+        for (int row = 0; row < m_table->rowCount(); ++row) {
+            const auto *item = m_table->item(row,0);
+            if (!item) continue;
+            const int index = item->data(Qt::UserRole).toInt();
+            if (index < 0 || index >= m_entries.size()) continue;
+            const QString &path = m_entries[index].remotePath;
+            if (item->isSelected()) m_selectedPaths.insert(path);
+            else m_selectedPaths.remove(path);
+        }
+        updateCount();
+    });
     layout->addWidget(card,3);
     m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选文件或文件夹后安装或传输；传输至内部存储根目录，不安装"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
     auto *progress = new QHBoxLayout; m_progress = new QProgressBar(this); m_progress->setValue(0); progress->addWidget(m_progress,1);
@@ -192,11 +205,14 @@ void OpenListWindow::setupUi() {
 void OpenListWindow::refresh() {
     if (m_busy) return;
     m_pending = 1; m_refresh->setEnabled(false); m_status->setText(QStringLiteral("正在读取资源…"));
-    m_currentDirectory.clear(); m_entries.clear(); render(); m_count->setText(QStringLiteral("正在读取…"));
+    m_currentDirectory.clear(); m_entries.clear(); m_selectedPaths.clear();
+    render(); m_count->setText(QStringLiteral("正在读取…"));
     m_service->refresh();
 }
 void OpenListWindow::render() {
-    auto *table = m_table; table->setSortingEnabled(false); table->setRowCount(0);
+    auto *table = m_table; table->setSortingEnabled(false);
+    table->blockSignals(true);
+    table->setRowCount(0);
     const auto filter = m_search->text().trimmed();
     m_up->setEnabled(!m_busy && !m_currentDirectory.isEmpty());
     m_directory->setText(m_currentDirectory.isEmpty() ? QStringLiteral("根目录") : m_currentDirectory);
@@ -226,9 +242,16 @@ void OpenListWindow::render() {
         const auto date = QDateTime::fromString(entry.modified,Qt::ISODateWithMs);
         table->setItem(row,3,new QTableWidgetItem(date.isValid() ? date.toLocalTime().toString("yyyy-MM-dd HH:mm") : QStringLiteral("未知")));
         for (int col=1;col<4;++col) table->item(row,col)->setToolTip(table->item(row,col)->text());
+        if (m_selectedPaths.contains(entry.remotePath)) table->item(row,0)->setSelected(true);
     }
-    if (table->rowCount() == 0) m_count->setText(filter.isEmpty() ? QStringLiteral("暂无资源") : QStringLiteral("没有匹配的资源"));
-    else m_count->setText(QStringLiteral("%1 项 · 选中文件夹后可安装其中 APK / ZIP / SH 或传输全部文件").arg(table->rowCount()));
+    table->blockSignals(false);
+    updateCount();
+}
+void OpenListWindow::updateCount() {
+    const auto filter = m_search->text().trimmed();
+    if (m_table->rowCount() == 0) { m_count->setText(filter.isEmpty() ? QStringLiteral("暂无资源") : QStringLiteral("没有匹配的资源")); return; }
+    if (m_selectedPaths.isEmpty()) m_count->setText(QStringLiteral("%1 项 · 选中文件夹后可安装其中 APK / ZIP / SH 或传输全部文件").arg(m_table->rowCount()));
+    else m_count->setText(QStringLiteral("%1 项 · 已选 %2 项（切换目录后仍保留）").arg(m_table->rowCount()).arg(m_selectedPaths.size()));
 }
 void OpenListWindow::activate(int row) {
     if (m_busy || row < 0 || row >= m_table->rowCount()) return;
@@ -255,13 +278,9 @@ void OpenListWindow::appendSelection(const OpenList::Entry &selection, QList<Ope
 void OpenListWindow::startSelection(bool transferOnly) {
     if (m_busy) return;
     QList<OpenList::Entry> selected;
-    for (int row = 0; row < m_table->rowCount(); ++row) {
-        if (!m_table->item(row,0)->isSelected()) continue;
-        const int index = m_table->item(row,0)->data(Qt::UserRole).toInt();
-        if (index >= 0 && index < m_entries.size())
-            selected.append(m_entries[index]);
-    }
-    if (selected.isEmpty()) log(QStringLiteral("请先选择文件或文件夹；按 Ctrl / Shift 可多选。"));
+    for (const auto &entry : m_entries)
+        if (m_selectedPaths.contains(entry.remotePath)) selected.append(entry);
+    if (selected.isEmpty()) log(QStringLiteral("请先选择文件或文件夹；选择会跨目录保留，按 Ctrl / Shift 可多选。"));
     else startBatch(selected,transferOnly);
 }
 void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries,bool transferOnly) {
@@ -326,6 +345,7 @@ void OpenListWindow::setBusy(bool busy) {
     m_cancel->setEnabled(busy && m_downloading);
 }
 void OpenListWindow::finish(const QString &message,bool ok) {
+    m_selectedPaths.clear();
     m_table->clearSelection();
     m_downloading = false; m_queue.clear(); m_downloaded.clear(); setBusy(false); m_progress->setRange(0,100); m_progress->setValue(ok ? 100 : 0);
     m_status->setText(OpenList::redact(message)); log(message); updateDevice();

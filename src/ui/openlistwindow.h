@@ -31,6 +31,7 @@ private:
     QProgressBar *m_progress;
     QPlainTextEdit *m_log;
     QList<OpenList::Entry> m_entries;
+    QSet<QString> m_selectedPaths; // 跨目录保留的选中项（remotePath）。
     OpenList::Entry m_selected;
     struct Downloaded { OpenList::Entry entry; QString file; };
     QList<OpenList::Entry> m_queue;
@@ -52,6 +53,7 @@ private:
     void setBusy(bool busy);
     void finish(const QString &message, bool ok = false);
     void log(const QString &text);
+    void updateCount();
     void updateDevice();
 };
 #endif

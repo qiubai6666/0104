@@ -1056,6 +1056,72 @@ private slots:
         QVERIFY(table->selectedItems().isEmpty());
         QCOMPARE(QFileInfo::exists(dir.filePath(QStringLiteral("软件/folder/child.apk"))),transferOnly);
     }
+    void selectionPersistsAcrossFolders() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;
+        int downloads = 0; QSet<QString> requested;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &body) {
+            if (r.url().path() == "/api/fs/list") return new Reply(r, api({{"content", QJsonArray{}}, {"total", 0}}), 200);
+            if (r.url().path() == "/api/fs/get") {
+                ++downloads; requested.insert(body.value("path").toString());
+                return new Reply(r, api({{"raw_url", "https://files.example.com/" + body.value("path").toString().section('/', -1)}, {"size", 3}}), 200);
+            }
+            return new Reply(r, QByteArray("abc"), 200);
+        };
+        OpenListService service(nullptr, &network, dir.path()); Runner runner;
+        OpenListInstaller installer(nullptr, &runner, "fake-adb", "fake-7z");
+        OpenListWindow window(nullptr, &service, &installer);
+        QSignalSpy listed(&service, &OpenListService::listingReady);
+        QTRY_COMPARE(listed.size(), 1);
+        OpenList::Entry folderA; folderA.name = "A"; folderA.relativePath = "A";
+        folderA.remotePath = QStringLiteral("/A秋白工作室/A"); folderA.directory = true;
+        auto fileA = folderA; fileA.directory = false; fileA.name = "first.apk";
+        fileA.relativePath = "A/first.apk"; fileA.remotePath = QStringLiteral("/A秋白工作室/A/first.apk");
+        OpenList::Entry folderB; folderB.name = "B"; folderB.relativePath = "B";
+        folderB.remotePath = QStringLiteral("/A秋白工作室/B"); folderB.directory = true;
+        auto fileB = folderB; fileB.directory = false; fileB.name = "second.apk";
+        fileB.relativePath = "B/second.apk"; fileB.remotePath = QStringLiteral("/A秋白工作室/B/second.apk");
+        emit service.listingReady({folderA, fileA, folderB, fileB}, {});
+        auto *table = window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table);
+        QCOMPARE(table->rowCount(), 2); // 根目录仅显示两个文件夹，子文件按父目录过滤。
+        auto rowOf = [&](const QString &name) {
+            for (int row = 0; row < table->rowCount(); ++row)
+                if (table->item(row,0)->text() == name) return row;
+            return -1;
+        };
+        auto *up = window.findChild<QPushButton*>("openListUp"); QVERIFY(up);
+        // 进入 A 选择 first.apk，返回后进入 B 选择 second.apk：上次选择必须保留。
+        emit table->cellDoubleClicked(rowOf("A"), 0);
+        QCOMPARE(table->rowCount(), 1);
+        table->selectRow(0);
+        up->click(); QCOMPARE(table->rowCount(), 2);
+        emit table->cellDoubleClicked(rowOf("B"), 0);
+        QCOMPARE(table->rowCount(), 1);
+        table->selectRow(0);
+        // 返回再进入 A：重新渲染后 first.apk 仍处于选中（回显）。
+        up->click(); QCOMPARE(table->rowCount(), 2);
+        emit table->cellDoubleClicked(rowOf("A"), 0);
+        QCOMPARE(table->rowCount(), 1);
+        QVERIFY(table->item(rowOf("first.apk"),0)->isSelected());
+        auto *card = window.findChild<QGroupBox*>("openListFilesCard"); QVERIFY(card);
+        bool feedback = false;
+        for (auto *label : card->findChildren<QLabel*>()) if (label->text().contains(QStringLiteral("已选 2 项"))) feedback = true;
+        QVERIFY(feedback);
+        auto *button = window.findChild<QPushButton*>("openListInstallSelected"); QVERIFY(button);
+        button->click(); QVERIFY(window.isBusy()); QCOMPARE(runner.calls.size(), 1);
+        runner.respond("phone\tdevice");
+        QTRY_COMPARE(downloads, 2);
+        QVERIFY(requested.contains(QStringLiteral("/A秋白工作室/A/first.apk")));
+        QVERIFY(requested.contains(QStringLiteral("/A秋白工作室/B/second.apk")));
+        QTRY_COMPARE(runner.calls.size(), 2);
+        for (int i = 0; i < 2; ++i) {
+            runner.respond("phone\tdevice"); // Verify 阶段重新检测设备
+            runner.denyApkRoot();
+            QCOMPARE(runner.calls.last().args.mid(0,4), QStringList({"-s","phone","install","-r"}));
+            runner.respond("Success");
+            if (i + 1 < 2) QTRY_VERIFY(runner.active);
+        }
+        QTRY_VERIFY(!window.isBusy());
+    }
     void folderNavigationAndWindow() {
         QWidget launcher;
         OpenListWindow w(&launcher);
