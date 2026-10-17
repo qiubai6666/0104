@@ -493,8 +493,6 @@ private slots:
         QTest::newRow("tools-sh") << 1;
         QTest::newRow("tools-text-transfer") << 2;
         QTest::newRow("tools-text-install-rejected") << 3;
-        QTest::newRow("tools-folder-filter-install") << 4;
-        QTest::newRow("tools-folder-transfer-all") << 5;
     }
     void toolsSelection() {
         QFETCH(int,mode); QTemporaryDir dir; Network network; int downloads=0;
@@ -507,33 +505,26 @@ private slots:
         OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z"); OpenListWindow window(nullptr,&service,&installer);
         QSignalSpy listed(&service,&OpenListService::listingReady); QTRY_COMPARE(listed.size(),1);
         auto *card=window.findChild<QGroupBox*>("openListFilesCard"); QVERIFY(card); QCOMPARE(card->title(),QStringLiteral("秋白工作室 · 资源列表"));
-        OpenList::Entry folder; folder.directory=true; folder.name="folder"; folder.relativePath=folder.name; folder.remotePath=QStringLiteral("/A秋白工作室/folder");
-        auto file=folder; file.directory=false; file.name=mode==0 ? "app.apk" : mode==1 || mode>=4 ? "script.sh" : "readme.txt";
-        file.relativePath=mode>=4 ? "folder/"+file.name : file.name; file.remotePath=QStringLiteral("/A秋白工作室/")+file.relativePath;
-        auto text=file; text.name="readme.txt"; text.relativePath=mode>=4 ? "folder/readme.txt" : text.name; text.remotePath=QStringLiteral("/A秋白工作室/")+text.relativePath;
-        emit service.listingReady(mode>=4 ? QList<OpenList::Entry>{folder,file,text} : QList<OpenList::Entry>{file},{});
+        OpenList::Entry file; file.name=mode==0 ? "app.apk" : mode==1 ? "script.sh" : "readme.txt";
+        file.relativePath=file.name; file.remotePath=QStringLiteral("/A秋白工作室/")+file.relativePath;
+        emit service.listingReady(QList<OpenList::Entry>{file},{});
         auto *table=window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table); table->selectRow(0);
-        const bool transfer=mode==2 || mode==5;
+        const bool transfer=mode==2;
         auto *button=window.findChild<QPushButton*>(transfer ? "openListTransferSelected" : "openListInstallSelected"); QVERIFY(button);
         button->click(); if(mode==3) { QVERIFY(!window.isBusy()); QVERIFY(runner.calls.isEmpty()); QCOMPARE(downloads,0); return; }
         QVERIFY(window.isBusy()); button->click(); emit table->cellDoubleClicked(0,0); QCOMPARE(runner.calls.size(),1);
         runner.respond("phone\tdevice");
-        const int count=mode==5 ? 2 : 1;
-        QTRY_COMPARE(downloads,count); QTRY_COMPARE(runner.calls.size(),2);
-        for(int index=0;index<count;++index) {
-            runner.respond("phone\tdevice");
-            if(transfer) { runner.respond(""); QVERIFY(runner.calls.last().args.contains("push")); runner.respond("1 file pushed"); }
-            else if(mode==0) { runner.denyApkRoot(); QVERIFY(runner.calls.last().args.contains("install")); runner.respond("Success\n"); }
-            else {
-                runner.respond("0\n"); QVERIFY(runner.calls.last().args.contains("push")); runner.respond("1 file pushed");
-                const auto marker=QRegularExpression("OL_SCRIPT_SUCCESS_[a-f0-9]{32}").match(runner.calls.last().args.last()).captured();
-                QVERIFY(!marker.isEmpty()); runner.respond(marker+'\n'); runner.respond("");
-            }
-            if(index+1<count) QTRY_VERIFY(installer.busy());
+        QTRY_COMPARE(downloads,1); QTRY_COMPARE(runner.calls.size(),2);
+        runner.respond("phone\tdevice");
+        if(transfer) { runner.respond(""); QVERIFY(runner.calls.last().args.contains("push")); runner.respond("1 file pushed"); }
+        else if(mode==0) { runner.denyApkRoot(); QVERIFY(runner.calls.last().args.contains("install")); runner.respond("Success\n"); }
+        else {
+            runner.respond("0\n"); QVERIFY(runner.calls.last().args.contains("push")); runner.respond("1 file pushed");
+            const auto marker=QRegularExpression("OL_SCRIPT_SUCCESS_[a-f0-9]{32}").match(runner.calls.last().args.last()).captured();
+            QVERIFY(!marker.isEmpty()); runner.respond(marker+'\n'); runner.respond("");
         }
         QTRY_VERIFY(!window.isBusy()); QVERIFY(table->selectedItems().isEmpty());
         QCOMPARE(QFileInfo::exists(dir.filePath(QStringLiteral("软件/")+file.relativePath)),transfer);
-        QCOMPARE(QFileInfo::exists(dir.filePath(QStringLiteral("软件/")+text.relativePath)),transfer);
     }
     void listingFailureReported(){
         Network network;network.handler=[](const QNetworkRequest&r,const QJsonObject&){return new Reply(r,QByteArray("bad"),200);};
@@ -1005,12 +996,12 @@ private slots:
         QCOMPARE(QFileInfo::exists(firstFile),mode==1 || mode==4 || mode==7);
         QCOMPARE(QFileInfo::exists(secondFile),mode==4 || mode==7);
     }
-    void folderSelectionQueuesChildren_data() {
+    void fileSelectionInsideFolder_data() {
         QTest::addColumn<bool>("transferOnly");
-        QTest::newRow("install-folder") << false;
-        QTest::newRow("transfer-folder") << true;
+        QTest::newRow("install-file") << false;
+        QTest::newRow("transfer-file") << true;
     }
-    void folderSelectionQueuesChildren() {
+    void fileSelectionInsideFolder() {
         QFETCH(bool,transferOnly);
         QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;
         int downloads = 0;
@@ -1035,7 +1026,11 @@ private slots:
         emit service.listingReady({folder, child}, {});
         auto *table = window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table);
         QCOMPARE(table->rowCount(), 1);
-        table->selectRow(0);
+        // 文件夹行不可选中：只能双击进入，选中集合不会混入目录。
+        QVERIFY(!table->item(0,0)->flags().testFlag(Qt::ItemIsSelectable));
+        emit table->cellDoubleClicked(0, 0);
+        QCOMPARE(table->rowCount(), 1);
+        table->selectRow(0); // 选中文件夹内的 child.apk。
         auto *button = window.findChild<QPushButton*>(transferOnly ? "openListTransferSelected" : "openListInstallSelected"); QVERIFY(button);
         button->click(); QVERIFY(window.isBusy()); QCOMPARE(runner.calls.size(), 1);
         runner.respond("phone\tdevice");

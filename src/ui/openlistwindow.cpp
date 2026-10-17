@@ -166,6 +166,7 @@ void OpenListWindow::setupUi() {
             if (!item) continue;
             const int index = item->data(Qt::UserRole).toInt();
             if (index < 0 || index >= m_entries.size()) continue;
+            if (m_entries[index].directory) continue; // 文件夹不参与选中，避免双击进入被当作选择文件。
             const QString &path = m_entries[index].remotePath;
             if (item->isSelected()) m_selectedPaths.insert(path);
             else m_selectedPaths.remove(path);
@@ -173,7 +174,7 @@ void OpenListWindow::setupUi() {
         updateCount();
     });
     layout->addWidget(card,3);
-    m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选文件或文件夹后安装或传输；传输至内部存储根目录，不安装"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
+    m_status = new QLabel(QStringLiteral("Ctrl / Shift 多选文件后安装或传输；传输至内部存储根目录，不安装；双击文件夹进入"),this); m_status->setWordWrap(true); layout->addWidget(m_status);
     auto *progress = new QHBoxLayout; m_progress = new QProgressBar(this); m_progress->setValue(0); progress->addWidget(m_progress,1);
     m_cancel = new QPushButton(QStringLiteral("取消下载"),this); m_cancel->setEnabled(false);
     m_cancel->setObjectName("openListCancel"); progress->addWidget(m_cancel); layout->addLayout(progress);
@@ -242,7 +243,10 @@ void OpenListWindow::render() {
         const auto date = QDateTime::fromString(entry.modified,Qt::ISODateWithMs);
         table->setItem(row,3,new QTableWidgetItem(date.isValid() ? date.toLocalTime().toString("yyyy-MM-dd HH:mm") : QStringLiteral("未知")));
         for (int col=1;col<4;++col) table->item(row,col)->setToolTip(table->item(row,col)->text());
-        if (m_selectedPaths.contains(entry.remotePath)) table->item(row,0)->setSelected(true);
+        if (entry.directory)
+            // 文件夹仅支持双击进入，不可选中：进入目录永远不会被当作选择文件。
+            for (int col=0;col<4;++col) table->item(row,col)->setFlags(table->item(row,col)->flags() & ~Qt::ItemIsSelectable);
+        else if (m_selectedPaths.contains(entry.remotePath)) table->item(row,0)->setSelected(true);
     }
     table->blockSignals(false);
     updateCount();
@@ -250,7 +254,7 @@ void OpenListWindow::render() {
 void OpenListWindow::updateCount() {
     const auto filter = m_search->text().trimmed();
     if (m_table->rowCount() == 0) { m_count->setText(filter.isEmpty() ? QStringLiteral("暂无资源") : QStringLiteral("没有匹配的资源")); return; }
-    if (m_selectedPaths.isEmpty()) m_count->setText(QStringLiteral("%1 项 · 选中文件夹后可安装其中 APK / ZIP / SH 或传输全部文件").arg(m_table->rowCount()));
+    if (m_selectedPaths.isEmpty()) m_count->setText(QStringLiteral("%1 项 · 选中文件后可安装或传输到手机；双击文件夹进入").arg(m_table->rowCount()));
     else m_count->setText(QStringLiteral("%1 项 · 已选 %2 项（切换目录后仍保留）").arg(m_table->rowCount()).arg(m_selectedPaths.size()));
 }
 void OpenListWindow::activate(int row) {
@@ -264,15 +268,6 @@ void OpenListWindow::activate(int row) {
     startBatch({entry});
 }
 void OpenListWindow::appendSelection(const OpenList::Entry &selection, QList<OpenList::Entry> &expanded, QSet<QString> &paths) const {
-    if (selection.directory) {
-        const QString prefix = selection.relativePath + QStringLiteral("/");
-        for (const auto &entry : m_entries) {
-            if (!entry.directory && entry.relativePath.startsWith(prefix)) {
-                if (!paths.contains(entry.remotePath)) { paths.insert(entry.remotePath); expanded.append(entry); }
-            }
-        }
-        return;
-    }
     if (!paths.contains(selection.remotePath)) { paths.insert(selection.remotePath); expanded.append(selection); }
 }
 void OpenListWindow::startSelection(bool transferOnly) {
@@ -280,18 +275,14 @@ void OpenListWindow::startSelection(bool transferOnly) {
     QList<OpenList::Entry> selected;
     for (const auto &entry : m_entries)
         if (m_selectedPaths.contains(entry.remotePath)) selected.append(entry);
-    if (selected.isEmpty()) log(QStringLiteral("请先选择文件或文件夹；选择会跨目录保留，按 Ctrl / Shift 可多选。"));
+    if (selected.isEmpty()) log(QStringLiteral("请先选择文件；选择会跨目录保留，按 Ctrl / Shift 可多选。"));
     else startBatch(selected,transferOnly);
 }
 void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries,bool transferOnly) {
     if (m_busy || entries.isEmpty()) return;
     m_queue.clear();
     QSet<QString> paths;
-    bool folderSelected = false;
-    for (const auto &entry : entries) {
-        folderSelected = folderSelected || entry.directory;
-        appendSelection(entry, m_queue, paths);
-    }
+    for (const auto &entry : entries) appendSelection(entry, m_queue, paths);
     if (!transferOnly) {
         QList<OpenList::Entry> supported;
         for (const auto &entry : m_queue) {
@@ -301,11 +292,7 @@ void OpenListWindow::startBatch(const QList<OpenList::Entry> &entries,bool trans
         }
         m_queue = supported;
     }
-    if (m_queue.isEmpty()) {
-        if (folderSelected) log(transferOnly ? QStringLiteral("所选文件夹内没有文件。") :
-            QStringLiteral("所选文件夹内没有可安装或执行的 APK、模块 ZIP 或 SH 文件。"));
-        return;
-    }
+    if (m_queue.isEmpty()) return;
     m_transferOnly = transferOnly;
     m_downloaded.clear(); m_serial.clear(); m_queueIndex = 0; m_installIndex = 0;
     m_succeeded = 0; m_failed = 0; m_installingBatch = false; m_cancelled = false;
