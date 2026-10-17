@@ -26,6 +26,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QTimer>
@@ -336,9 +337,19 @@ void OpenListWindow::setupUi() {
     m_clearSelection->setCursor(Qt::PointingHandCursor);
     selectionHead->addWidget(selectionLabel); selectionHead->addWidget(m_selectionMeta,1); selectionHead->addWidget(m_clearSelection);
     idleLayout->addLayout(selectionHead);
-    m_selectionList = new QWidget(m_idleView);
+    m_selectionList = new QWidget;
     auto *selectionListLayout = new QVBoxLayout(m_selectionList); selectionListLayout->setContentsMargins(0,5,0,0); selectionListLayout->setSpacing(4);
-    idleLayout->addWidget(m_selectionList);
+    // 已选列表放滚动区：高度随内容自适应（最多 5 行可见），选择再多也不截断、不重叠。
+    m_selectionScroll = new QScrollArea(m_idleView);
+    m_selectionScroll->setObjectName("openListSelectionScroll");
+    m_selectionScroll->setWidgetResizable(true);
+    m_selectionScroll->setFrameShape(QFrame::NoFrame);
+    m_selectionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_selectionScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_selectionScroll->setFocusPolicy(Qt::NoFocus);
+    m_selectionScroll->setMinimumHeight(1); // 抵消 QScrollArea 默认 minimumSizeHint，避免抬高窗口最小高度。
+    m_selectionScroll->setWidget(m_selectionList);
+    idleLayout->addWidget(m_selectionScroll);
     m_selectionEmpty = new QFrame(m_idleView); m_selectionEmpty->setObjectName("openListSelectionEmpty");
     auto *selectionEmptyLayout = new QHBoxLayout(m_selectionEmpty); selectionEmptyLayout->setContentsMargins(9,6,9,6); selectionEmptyLayout->setSpacing(9);
     auto *emptyOrb = new QLabel(m_selectionEmpty); emptyOrb->setFixedSize(26,26); emptyOrb->setAlignment(Qt::AlignCenter);
@@ -602,6 +613,12 @@ void OpenListWindow::setupUi() {
         QFrame#openListCardFooter { background:#FDFEFE; border-top:1px solid #EFF5FA; }
         QLabel#openListStatusPill { font-size:9.5px; font-weight:600; padding:0 9px; }
         QFrame#openListSelectionEmpty { border:1px dashed #DCE8F5; border-radius:10px; background:#FAFDFF; }
+        QScrollArea#openListSelectionScroll, QScrollArea#openListSelectionScroll > QWidget > QWidget { background:transparent; }
+        QScrollArea#openListSelectionScroll QScrollBar:vertical { background:transparent; width:5px; margin:1px 0; }
+        QScrollArea#openListSelectionScroll QScrollBar::handle:vertical { background:#D9E6F3; border-radius:2px; min-height:24px; }
+        QScrollArea#openListSelectionScroll QScrollBar::handle:vertical:hover { background:#BFD5EA; }
+        QScrollArea#openListSelectionScroll QScrollBar::add-line:vertical, QScrollArea#openListSelectionScroll QScrollBar::sub-line:vertical { height:0; }
+        QScrollArea#openListSelectionScroll QScrollBar::add-page:vertical, QScrollArea#openListSelectionScroll QScrollBar::sub-page:vertical { background:transparent; }
         QFrame#openListTargetStrip { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #F7FBFF,stop:1 #F4F9FF); border:1px solid #E9F2FB; border-radius:10px; }
         QPushButton#openListInstallSelected { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #4B97FA,stop:0.54 #2F80ED,stop:1 #226EDB); color:#FFFFFF; border:1px solid #2C7CE9; border-radius:10px; min-height:36px; font-size:11.5px; font-weight:600; }
         QPushButton#openListInstallSelected:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #5AA3FF,stop:0.54 #3B8BF2,stop:1 #2A77E3); }
@@ -997,7 +1014,7 @@ void OpenListWindow::updateSelectionPanel() {
         if (auto *widget = item->widget()) widget->deleteLater();
         delete item;
     }
-    for (int i = 0; i < picked.size() && i < 3; ++i) {
+    for (int i = 0; i < picked.size(); ++i) {
         const auto *entry = picked[i];
         // 行固定高度：面板纵向空间再紧张也不允许 layout 压缩行导致绘制重叠。
         auto *row = new QWidget(m_selectionList);
@@ -1016,10 +1033,12 @@ void OpenListWindow::updateSelectionPanel() {
         rowLayout->addWidget(sizeLabel);
         listLayout->addWidget(row);
     }
-    if (picked.size() > 3) {
-        auto *more = new QLabel(QStringLiteral("还有 %1 个…").arg(picked.size() - 3), m_selectionList);
-        more->setStyleSheet("font-size:9px;color:#9BABBB;");
-        listLayout->addWidget(more);
+    // 滚动区高度：内容不足 5 行时贴合内容，超出则固定 5 行高度并滚动。
+    m_selectionScroll->setVisible(!picked.isEmpty());
+    const int rows = qMin(picked.size(), 5);
+    if (!picked.isEmpty()) {
+        const int contentH = rows * 26 + (rows - 1) * 4 + 5;
+        m_selectionScroll->setFixedHeight(qMin(contentH, 5 * 26 + 4 * 4 + 5));
     }
     // 全选本页 chip 高亮：当前目录内所有文件行都被选中时置亮。
     int fileRows = 0, selectedRows = 0;

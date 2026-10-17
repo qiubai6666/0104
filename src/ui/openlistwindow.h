@@ -52,6 +52,7 @@ private:
     QLabel *m_selectionMeta;              // 已选资源统计。
     QPushButton *m_selectAll, *m_clearSelection, *m_backToSelection;
     QWidget *m_idleView, *m_selectionList, *m_selectionEmpty;
+    class QScrollArea *m_selectionScroll = nullptr;
     QWidget *m_runView, *m_queueBox, *m_successView;
     QLabel *m_runTile, *m_runFileName, *m_runFileSub, *m_runPercent, *m_runStatsLeft, *m_runStatsRight;
     QLabel *m_successOrb, *m_successTitle, *m_successMessage, *m_successStats;
