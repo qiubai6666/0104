@@ -31,6 +31,23 @@ quint64 le64(const QByteArray &b, qsizetype at) {
   return qFromLittleEndian<quint64>(
       reinterpret_cast<const uchar *>(b.constData() + at));
 }
+// A just-closed image can stay locked for a moment: on-access scanners and
+// filter drivers (common on managed machines) open a new file for a share-read
+// scan, which makes the next write open fail with a sharing violation. Retry a
+// bounded number of times instead of failing a whole partition for it.
+bool openWithRetry(QFile *file, QIODevice::OpenMode mode) {
+  static constexpr int delays[] = {0, 50, 150, 350, 750};
+  for (const int delay : delays) {
+    if (delay)
+      QThread::msleep(static_cast<unsigned long>(delay));
+    if (file->open(mode))
+      return true;
+    // A missing path will not appear later; keep the real error immediate.
+    if (!QFileInfo::exists(file->fileName()))
+      return false;
+  }
+  return false;
+}
 // One decoded operation must fit a bounded buffer; AOSP chunks are <= 2 MiB.
 constexpr quint64 maxOperationBytes = 256ull * 1024 * 1024;
 constexpr quint64 xzMemoryLimit = 256ull * 1024 * 1024;
@@ -133,13 +150,24 @@ public:
   // bounded reads and CNG acceleration; a failed CNG stream restarts from byte
   // zero with Qt rather than accepting a partial hash. No extra image copy.
   QByteArray fileHash(const QString &path, quint64 expectedSize,
-                      const std::atomic_bool &cancel) {
+                      const std::atomic_bool &cancel, QString *error) {
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly) || quint64(file.size()) != expectedSize)
+    if (!openWithRetry(&file, QIODevice::ReadOnly)) {
+      if (error)
+        *error = "无法打开镜像进行校验：" + path + "（" + file.errorString() + "）";
       return {};
+    }
+    if (quint64(file.size()) != expectedSize) {
+      if (error) *error = "镜像长度不符：" + path;
+      return {};
+    }
     QByteArray buffer(1024 * 1024, Qt::Uninitialized);
     for (;;) {
-      if (!file.seek(0)) return {};
+      if (!file.seek(0)) {
+        if (error)
+          *error = "无法定位镜像进行校验：" + path + "（" + file.errorString() + "）";
+        return {};
+      }
       QCryptographicHash fallback(QCryptographicHash::Sha256);
       quint64 consumed = 0;
       bool retry = false;
@@ -147,7 +175,11 @@ public:
         if (cancel) return {};
         const qint64 count = file.read(buffer.data(),
             qint64(qMin<quint64>(quint64(buffer.size()), expectedSize - consumed)));
-        if (count <= 0) return {};
+        if (count <= 0) {
+          if (error)
+            *error = "镜像读取失败：" + path + "（" + file.errorString() + "）";
+          return {};
+        }
 #ifdef Q_OS_WIN
         if (m_hash) {
           if (BCryptHashData(m_hash, reinterpret_cast<PUCHAR>(buffer.data()),
@@ -192,6 +224,146 @@ bool bz2(const QByteArray &in, QByteArray *out) {
       unsigned(in.size()), 0, 0);
   return r == BZ_OK && length == unsigned(out->size());
 }
+#ifdef Q_OS_WIN
+QString win32ErrorText(DWORD code) {
+  wchar_t *buffer = nullptr;
+  const DWORD length = FormatMessageW(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+          FORMAT_MESSAGE_IGNORE_INSERTS,
+      nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      reinterpret_cast<LPWSTR>(&buffer), 0, nullptr);
+  QString text;
+  if (length && buffer)
+    text = QString::fromWCharArray(buffer, int(length)).trimmed();
+  if (buffer)
+    LocalFree(buffer);
+  return text.isEmpty() ? QString("Win32 错误 %1").arg(code) : text;
+}
+#endif
+// One output file per partition, created once and kept open until every worker
+// is done, with the workers writing through that single handle. The previous
+// design closed the creating handle and let every worker reopen the image;
+// that reopen is the only window in which an on-access scanner or a filter
+// driver could win a share race, and it surfaced as a random partition failing
+// with a handle error. Sharing stays read/write as before, so external
+// verification of the partial file keeps working; the race is gone because the
+// extracting process itself no longer needs a second open.
+class PartitionOutput {
+public:
+  PartitionOutput() = default;
+  ~PartitionOutput() { close(); }
+  PartitionOutput(const PartitionOutput &) = delete;
+  PartitionOutput &operator=(const PartitionOutput &) = delete;
+
+  bool create(const QString &path, quint64 size, QString *error) {
+    close();
+#ifdef Q_OS_WIN
+    m_handle = CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()),
+                           GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (m_handle == INVALID_HANDLE_VALUE) {
+      if (error) *error = win32ErrorText(GetLastError());
+      return false;
+    }
+    LARGE_INTEGER length{};
+    length.QuadPart = LONGLONG(size);
+    if (!SetFilePointerEx(m_handle, length, nullptr, FILE_BEGIN) ||
+        !SetEndOfFile(m_handle)) {
+      if (error) *error = win32ErrorText(GetLastError());
+      // create() owns the path: never leave a half-made image behind.
+      close();
+      QFile::remove(path);
+      return false;
+    }
+#else
+    m_file.setFileName(path);
+    if (!m_file.open(QIODevice::ReadWrite | QIODevice::NewOnly)) {
+      if (error) *error = m_file.errorString();
+      return false;
+    }
+    if (!m_file.resize(qint64(size))) {
+      if (error) *error = m_file.errorString();
+      m_file.close();
+      QFile::remove(path);
+      return false;
+    }
+#endif
+    return true;
+  }
+
+  // Positioned writes from any worker thread. Windows has one shared file
+  // pointer per handle, so the lock also protects SetFilePointerEx.
+  bool writeAt(quint64 offset, const char *data, qint64 length,
+               QString *error) {
+    if (length <= 0)
+      return true;
+    QMutexLocker lock(&m_lock);
+#ifdef Q_OS_WIN
+    if (m_handle == INVALID_HANDLE_VALUE) {
+      if (error) *error = "输出句柄已关闭";
+      return false;
+    }
+    LARGE_INTEGER position{};
+    position.QuadPart = LONGLONG(offset);
+    if (!SetFilePointerEx(m_handle, position, nullptr, FILE_BEGIN)) {
+      if (error) *error = win32ErrorText(GetLastError());
+      return false;
+    }
+    qint64 done = 0;
+    while (done < length) {
+      // Qt's Windows backend caps a single write for the same reason.
+      const DWORD chunk = DWORD(qMin<qint64>(length - done, 32 * 1024 * 1024));
+      DWORD written = 0;
+      if (!WriteFile(m_handle, data + done, chunk, &written, nullptr) ||
+          !written) {
+        if (error) *error = win32ErrorText(GetLastError());
+        return false;
+      }
+      done += qint64(written);
+    }
+#else
+    if (!m_file.isOpen()) {
+      if (error) *error = "输出句柄已关闭";
+      return false;
+    }
+    if (!m_file.seek(qint64(offset))) {
+      if (error) *error = m_file.errorString();
+      return false;
+    }
+    qint64 done = 0;
+    while (done < length) {
+      const qint64 written = m_file.write(data + done, length - done);
+      if (written <= 0) {
+        if (error) *error = m_file.errorString();
+        return false;
+      }
+      done += written;
+    }
+#endif
+    return true;
+  }
+
+  void close() {
+    QMutexLocker lock(&m_lock);
+#ifdef Q_OS_WIN
+    if (m_handle != INVALID_HANDLE_VALUE) {
+      CloseHandle(m_handle);
+      m_handle = INVALID_HANDLE_VALUE;
+    }
+#else
+    m_file.close();
+#endif
+  }
+
+private:
+#ifdef Q_OS_WIN
+  HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+  QFile m_file;
+#endif
+  QMutex m_lock;
+};
 } // namespace
 
 OugaPayloadExtractor::Zip OugaPayloadExtractor::locate(
@@ -495,14 +667,12 @@ QString OugaPayloadExtractor::extract(
       if (ownsPartial)
         QFile::remove(partial);
     });
-    {
-      QFile out(partial);
-      if (!out.open(QIODevice::ReadWrite | QIODevice::NewOnly))
-        return "无法创建 Payload 输出：" + partial;
-      ownsPartial = true;
-      if (!out.resize(qint64(entry.size)))
-        return "无法预分配 Payload 输出：" + partial;
-    }
+    PartitionOutput sink;
+    QString createError;
+    if (!sink.create(partial, entry.size, &createError))
+      return "无法创建 Payload 输出：" + partial +
+             (createError.isEmpty() ? QString() : "（" + createError + "）");
+    ownsPartial = true;
     std::atomic<qsizetype> next{0};
     std::atomic_bool failed{false};
     QMutex errorLock;
@@ -514,13 +684,12 @@ QString OugaPayloadExtractor::extract(
       failed = true;
     };
     auto worker = [&, reader, localReader] {
-      // Local files keep one positioned handle per worker. Remote reads go
-      // through the bounded Range reader and never materialize the archive.
-      QFile in(localReader ? localReader->file() : QString()), out(partial);
-      if ((localReader && !in.open(QIODevice::ReadOnly)) ||
-          !out.open(QIODevice::ReadWrite | QIODevice::ExistingOnly |
-                    QIODevice::Unbuffered)) {
-        fail("无法打开 Payload 读写句柄：" + entry.name);
+      // The source keeps one positioned handle per worker; the output is never
+      // reopened, every worker writes through the partition handle above.
+      QFile in(localReader ? localReader->file() : QString());
+      if (localReader && !openWithRetry(&in, QIODevice::ReadOnly)) {
+        fail("无法打开 Payload 源文件：" + in.fileName() + "（" +
+             in.errorString() + "）：" + entry.name);
         return;
       }
       QByteArray data, raw;
@@ -572,9 +741,12 @@ QString OugaPayloadExtractor::extract(
         qsizetype at = 0;
         for (const auto &e : op.destination) {
           const qint64 length = qint64(e.blocks * layout.blockSize);
-          if (!out.seek(qint64(e.start * layout.blockSize)) ||
-              out.write(decoded->constData() + at, length) != length) {
-            fail("Payload 输出写入失败：" + entry.name);
+          QString writeError;
+          if (!sink.writeAt(e.start * layout.blockSize,
+                            decoded->constData() + at, length, &writeError)) {
+            fail("Payload 输出写入失败：" + partial +
+                 (writeError.isEmpty() ? QString() : "（" + writeError + "）") +
+                 "：" + entry.name);
             return;
           }
           at += length;
@@ -589,18 +761,33 @@ QString OugaPayloadExtractor::extract(
       jobs << QtConcurrent::run(&pool, worker);
     for (auto &job : jobs)
       job.waitForFinished();
+    // Publish only after closing: Windows refuses to rename an image that
+    // still has an open handle.
+    sink.close();
     if (!failed && cancel)
       error = "准备已取消；保留已完成的镜像";
     if (!error.isEmpty() || cancel)
       return error;
-    // Hash after all writer handles have closed, before publishing .img or OK.
+    // Hash after the partition handle is closed, before publishing .img or OK.
     OperationHash imageHasher;
-    const QByteArray actual = imageHasher.fileHash(partial, entry.size, cancel);
+    QString hashError;
+    const QByteArray actual =
+        imageHasher.fileHash(partial, entry.size, cancel, &hashError);
     if (cancel)
       return "准备已取消；保留已完成的镜像";
     if (actual.size() != 32 || actual != entry.hash)
-      return "Payload 镜像长度/SHA-256 校验失败：" + entry.name;
-    if (!QFile::rename(partial, target))
+      return hashError.isEmpty()
+                 ? "Payload 镜像长度/SHA-256 校验失败：" + entry.name
+                 : hashError + "：" + entry.name;
+    // Rename retries too: a scanner that started on close can still hold the
+    // finished image for a moment.
+    bool renamed = false;
+    for (int attempt = 0; attempt < 5 && !renamed; ++attempt) {
+      if (attempt)
+        QThread::msleep(static_cast<unsigned long>(100 * attempt));
+      renamed = QFile::rename(partial, target);
+    }
+    if (!renamed)
       return "Payload 输出重命名失败：" + entry.name;
     ownsPartial = false;
     if (callbacks.finished)

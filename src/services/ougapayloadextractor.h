@@ -8,6 +8,8 @@
 // PayloadProcessing: partitions in order, operations of one partition in
 // parallel, each operation's data_sha256_hash verified before decoding.
 // A STORED payload.bin is read in place from the ZIP, without a copy.
+// Each partition image is created once and written through that handle, so a
+// worker never reopens a freshly created file (see PartitionOutput).
 class OugaPayloadExtractor {
 public:
   enum class Zip { NotZip, Stored, Other };

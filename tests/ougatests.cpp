@@ -5295,6 +5295,65 @@ private slots:
     for (const QString &name : names)
       QCOMPARE(read(output + '/' + name + ".img"), image);
   }
+#ifdef Q_OS_WIN
+  // A scanner or filter driver can hold a just-closed source for a moment; the
+  // extractor must retry the read-only open instead of failing the partition.
+  void nativePayloadRetriesLockedSource() {
+    QByteArray boot, vendor;
+    const QByteArray payload = nativePayloadBytes(&boot, &vendor);
+    const QString file = dir + "/payload.bin", output = dir + "-locked-source";
+    QVERIFY(put(file, payload));
+    QVERIFY(QDir().mkpath(output));
+    QVector<OugaPayloadEntry> entries;
+    OugaPayloadLayout layout;
+    bool delta = false;
+    QString error;
+    QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
+    const QString native = QDir::toNativeSeparators(file);
+    HANDLE held = CreateFileW(reinterpret_cast<LPCWSTR>(native.utf16()),
+                              GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    QVERIFY(held != INVALID_HANDLE_VALUE);
+    std::thread releaser([held] {
+      std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      CloseHandle(held);
+    });
+    std::atomic_bool cancel{false};
+    error = OugaPayloadExtractor::extract(file, layout, entries, output, 1,
+                                          cancel, {});
+    releaser.join();
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(read(output + "/boot.img"), boot);
+    QCOMPARE(read(output + "/vendor.img"), vendor);
+  }
+  // A permanently locked source is a real failure, reported against the source
+  // handle instead of being mistaken for corrupt output or a bad digest.
+  void nativePayloadReportsLockedSource() {
+    QByteArray boot, vendor;
+    const QByteArray payload = nativePayloadBytes(&boot, &vendor);
+    const QString file = dir + "/payload.bin", output = dir + "-locked-report";
+    QVERIFY(put(file, payload));
+    QVERIFY(QDir().mkpath(output));
+    QVector<OugaPayloadEntry> entries;
+    OugaPayloadLayout layout;
+    bool delta = false;
+    QString error;
+    QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
+    const QString native = QDir::toNativeSeparators(file);
+    HANDLE held = CreateFileW(reinterpret_cast<LPCWSTR>(native.utf16()),
+                              GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    QVERIFY(held != INVALID_HANDLE_VALUE);
+    std::atomic_bool cancel{false};
+    error = OugaPayloadExtractor::extract(file, layout, entries, output, 1,
+                                          cancel, {});
+    CloseHandle(held);
+    QVERIFY2(!error.isEmpty(), "a locked source must fail");
+    QVERIFY2(error.contains("无法打开 Payload 源文件"), qPrintable(error));
+    QVERIFY2(error.contains("boot"), qPrintable(error));
+    QVERIFY(QDir(output).entryList({"*.partial"}, QDir::Files).isEmpty());
+  }
+#endif
   void nativePayloadXzBounds_data() {
     QTest::addColumn<int>("fault");
     QTest::newRow("truncated-footer") << 0;
