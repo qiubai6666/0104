@@ -32,6 +32,11 @@
 #include "processmanager.h"
 #include "resourceextractor.h"
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <dwmapi.h>
+#endif
+
 namespace {
 QString fixturePath;
 QByteArray readFile(const QString &path) {
@@ -56,6 +61,35 @@ public:
         return false;
     }
 };
+#ifdef Q_OS_WIN
+HWND windowByTitle(DWORD pid, const wchar_t *wanted)
+{
+    struct Context { DWORD pid; const wchar_t *wanted; HWND found; } context{pid, wanted, nullptr};
+    EnumWindows([](HWND hwnd, LPARAM lparam) -> BOOL {
+        auto *context = reinterpret_cast<Context *>(lparam);
+        DWORD windowPid = 0;
+        GetWindowThreadProcessId(hwnd, &windowPid);
+        if (windowPid != context->pid || !IsWindowVisible(hwnd)) return TRUE;
+        wchar_t title[256]{};
+        GetWindowTextW(hwnd, title, 255);
+        if (wcscmp(title, context->wanted) == 0) {
+            context->found = hwnd;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&context));
+    return context.found;
+}
+QRect visibleFrame(HWND hwnd)
+{
+    RECT rc{};
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc))))
+        return QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+    if (GetWindowRect(hwnd, &rc))
+        return QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+    return QRect();
+}
+#endif
 }
 QString ResourceExtractor::getResourcePath() { return fixturePath; }
 QString ResourceExtractor::getAdbPath() { return fixturePath + "/adb.exe"; }
@@ -403,6 +437,58 @@ private slots:
         // 垂直越出工作区上方：钳制在工作区内。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, -300, 400, 300), QRect(0, 0, 800, 600), nav),
                  QRect(508, 0, 48, 128));
+    }
+    void navigationBarWindowCandidateFilter() {
+        const QRect regular(100, 100, 400, 700);
+        QVERIFY(ScreenCastNavBar::isCastWindowCandidate(true, false, false, regular, "SDL_app"));
+        QVERIFY(!ScreenCastNavBar::isCastWindowCandidate(false, false, false, regular, "SDL_app"));
+        QVERIFY(!ScreenCastNavBar::isCastWindowCandidate(true, true, false, regular, "SDL_app"));
+        QVERIFY(!ScreenCastNavBar::isCastWindowCandidate(true, false, true, regular, "SDL_app"));
+        QVERIFY(!ScreenCastNavBar::isCastWindowCandidate(true, false, false, QRect(0, 0, 0, 0), "SDL_app"));
+        QVERIFY(!ScreenCastNavBar::isCastWindowCandidate(true, false, false,
+                                                         QRect(-32000, -32000, 199, 34), "ConsoleWindowClass"));
+        QVERIFY(!ScreenCastNavBar::isCastWindowCandidate(true, false, false, regular, "ConsoleWindowClass"));
+        QVERIFY(!ScreenCastNavBar::isCastWindowCandidate(true, false, false, regular, "PseudoConsoleWindow"));
+    }
+    void navigationBarFollowsForeignCastWindow() {
+#ifdef Q_OS_WIN
+        QProcess helper;
+        helper.setProgram(QCoreApplication::applicationFilePath());
+        helper.setArguments({QStringLiteral("--fake-cast-window")});
+        helper.start();
+        QVERIFY(helper.waitForStarted(5000));
+
+        ScreenCastNavBar navbar;
+        navbar.attachToSession(helper.processId());
+        QTRY_VERIFY_WITH_TIMEOUT(navbar.hasCastWindow(), 5000);
+        QVERIFY(navbar.isTracking());
+
+        HWND cast = windowByTitle(static_cast<DWORD>(helper.processId()), L"FakeCastWindow");
+        QVERIFY(cast);
+        HWND nav = reinterpret_cast<HWND>(navbar.winId());
+
+        // 导航条应贴在画面窗口右侧，并在画面移动后继续跟随，而不是停在原处。
+        QVERIFY(SetWindowPos(cast, nullptr, 120, 120, 420, 640, SWP_NOACTIVATE | SWP_NOZORDER));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            qAbs(visibleFrame(nav).left() - (visibleFrame(cast).right() + 1 + 8)) <= 2, 2000);
+        const int firstLeft = visibleFrame(nav).left();
+        QVERIFY(SetWindowPos(cast, nullptr, 520, 160, 420, 640, SWP_NOACTIVATE | SWP_NOZORDER));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            visibleFrame(nav).left() != firstLeft &&
+            qAbs(visibleFrame(nav).left() - (visibleFrame(cast).right() + 1 + 8)) <= 2, 2000);
+
+        // 导航条必须位于画面窗口正上方：画面盖住按钮原位置时按钮仍然可点。
+        QTRY_COMPARE_WITH_TIMEOUT(
+            reinterpret_cast<quintptr>(GetWindow(cast, GW_HWNDPREV)),
+            reinterpret_cast<quintptr>(nav), 2000);
+
+        navbar.detach();
+        QVERIFY(!navbar.hasCastWindow());
+        helper.kill();
+        QVERIFY(helper.waitForFinished(3000));
+#else
+        QSKIP("Windows-only native window tracking");
+#endif
     }
     void navigationKeysFollowSessionLifecycle() {
         QVERIFY(writeFile(fixturePath + "/devices.txt", "PHONE_A\tdevice\n"));
@@ -956,6 +1042,17 @@ int main(int argc, char **argv) {
     }
     QApplication application(argc, argv);
     application.setQuitOnLastWindowClosed(false);
+#ifdef Q_OS_WIN
+    // 回归测试替身：供 navigationBarFollowsForeignCastWindow 在一个独立
+    // 进程里创建“投屏画面”窗口，测试 PID 跟随和 Z 序，不连接真实设备。
+    if (application.arguments().contains(QStringLiteral("--fake-cast-window"))) {
+        QWidget cast;
+        cast.setWindowTitle(QStringLiteral("FakeCastWindow"));
+        cast.setGeometry(200, 120, 420, 640);
+        cast.show();
+        return application.exec();
+    }
+#endif
     ScreenCastTests tests; return QTest::qExec(&tests, argc, argv);
 }
 #include "screencasttests.moc"

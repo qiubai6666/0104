@@ -8,6 +8,9 @@ TARGET = "Orange Tools"
 # 源码按职责分层；旧的本地头文件名保持不变。
 INCLUDEPATH += $$PWD/src/app $$PWD/src/ui $$PWD/src/services
 
+# 投屏导航条用 DWM 可见边框跟随窗口，避免 GetWindowRect 的不可见缩放边框。
+win32: LIBS += -ldwmapi
+
 # 设置程序图标和资源
 win32 {
     RC_FILE = app.rc

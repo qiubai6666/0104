@@ -3,6 +3,8 @@ CONFIG += c++11 testcase console
 CONFIG -= app_bundle
 TARGET = ScreenCastTests
 INCLUDEPATH += $$PWD/../src/app $$PWD/../src/ui $$PWD/../src/services
+# 投屏导航条用 DWM 可见边框跟随窗口。
+win32: LIBS += -ldwmapi
 # 路径由测试替身提供；绝不链接资源提取器、访问真实 ADB 或下载网络配置。
 SOURCES += $$PWD/screencasttests.cpp \
     $$PWD/../src/services/processmanager.cpp \

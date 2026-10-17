@@ -32,6 +32,10 @@ public:
     // 物理像素下计算导航条位置：首选投屏窗口右侧、次选左侧、
     // 兜底贴工作区右缘，垂直居中并整体钳制在工作区内（纯逻辑，供测试）。
     static QRect computePlacement(const QRect &castRect, const QRect &workArea, const QSize &navSize);
+    // 投屏窗口候选过滤（纯逻辑，供测试）：控制台、最小化、工具窗口和屏外
+    // 窗口都不属于投屏画面，避免跟随到 scrcpy 的控制台或隐藏辅助窗口。
+    static bool isCastWindowCandidate(bool visible, bool iconic, bool toolWindow,
+                                      const QRect &windowRect, const QString &className);
 
 signals:
     void keyRequested(int keyCode);
@@ -45,11 +49,14 @@ private:
     void *findCastWindow() const;
     void tryAttach();
     void updatePlacement();
+    // 把导航条插到投屏窗口正上方：既不浮到无关应用之上，也不会被画面盖住。
+    void raiseAboveCast(void *navWindow, void *castWindow);
 #endif
     QTimer m_attachTimer;
     QTimer m_pollTimer;
     qint64 m_targetPid = 0;
     void *m_castHwnd = nullptr;
+    bool m_castTopMost = false;
 };
 
 #endif
