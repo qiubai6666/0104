@@ -713,8 +713,8 @@ void OpenListWindow::render() {
         if (date.isValid()) dateItem->setToolTip(date.toLocalTime().toString("yyyy-MM-dd HH:mm"));
         table->setItem(row,3,dateItem);
         if (entry.directory) {
-            // 文件夹仅支持双击进入，不可选中：进入目录永远不会被当作选择文件。
-            for (int col=0;col<4;++col) table->item(row,col)->setFlags(table->item(row,col)->flags() & ~Qt::ItemIsSelectable);
+            // 文件夹仅支持双击进入，不可选中、不显示复选框。
+            for (int col=0;col<4;++col) table->item(row,col)->setFlags(table->item(row,col)->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsUserCheckable));
         } else if (m_selectedPaths.contains(entry.remotePath)) {
             for (int col=0;col<4;++col) table->item(row,col)->setSelected(true);
         }
@@ -983,6 +983,7 @@ void OpenListWindow::updateSelectionPanel() {
     for (const auto &path : paths) {
         const auto it = byPath.constFind(path);
         if (it == byPath.constEnd()) continue;
+        if (it.value()->directory) continue; // 文件夹不可勾选，已选列表只显示文件。
         picked.append(it.value());
         if (it.value()->size >= 0) total += it.value()->size; else unknown = true;
     }
@@ -996,16 +997,18 @@ void OpenListWindow::updateSelectionPanel() {
         if (auto *widget = item->widget()) widget->deleteLater();
         delete item;
     }
-    for (int i = 0; i < picked.size() && i < 5; ++i) {
+    for (int i = 0; i < picked.size() && i < 3; ++i) {
         const auto *entry = picked[i];
+        // 行固定高度：面板纵向空间再紧张也不允许 layout 压缩行导致绘制重叠。
         auto *row = new QWidget(m_selectionList);
-        auto *rowLayout = new QHBoxLayout(row); rowLayout->setContentsMargins(6,4,6,4); rowLayout->setSpacing(7);
-        auto *tile = new QLabel(row); tile->setFixedSize(24,24); tile->setAlignment(Qt::AlignCenter);
-        tile->setPixmap(typeTilePixmap(*entry, 24));
+        row->setFixedHeight(26);
+        auto *rowLayout = new QHBoxLayout(row); rowLayout->setContentsMargins(6,3,6,3); rowLayout->setSpacing(7);
+        auto *tile = new QLabel(row); tile->setFixedSize(20,20); tile->setAlignment(Qt::AlignCenter);
+        tile->setPixmap(typeTilePixmap(*entry, 20));
         auto *nameLabel = new QLabel(row);
         QFontMetrics metrics(nameLabel->font());
-        nameLabel->setText(metrics.elidedText(entry->name, Qt::ElideMiddle, 150));
-        nameLabel->setStyleSheet("font-size:10.5px;font-weight:500;color:#52677D;");
+        nameLabel->setText(metrics.elidedText(entry->name, Qt::ElideMiddle, 132));
+        nameLabel->setStyleSheet("font-size:10px;font-weight:500;color:#52677D;");
         auto *sizeLabel = new QLabel(row);
         sizeLabel->setText(entry->size >= 0 ? QLocale().formattedDataSize(entry->size) : QStringLiteral("—"));
         sizeLabel->setStyleSheet("font-size:9px;color:#9BAABA;");
@@ -1013,8 +1016,8 @@ void OpenListWindow::updateSelectionPanel() {
         rowLayout->addWidget(sizeLabel);
         listLayout->addWidget(row);
     }
-    if (picked.size() > 5) {
-        auto *more = new QLabel(QStringLiteral("还有 %1 个…").arg(picked.size() - 5), m_selectionList);
+    if (picked.size() > 3) {
+        auto *more = new QLabel(QStringLiteral("还有 %1 个…").arg(picked.size() - 3), m_selectionList);
         more->setStyleSheet("font-size:9px;color:#9BABBB;");
         listLayout->addWidget(more);
     }
