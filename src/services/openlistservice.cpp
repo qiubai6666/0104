@@ -11,6 +11,10 @@
 #include <QUuid>
 #include <QStorageInfo>
 #include <QRegularExpression>
+#include <QSaveFile>
+#include <QDateTime>
+#include <QTimeZone>
+#include <cmath>
 #include <utility>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -38,7 +42,51 @@ bool apiObject(QNetworkReply *r, QJsonObject *result) {
     *result = doc.object().value("data").toObject();
     return true;
 }
+constexpr int listingPageSize = 100;
+// OpenList 的目录读取主要是请求往返耗时；并发几路即可明显缩短整树时间，
+// 同时给下载连接留出余量。
+constexpr int maxConcurrentListRequests = 4;
+constexpr int maxListRequests = 2048;
+constexpr int maxListingEntries = 50000;
+constexpr int maxListingDepth = 32;
+constexpr qint64 maxListingCacheBytes = 8 * 1024 * 1024;
+constexpr int listingCacheVersion = 1;
+constexpr int maxListingCacheEntries = 50000;
+QString listingCacheFileName() { return QStringLiteral("openlist-listing-v1.json"); }
+QJsonObject cachedEntryJson(const OpenList::Entry &entry) {
+    return QJsonObject{
+        {"name", entry.name},
+        {"relativePath", entry.relativePath},
+        {"remotePath", entry.remotePath},
+        {"modified", entry.modified},
+        {"size", double(entry.size)},
+        {"directory", entry.directory}
+    };
 }
+bool parseCachedEntry(const QJsonObject &object, OpenList::Entry *entry) {
+    if (!object.value("name").isString() || !object.value("relativePath").isString()
+        || !object.value("remotePath").isString() || !object.value("directory").isBool()
+        || !object.value("size").isDouble()) return false;
+    OpenList::Entry parsed;
+    parsed.name = object.value("name").toString();
+    parsed.relativePath = object.value("relativePath").toString();
+    parsed.remotePath = object.value("remotePath").toString();
+    parsed.modified = object.value("modified").toString();
+    parsed.directory = object.value("directory").toBool();
+    if (parsed.name.size() > 200 || !OpenList::safeComponent(parsed.name)) return false;
+    if (parsed.relativePath.isEmpty() || parsed.relativePath.startsWith('/')
+        || parsed.relativePath.contains('\\') || parsed.relativePath.contains(QStringLiteral("//"))) return false;
+    const auto parts = parsed.relativePath.split('/');
+    for (const auto &part : parts) if (!OpenList::safeComponent(part)) return false;
+    if (parsed.remotePath != remoteRoot() + '/' + parsed.relativePath) return false;
+    if (parsed.modified.size() > 128) return false;
+    const double size = object.value("size").toDouble();
+    if (!std::isfinite(size) || size < -1 || size > 9.0e18) return false;
+    parsed.size = static_cast<qint64>(size);
+    *entry = parsed;
+    return true;
+}
+} // namespace
 
 namespace {
 // redact/safeComponent 会被大目录的成千上万个条目逐个调用，正则必须复用实例。
@@ -124,9 +172,16 @@ QString OpenList::defaultDownloadRoot() {
     return resolveDownloadRoot(QCoreApplication::applicationDirPath(),
                                QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation));
 }
-OpenListService::OpenListService(QObject *parent, QNetworkAccessManager *network, const QString &root)
+QString OpenList::defaultListingCacheFile() {
+    if (qEnvironmentVariableIsSet("OPENLIST_DISABLE_LISTING_CACHE")) return {};
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (directory.isEmpty() || !QDir::isAbsolutePath(directory)) return {};
+    return QDir(directory).filePath(listingCacheFileName());
+}
+OpenListService::OpenListService(QObject *parent, QNetworkAccessManager *network, const QString &root,
+                                 const QString &cacheFile)
     : QObject(parent), m_root(root.isEmpty() ? OpenList::defaultDownloadRoot() : root),
-      m_network(network ? network : new QNetworkAccessManager(this)) {
+      m_network(network ? network : new QNetworkAccessManager(this)), m_cacheFile(cacheFile) {
     qRegisterMetaType<OpenList::Entry>(); qRegisterMetaType<QList<OpenList::Entry>>();
 }
 OpenListService::~OpenListService() {
@@ -164,61 +219,166 @@ void OpenListService::refresh() {
     const auto replies = m_lists; m_lists.clear();
     for (auto r : replies) if (r) { r->abort(); r->deleteLater(); }
     m_listing = Listing();
+    loadCacheOnce();
+    if (generation != m_listGeneration) return;
     m_listing.pending.enqueue({remoteRoot(), 1, 0});
     m_listing.visited.insert(remoteRoot());
     pump(generation);
 }
-void OpenListService::pump(quint64 generation) {
-    auto &listing = m_listing;
-    if (listing.pending.isEmpty()) { emit listingReady(listing.entries, listing.error); return; }
-    if (++listing.requests > 2048) {
-        listing.pending.clear(); listing.error = QStringLiteral("目录过多，列表不完整");
-        emit listingReady(listing.entries, listing.error); return;
+void OpenListService::loadCacheOnce() {
+    if (m_cacheLoaded) return;
+    m_cacheLoaded = true;
+    if (m_cacheFile.isEmpty()) return;
+    const QFileInfo info(m_cacheFile);
+    if (info.isSymLink() || !info.isFile() || info.size() <= 0 || info.size() > maxListingCacheBytes) return;
+    QFile file(m_cacheFile);
+    if (!file.open(QIODevice::ReadOnly)) return;
+    const QByteArray bytes = file.read(maxListingCacheBytes + 1);
+    if (bytes.size() > maxListingCacheBytes) return;
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(bytes, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) return;
+    const auto object = document.object();
+    if (object.value("version").toInt(-1) != listingCacheVersion) return;
+    if (object.value("root").toString() != remoteRoot()) return;
+    const auto values = object.value("entries");
+    if (!values.isArray() || values.toArray().size() > maxListingCacheEntries) return;
+    QList<OpenList::Entry> entries;
+    QSet<QString> paths;
+    for (const auto &value : values.toArray()) {
+        if (!value.isObject()) continue;
+        OpenList::Entry entry;
+        if (!parseCachedEntry(value.toObject(), &entry) || paths.contains(entry.remotePath)) continue;
+        paths.insert(entry.remotePath); entries.append(entry);
     }
-    Page page = listing.pending.dequeue();
-    auto req = request(QUrl(base + "/api/fs/list")); req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    QJsonObject body{{"path", page.path}, {"password", ""}, {"page", page.page}, {"per_page", 100}, {"refresh", false}};
-    auto *r = m_network->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    r->setReadBufferSize(maxJson + 1); m_lists.append(r);
-    connect(r, &QNetworkReply::readyRead, this, [r]{ if (r->bytesAvailable() > maxJson) r->abort(); });
-    connect(r, &QNetworkReply::finished, this, [this, r, page, generation] {
-        r->deleteLater(); m_lists.removeAll(r);
-        if (generation != m_listGeneration) return;
-        auto &list = m_listing; QJsonObject data;
-        if (!apiObject(r, &data)) list.error = QStringLiteral("部分目录读取失败，列表不完整");
-        else {
-            const auto value = data.value("content");
-            if (!value.isArray() && !value.isNull()) list.error = QStringLiteral("资源列表格式无效");
-            const auto content = value.toArray();
-            for (const auto &v : content) {
-                const auto o = v.toObject(); const QString name = o.value("name").toString();
-                if (!OpenList::safeComponent(name)) { list.error = QStringLiteral("部分文件名不安全，已跳过"); continue; }
-                const QString full = page.path + '/' + name;
-                if (o.value("is_dir").toBool()) {
-                    if (page.depth >= 32) { list.error = QStringLiteral("目录层级过深，列表不完整"); continue; }
-                    if (!list.visited.contains(full)) {
-                        list.visited.insert(full); list.pending.enqueue({full, 1, page.depth + 1});
-                        OpenList::Entry folder; folder.name = name; folder.remotePath = full;
-                        folder.relativePath = full.mid(remoteRoot().size() + 1);
-                        folder.modified = o.value("modified").toString(); folder.directory = true;
-                        if (list.entries.size() < 50000) list.entries.append(folder);
-                        else list.error = QStringLiteral("资源过多，列表不完整");
-                    }
-                } else {
-                    OpenList::Entry entry;
-                    entry.name = name; entry.remotePath = full;
-                    entry.relativePath = full.mid(remoteRoot().size() + 1);
-                    entry.size = static_cast<qint64>(o.value("size").toDouble(-1));
-                    entry.modified = o.value("modified").toString();
-                    if (list.entries.size() < 50000) list.entries.append(entry);
-                    else list.error = QStringLiteral("文件过多，列表不完整");
-                }
-            }
-            const int total = data.value("total").toInt();
-            if (!content.isEmpty() && page.page * 100 < total) list.pending.enqueue({page.path, page.page + 1, page.depth});
+    // 非空数组却没有任何合法条目，说明缓存已损坏或被篡改，整份忽略。
+    if (!values.toArray().isEmpty() && entries.isEmpty()) return;
+    const auto savedValue = object.value("savedAt");
+    QDateTime savedAt;
+    if (savedValue.isDouble() && std::isfinite(savedValue.toDouble())
+        && savedValue.toDouble() > 0 && savedValue.toDouble() <= 9.0e18)
+        savedAt = QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(savedValue.toDouble()),
+                                                  QTimeZone(QTimeZone::UTC));
+    if (!savedAt.isValid()) savedAt = info.lastModified().toUTC();
+    if (!savedAt.isValid()) savedAt = QDateTime::currentDateTimeUtc();
+    m_cachedEntries = entries;
+    m_cacheTime = savedAt;
+    if (!m_cacheEmitted) {
+        m_cacheEmitted = true;
+        emit listingCached(entries, savedAt);
+    }
+}
+QList<OpenList::Entry> OpenListService::mergedWithCache(const QList<OpenList::Entry> &entries) const {
+    QList<OpenList::Entry> merged;
+    QSet<QString> paths;
+    for (const auto &entry : m_cachedEntries) {
+        if (paths.contains(entry.remotePath)) continue;
+        paths.insert(entry.remotePath); merged.append(entry);
+    }
+    for (const auto &entry : entries) {
+        if (paths.contains(entry.remotePath)) continue;
+        paths.insert(entry.remotePath); merged.append(entry);
+    }
+    return merged;
+}
+void OpenListService::saveCache(const QList<OpenList::Entry> &entries, const QDateTime &savedAt) const {
+    if (m_cacheFile.isEmpty()) return;
+    QJsonArray values;
+    for (const auto &entry : entries) values.append(cachedEntryJson(entry));
+    const QJsonObject object{
+        {"version", listingCacheVersion},
+        {"root", remoteRoot()},
+        {"savedAt", double(savedAt.toMSecsSinceEpoch())},
+        {"entries", values}
+    };
+    const QByteArray bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    if (bytes.size() > maxListingCacheBytes) return;
+    const QString directory = QFileInfo(m_cacheFile).absolutePath();
+    if (directory.isEmpty() || !QDir().mkpath(directory)) return;
+    QSaveFile file(m_cacheFile);
+    if (!file.open(QIODevice::WriteOnly)) return;
+    if (file.write(bytes) != bytes.size()) { file.cancelWriting(); return; }
+    file.commit();
+}
+void OpenListService::finishListing(quint64 generation) {
+    if (generation != m_listGeneration) return;
+    auto &listing = m_listing;
+    if (listing.finished) return;
+    listing.finished = true;
+    QList<OpenList::Entry> result = listing.entries;
+    if (!listing.error.isEmpty() && !m_cachedEntries.isEmpty()) result = mergedWithCache(listing.entries);
+    if (listing.error.isEmpty()) {
+        m_cachedEntries = result;
+        m_cacheTime = QDateTime::currentDateTimeUtc();
+        m_cacheLoaded = true;
+        saveCache(result, m_cacheTime);
+    }
+    emit listingReady(result, listing.error);
+}
+void OpenListService::pump(quint64 generation) {
+    if (generation != m_listGeneration) return;
+    auto &listing = m_listing;
+    if (listing.finished) return;
+    while (listing.active < maxConcurrentListRequests && !listing.pending.isEmpty()) {
+        if (++listing.requests > maxListRequests) {
+            listing.pending.clear();
+            listing.error = QStringLiteral("目录过多，列表不完整");
+            break;
         }
-        pump(generation);
-    });
+        Page page = listing.pending.dequeue();
+        ++listing.active;
+        auto req = request(QUrl(base + "/api/fs/list")); req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        QJsonObject body{{"path", page.path}, {"password", ""}, {"page", page.page},
+                         {"per_page", listingPageSize}, {"refresh", false}};
+        auto *r = m_network->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        r->setReadBufferSize(maxJson + 1); m_lists.append(r);
+        connect(r, &QNetworkReply::readyRead, this, [r]{ if (r->bytesAvailable() > maxJson) r->abort(); });
+        connect(r, &QNetworkReply::finished, this, [this, r, page, generation] {
+            r->deleteLater(); m_lists.removeAll(r);
+            if (generation != m_listGeneration) return;
+            auto &list = m_listing;
+            --list.active;
+            QList<OpenList::Entry> added;
+            QJsonObject data;
+            if (!apiObject(r, &data)) list.error = QStringLiteral("部分目录读取失败，列表不完整");
+            else {
+                const auto value = data.value("content");
+                if (!value.isArray() && !value.isNull()) list.error = QStringLiteral("资源列表格式无效");
+                const auto content = value.toArray();
+                for (const auto &v : content) {
+                    const auto o = v.toObject(); const QString name = o.value("name").toString();
+                    if (!OpenList::safeComponent(name)) { list.error = QStringLiteral("部分文件名不安全，已跳过"); continue; }
+                    const QString full = page.path + '/' + name;
+                    if (o.value("is_dir").toBool()) {
+                        if (page.depth >= maxListingDepth) { list.error = QStringLiteral("目录层级过深，列表不完整"); continue; }
+                        if (!list.visited.contains(full)) {
+                            list.visited.insert(full); list.pending.enqueue({full, 1, page.depth + 1});
+                            OpenList::Entry folder; folder.name = name; folder.remotePath = full;
+                            folder.relativePath = full.mid(remoteRoot().size() + 1);
+                            folder.modified = o.value("modified").toString(); folder.directory = true;
+                            if (list.entries.size() < maxListingEntries) { list.entries.append(folder); added.append(folder); }
+                            else list.error = QStringLiteral("资源过多，列表不完整");
+                        }
+                    } else {
+                        OpenList::Entry entry;
+                        entry.name = name; entry.remotePath = full;
+                        entry.relativePath = full.mid(remoteRoot().size() + 1);
+                        entry.size = static_cast<qint64>(o.value("size").toDouble(-1));
+                        entry.modified = o.value("modified").toString();
+                        if (list.entries.size() < maxListingEntries) { list.entries.append(entry); added.append(entry); }
+                        else list.error = QStringLiteral("文件过多，列表不完整");
+                    }
+                }
+                const int total = data.value("total").toInt();
+                if (!content.isEmpty() && page.page * listingPageSize < total)
+                    list.pending.enqueue({page.path, page.page + 1, page.depth});
+            }
+            if (!added.isEmpty()) emit listingUpdated(added);
+            if (generation != m_listGeneration) return;
+            pump(generation);
+        });
+    }
+    if (listing.active == 0 && listing.pending.isEmpty()) finishListing(generation);
 }
 bool OpenListService::prepareFile() {
     const QStringList parts = m_entry.relativePath.split('/');

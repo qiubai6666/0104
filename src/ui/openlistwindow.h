@@ -33,6 +33,7 @@ private:
     QProgressBar *m_progress;
     QPlainTextEdit *m_log;
     QList<OpenList::Entry> m_entries;
+    QSet<QString> m_entryPaths; // 已加载条目，缓存快照与分块结果按 remotePath 去重。
     QSet<QString> m_selectedPaths; // 跨目录保留的选中项（remotePath）。
     QList<QString> m_selectionOrder; // 勾选顺序；批量下载与安装按此顺序执行。
     OpenList::Entry m_selected;
@@ -42,6 +43,7 @@ private:
     QString m_serial;
     QString m_desktopDirectory;
     bool m_busy = false, m_downloading = false, m_mtTask = false;
+    bool m_listingComplete = false, m_hasCachedSnapshot = false;
     QString m_mtFile;
     int m_queueIndex = 0, m_installIndex = 0, m_pending = 0, m_succeeded = 0, m_failed = 0;
     enum class BatchMode { Install, PhoneTransfer, DesktopTransfer };
@@ -71,7 +73,10 @@ private:
     QList<QPushButton*> m_logFilters;
     void setupUi();
     void refresh();
-    void render();
+    void render(bool preserveScroll = false);
+    void setListingEntries(const QList<OpenList::Entry> &entries);
+    bool appendListingEntries(const QList<OpenList::Entry> &entries);
+    void pruneSelection();
     void activate(int row);
     void startSelection(BatchMode mode);
     void startBatch(const QList<OpenList::Entry> &entries, BatchMode mode = BatchMode::Install);

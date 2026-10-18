@@ -17,6 +17,7 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
+#include <QHash>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -105,7 +106,8 @@ protected:
 
 OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenListInstaller *installer,
                                const QString &desktopDirectory)
-    : QWidget(nullptr), m_launcher(parent), m_service(service ? service : new OpenListService(this)),
+    : QWidget(nullptr), m_launcher(parent),
+      m_service(service ? service : new OpenListService(this, nullptr, QString(), OpenList::defaultListingCacheFile())),
       m_installer(installer ? installer : new OpenListInstaller(this)), m_mtService(new MtManagerService(this)),
       m_desktopDirectory(desktopDirectory.isEmpty()
                              ? QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)
@@ -150,12 +152,30 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         log(QStringLiteral("MT 管理器下载完成（版本 %1），正在检测手机…").arg(version));
         m_installer->inspectDevices();
     });
+    connect(m_service,&OpenListService::listingCached,this,[this](const QList<OpenList::Entry> &entries,const QDateTime &savedAt) {
+        setListingEntries(entries); m_listingComplete = true; m_hasCachedSnapshot = true; render();
+        m_updatedAt->setText(QStringLiteral("缓存于 %1").arg(savedAt.toLocalTime().toString("MM-dd HH:mm")));
+        if (!m_busy) m_status->setText(QStringLiteral("已显示缓存 · 正在更新…"));
+    });
+    connect(m_service,&OpenListService::listingUpdated,this,[this](const QList<OpenList::Entry> &entries) {
+        if (appendListingEntries(entries)) render(true);
+        if (!m_busy && !m_listingComplete) m_status->setText(QStringLiteral("正在加载资源…"));
+    });
     connect(m_service,&OpenListService::listingReady,this,[this](const QList<OpenList::Entry> &entries,const QString &error) {
-        m_entries = entries; render();
+        // 刷新失败时保留已有缓存行；服务层已尽量把缓存与本次结果合并。
+        if (error.isEmpty() || !entries.isEmpty() || m_entries.isEmpty()) setListingEntries(entries);
+        m_listingComplete = error.isEmpty();
+        if (m_listingComplete) pruneSelection();
+        render(true);
         if (!error.isEmpty()) { m_count->setText(error); log(error); }
         else m_updatedAt->setText(QStringLiteral("更新于 %1").arg(QTime::currentTime().toString("HH:mm")));
         if (m_pending > 0 && --m_pending == 0 && !m_busy) {
-            m_status->setText(QStringLiteral("资源已就绪 · 单击单选，按住 Ctrl 多选，双击文件直接安装"));
+            if (!error.isEmpty()) {
+                m_status->setText(m_hasCachedSnapshot ? QStringLiteral("已显示缓存 · 更新失败")
+                                                      : QStringLiteral("资源读取失败，可稍后重试"));
+            } else {
+                m_status->setText(QStringLiteral("资源已就绪 · 单击单选，按住 Ctrl 多选，双击文件直接安装"));
+            }
             m_refresh->setEnabled(true);
         }
     });
@@ -734,12 +754,47 @@ void OpenListWindow::setupUi() {
 void OpenListWindow::refresh() {
     if (m_busy) return;
     m_pending = 1; m_refresh->setEnabled(false); m_status->setText(QStringLiteral("正在读取资源…"));
-    m_currentDirectory.clear(); m_entries.clear(); m_selectedPaths.clear(); m_selectionOrder.clear();
+    m_currentDirectory.clear(); m_listingComplete = false;
+    // 保留上一次结果与已选项：服务端缓存会在 refresh() 内同步先发，网络失败时也不闪空。
     render(); m_count->setText(QStringLiteral("正在读取…"));
     m_service->refresh();
 }
-void OpenListWindow::render() {
-    auto *table = m_table; table->blockSignals(true);
+void OpenListWindow::setListingEntries(const QList<OpenList::Entry> &entries) {
+    m_entries = entries;
+    m_entryPaths.clear();
+    for (const auto &entry : m_entries) m_entryPaths.insert(entry.remotePath);
+}
+bool OpenListWindow::appendListingEntries(const QList<OpenList::Entry> &entries) {
+    bool changed = false;
+    for (const auto &entry : entries) {
+        if (m_entryPaths.contains(entry.remotePath)) continue;
+        m_entryPaths.insert(entry.remotePath);
+        m_entries.append(entry);
+        changed = true;
+    }
+    return changed;
+}
+void OpenListWindow::pruneSelection() {
+    QSet<QString> valid;
+    for (const auto &entry : m_entries) if (!entry.directory) valid.insert(entry.remotePath);
+    QSet<QString> kept;
+    for (const auto &path : m_selectedPaths) if (valid.contains(path)) kept.insert(path);
+    m_selectedPaths = kept;
+    QList<QString> order;
+    for (const auto &path : m_selectionOrder) if (kept.contains(path)) order.append(path);
+    m_selectionOrder = order;
+    updateCount();
+}
+void OpenListWindow::render(bool preserveScroll) {
+    auto *table = m_table;
+    const int scrollValue = preserveScroll ? table->verticalScrollBar()->value() : 0;
+    QHash<QString, int> childCounts;
+    for (const auto &entry : m_entries) {
+        const QString parent = entry.relativePath.contains('/')
+            ? entry.relativePath.left(entry.relativePath.lastIndexOf('/')) : QString();
+        ++childCounts[parent];
+    }
+    table->blockSignals(true);
     table->setRowCount(0);
     const auto filter = m_search->text().trimmed();
     m_up->setEnabled(!m_busy && !m_currentDirectory.isEmpty());
@@ -776,13 +831,9 @@ void OpenListWindow::render() {
         table->setItem(row,1,dirItem);
         QString sizeText;
         if (entry.directory) {
-            int children = 0;
-            for (const auto &other : m_entries) {
-                const QString otherParent = other.relativePath.contains('/')
-                    ? other.relativePath.left(other.relativePath.lastIndexOf('/')) : QString();
-                if (otherParent == entry.relativePath) ++children;
-            }
-            sizeText = QStringLiteral("%1 项").arg(children);
+            const int children = childCounts.value(entry.relativePath);
+            sizeText = (!m_listingComplete && children == 0) ? QStringLiteral("—")
+                                                             : QStringLiteral("%1 项").arg(children);
         } else {
             sizeText = entry.size < 0 ? QStringLiteral("未知") : QLocale().formattedDataSize(entry.size);
         }
@@ -805,6 +856,7 @@ void OpenListWindow::render() {
         }
     }
     table->blockSignals(false);
+    if (preserveScroll) table->verticalScrollBar()->setValue(scrollValue);
     syncChecks();
     updateCount();
 }

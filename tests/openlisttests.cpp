@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QStandardPaths>
+#include <QDateTime>
 #include <QUuid>
 #include <QSignalSpy>
 #include <QFile>
@@ -50,7 +51,21 @@ QByteArray api(QJsonObject data, int code=200) { return QJsonDocument(QJsonObjec
 QJsonObject entry(QString name,bool dir=false,qint64 size=3) {
     return {{"name",name},{"is_dir",dir},{"size",double(size)},{"modified","2026-10-07T08:00:00Z"}};
 }
-bool writeFile(const QString &path,const QByteArray &bytes) { QFile f(path); return f.open(QIODevice::WriteOnly) && f.write(bytes)==bytes.size(); }
+bool writeFile(const QString &path,const QByteArray &bytes) {
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path); return f.open(QIODevice::WriteOnly) && f.write(bytes)==bytes.size();
+}
+QString testRemoteRoot() { return QStringLiteral("/A秋白工作室"); }
+QJsonObject cacheEntry(const QString &name,const QString &relative,bool directory=false,qint64 size=3) {
+    return {{"name",name},{"relativePath",relative},{"remotePath",testRemoteRoot()+"/"+relative},
+            {"modified","2026-10-07T08:00:00Z"},{"size",double(size)},{"directory",directory}};
+}
+QByteArray cachedListing(const QJsonArray &entries,int version=1,const QString &root=QString()) {
+    return QJsonDocument(QJsonObject{
+        {"version",version},{"root",root.isEmpty()?testRemoteRoot():root},
+        {"savedAt",double(QDateTime::currentMSecsSinceEpoch())},{"entries",entries}
+    }).toJson(QJsonDocument::Compact);
+}
 // A hypothetical SFX directory outside the source tree; never write to this path.
 QString sfxDirectory() {
     return QDir(QDir::rootPath()).filePath("OpenList-sfx-fixture-" + QUuid::createUuid().toString(QUuid::Id128));
@@ -65,11 +80,15 @@ public:
         if (!defer) QTimer::singleShot(0,this,[this] { if(done)return; emit readyRead(); emit downloadProgress(bytes.size(),bytes.size()); done=true;setFinished(true); emit finished(); });
     }
     void setHeader(const QByteArray &name, const QByteArray &value) { setRawHeader(name, value); }
+    void finishNow() { if (done) return; done = true; setFinished(true); emit readyRead(); emit finished(); }
     void abort() override { if(done)return;done=true;setError(OperationCanceledError,"cancelled");setFinished(true);emit finished(); }
     qint64 bytesAvailable() const override { return bytes.size()-offset+QNetworkReply::bytesAvailable(); }
 protected:
     qint64 readData(char *data,qint64 max) override {auto n=qMin(max,qint64(bytes.size())-offset);if(n<=0)return -1;memcpy(data,bytes.constData()+offset,size_t(n));offset+=n;return n;}
 };
+void finishReply(Reply *reply) {
+    if (reply) reply->finishNow();
+}
 class Network final : public QNetworkAccessManager {
 public:
     std::function<Reply*(const QNetworkRequest&,const QJsonObject&)> handler;
@@ -271,6 +290,7 @@ private slots:
         QVERIFY(OpenList::safeComponent(QStringLiteral("软件.apk")));
         auto t=OpenList::redact("https://server/x?sign=secret /www/wwwroot/secret token=abc"); QVERIFY(!t.contains("server"));QVERIFY(!t.contains("wwwroot"));QVERIFY(!t.contains("abc"));
         QCOMPARE(OpenListService::sha256({{"hash_info",QJsonObject{{"SHA-256",QString(64,'a')}}}}),QString(64,'a'));
+        QVERIFY(OpenList::defaultListingCacheFile().isEmpty());
     }
     void downloadRootResolution() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -351,6 +371,120 @@ private slots:
         QFile blocker(root); QVERIFY(blocker.open(QIODevice::ReadOnly));
         QCOMPARE(blocker.readAll(), QByteArray("keep existing file"));
         if (!sfx) QVERIFY(!QFileInfo::exists(localData));
+    }
+    void progressiveListing() {
+        Network network; QList<Reply*> pending;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &b) -> Reply* {
+            if (b.value("path").toString() == testRemoteRoot())
+                return new Reply(r, api({{"content", QJsonArray{entry("root.apk"), entry("sub", true)}}, {"total", 2}}), 200);
+            auto *reply = new Reply(r, api({{"content", QJsonArray{entry("child.apk")}}, {"total", 1}}), 200, {}, true);
+            pending.append(reply); return reply;
+        };
+        OpenListService service(nullptr, &network, "unused");
+        QSignalSpy updated(&service, &OpenListService::listingUpdated), ready(&service, &OpenListService::listingReady);
+        service.refresh();
+        QTRY_COMPARE(updated.size(), 1);
+        QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(updated[0][0]).size(), 2);
+        QVERIFY(ready.isEmpty());
+        QTRY_COMPARE(network.requests.size(), 2);
+        QTRY_COMPARE(pending.size(), 1);
+        finishReply(pending.takeFirst());
+        QTRY_COMPARE(ready.size(), 1);
+        QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(ready[0][0]).size(), 3);
+        QVERIFY(ready[0][1].toString().isEmpty());
+    }
+    void boundedListingConcurrency() {
+        Network network; QList<Reply*> pending;
+        QJsonArray folders;
+        for (int i = 0; i < 6; ++i) folders.append(entry(QStringLiteral("d%1").arg(i), true));
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &b) -> Reply* {
+            if (b.value("path").toString() == testRemoteRoot())
+                return new Reply(r, api({{"content", folders}, {"total", 6}}), 200);
+            auto *reply = new Reply(r, api({{"content", QJsonArray{entry("file.apk")}}, {"total", 1}}), 200, {}, true);
+            pending.append(reply); return reply;
+        };
+        OpenListService service(nullptr, &network, "unused");
+        QSignalSpy ready(&service, &OpenListService::listingReady);
+        service.refresh();
+        QTRY_COMPARE(network.requests.size(), 5); // Root + four in-flight directory requests.
+        for (int i = 0; i < 6; ++i) {
+            QTRY_VERIFY(!pending.isEmpty());
+            finishReply(pending.takeFirst());
+            QCoreApplication::processEvents();
+        }
+        QTRY_COMPARE(ready.size(), 1);
+        QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(ready[0][0]).size(), 12);
+        QCOMPARE(network.requests.size(), 7);
+    }
+    void listingCacheRoundTrip() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString cache = dir.filePath(QStringLiteral("cache/openlist.json"));
+        Network network;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &b) -> Reply* {
+            if (b.value("path").toString() == testRemoteRoot())
+                return new Reply(r, api({{"content", QJsonArray{entry("A.apk"), entry("sub", true)}}, {"total", 2}}), 200);
+            return new Reply(r, api({{"content", QJsonArray{entry("child.apk")}}, {"total", 1}}), 200);
+        };
+        {
+            OpenListService first(nullptr, &network, "unused", cache);
+            QSignalSpy ready(&first, &OpenListService::listingReady);
+            first.refresh(); QTRY_COMPARE(ready.size(), 1);
+            QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(ready[0][0]).size(), 3);
+        }
+        QFile file(cache); QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray stored = file.readAll();
+        QVERIFY(!stored.contains("https://")); QVERIFY(!stored.contains("token")); QVERIFY(!stored.contains("sign="));
+        Network secondNetwork; bool requested = false;
+        secondNetwork.handler = [&](const QNetworkRequest &r, const QJsonObject &) -> Reply* {
+            requested = true; return new Reply(r, {}, 200, {}, true);
+        };
+        OpenListService second(nullptr, &secondNetwork, "unused", cache);
+        QSignalSpy cached(&second, &OpenListService::listingCached);
+        second.refresh();
+        QCOMPARE(cached.size(), 1);
+        QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(cached[0][0]).size(), 3);
+        QVERIFY(requested);
+    }
+    void listingCacheRejectsUnsafeOrCorrupt() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString cache = dir.filePath(QStringLiteral("cache/openlist.json"));
+        const QList<QByteArray> payloads{
+            QByteArray("{"),
+            cachedListing(QJsonArray{cacheEntry("old.apk", "old.apk")}, 2),
+            cachedListing(QJsonArray{cacheEntry("../evil.apk", "../evil.apk")}),
+            cachedListing(QJsonArray{QJsonObject{{"name", "x.apk"}, {"relativePath", "x.apk"},
+                {"remotePath", "/wrong/x.apk"}, {"size", 3.0}, {"directory", false}}})
+        };
+        Network network; int requests = 0;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &) -> Reply* {
+            ++requests;
+            return new Reply(r, api({{"content", QJsonArray{entry("fresh.apk")}}, {"total", 1}}), 200);
+        };
+        for (const auto &payload : payloads) {
+            QVERIFY(writeFile(cache, payload));
+            OpenListService service(nullptr, &network, "unused", cache);
+            QSignalSpy cached(&service, &OpenListService::listingCached), ready(&service, &OpenListService::listingReady);
+            requests = 0; service.refresh();
+            QVERIFY(cached.isEmpty());
+            QTRY_COMPARE(ready.size(), 1);
+            QCOMPARE(requests, 1);
+            QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(ready[0][0]).size(), 1);
+        }
+    }
+    void listingFailureMergesCache() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString cache = dir.filePath(QStringLiteral("cache/openlist.json"));
+        QVERIFY(writeFile(cache, cachedListing(QJsonArray{cacheEntry("cached.apk", "cached.apk")})));
+        Network network;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &) -> Reply* {
+            return new Reply(r, "bad", 200);
+        };
+        OpenListService service(nullptr, &network, "unused", cache);
+        QSignalSpy ready(&service, &OpenListService::listingReady);
+        service.refresh(); QTRY_COMPARE(ready.size(), 1);
+        QVERIFY(!ready[0][1].toString().isEmpty());
+        const auto entries = qvariant_cast<QList<OpenList::Entry>>(ready[0][0]);
+        QCOMPARE(entries.size(), 1); QCOMPARE(entries.first().name, QStringLiteral("cached.apk"));
     }
     void recursiveListing(){
         Network network;int pages=0;
@@ -536,6 +670,24 @@ private slots:
     void listingFailureReported(){
         Network network;network.handler=[](const QNetworkRequest&r,const QJsonObject&){return new Reply(r,QByteArray("bad"),200);};
         OpenListService s(nullptr,&network,"unused");QSignalSpy spy(&s,&OpenListService::listingReady);s.refresh();QTRY_COMPARE(spy.size(),1);QVERIFY(!spy[0][1].toString().isEmpty());QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(spy[0][0]).size(),0);
+    }
+    void cachedListingSurvivesFailure() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString cache = dir.filePath(QStringLiteral("cache/openlist.json"));
+        QVERIFY(writeFile(cache, cachedListing(QJsonArray{cacheEntry("cached.apk", "cached.apk")})));
+        Network network;
+        network.handler = [](const QNetworkRequest &r, const QJsonObject &) { return new Reply(r, "bad", 200); };
+        OpenListService service(nullptr, &network, dir.path(), cache);
+        QSignalSpy ready(&service, &OpenListService::listingReady);
+        OpenListWindow window(nullptr, &service, nullptr);
+        QTRY_COMPARE(ready.size(), 1);
+        QVERIFY(!ready[0][1].toString().isEmpty());
+        auto *table = window.findChild<QTableWidget *>("openListFiles"); QVERIFY(table);
+        QCOMPARE(table->rowCount(), 1);
+        QCOMPARE(table->item(0, 0)->text(), QStringLiteral("cached.apk"));
+        auto *refresh = window.findChild<QPushButton *>("openListRefresh"); QVERIFY(refresh);
+        QVERIFY(refresh->isEnabled()); QVERIFY(!window.isBusy());
+        window.close();
     }
     void download_data(){QTest::addColumn<int>("mode");for(int i=0;i<6;++i)QTest::newRow(qPrintable(QString::number(i)))<<i;}
     void download(){
@@ -1411,6 +1563,7 @@ int main(int argc,char **argv) {
         for(char byte:bytes) { std::fwrite(&byte,1,1,stdout); std::fflush(stdout); QThread::msleep(3); }
         return 0;
     }
+    qputenv("OPENLIST_DISABLE_LISTING_CACHE", "1");
     QApplication app(argc,argv); OpenListTests tests; return QTest::qExec(&tests,argc,argv);
 }
 #include "openlisttests.moc"

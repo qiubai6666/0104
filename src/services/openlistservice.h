@@ -11,6 +11,7 @@
 #include <QSet>
 #include <QVector>
 #include <QJsonObject>
+#include <QDateTime>
 
 namespace OpenList {
 struct Entry {
@@ -23,6 +24,8 @@ bool safeComponent(const QString &name);
 bool safeDirectory(const QString &path, bool create);
 QString resolveDownloadRoot(const QString &applicationDirectory, const QString &localDataDirectory);
 QString defaultDownloadRoot();
+// Empty when the cache is disabled or the user cache directory is unavailable.
+QString defaultListingCacheFile();
 }
 Q_DECLARE_METATYPE(OpenList::Entry)
 Q_DECLARE_METATYPE(QList<OpenList::Entry>)
@@ -32,7 +35,7 @@ class OpenListService : public QObject {
     Q_OBJECT
 public:
     explicit OpenListService(QObject *parent = nullptr, QNetworkAccessManager *network = nullptr,
-                             const QString &downloadRoot = QString());
+                             const QString &downloadRoot = QString(), const QString &cacheFile = QString());
     ~OpenListService() override;
     void refresh();
     // directory 非空时直接保存到该目录（文件名扁平化，不保留云端子目录）；
@@ -46,6 +49,9 @@ public:
     static QString sha256(const QJsonObject &metadata);
 signals:
     void listingReady(const QList<OpenList::Entry> &entries, const QString &error);
+    // 首次刷新时先给出上次成功快照；随后 listingUpdated 分块补全。
+    void listingCached(const QList<OpenList::Entry> &entries, const QDateTime &savedAt);
+    void listingUpdated(const QList<OpenList::Entry> &added);
     void progress(qint64 received, qint64 total, double bytesPerSecond);
     void ready(const OpenList::Entry &entry, const QString &file);
     void failed(const QString &message);
@@ -58,8 +64,14 @@ private:
         QList<OpenList::Entry> entries;
         QString error;
         int requests = 0;
+        int active = 0;
+        bool finished = false;
     };
     void pump(quint64 generation);
+    void finishListing(quint64 generation);
+    void loadCacheOnce();
+    QList<OpenList::Entry> mergedWithCache(const QList<OpenList::Entry> &entries) const;
+    void saveCache(const QList<OpenList::Entry> &entries, const QDateTime &savedAt) const;
     QNetworkRequest request(const QUrl &url) const;
     struct Segment {
         QPointer<QNetworkReply> reply;
@@ -85,6 +97,11 @@ private:
     bool m_parallel = false;
     bool m_parallelFallback = false;
     Listing m_listing;
+    QString m_cacheFile;
+    QList<OpenList::Entry> m_cachedEntries;
+    QDateTime m_cacheTime;
+    bool m_cacheLoaded = false;
+    bool m_cacheEmitted = false;
     quint64 m_listGeneration = 0, m_downloadGeneration = 0;
     bool m_active = false;
     OpenList::Entry m_entry;
