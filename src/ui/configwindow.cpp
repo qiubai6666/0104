@@ -192,7 +192,7 @@ void ConfigWindow::openNDM()
         return;
     }
 
-    QProcess *process = ProcessManager::startProcess(ndmPath, QStringList(), qiubaiPath);
+    QProcess *process = ProcessManager::startProcess(ndmPath, QStringList(), qiubaiPath, false, true);
 
     if (process) {
         qDebug() << "NDM已启动，PID:" << process->processId();

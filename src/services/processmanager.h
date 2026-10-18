@@ -11,12 +11,15 @@ class ProcessManager
 {
 public:
     // 创建可复用的受管进程；生命周期仍由调用方指定的 QObject 父对象管理。
-    static QProcess *createProcess(QObject *parent, bool newConsole = false);
+    // nonBlockingTool 标记常驻外部工具（不占用设备通道，仅受退出管理）。
+    static QProcess *createProcess(QObject *parent, bool newConsole = false,
+                                   bool nonBlockingTool = false);
 
     // 启动外部工具并持续持有进程对象，结束后自动释放；启动失败返回 nullptr。
     // Windows 下 newConsole 用于直接打开独立 CMD 窗口，而不是通过 start 脱离管理。
     static QProcess *startProcess(const QString &program, const QStringList &arguments,
-                                  const QString &workingDirectory, bool newConsole = false);
+                                  const QString &workingDirectory, bool newConsole = false,
+                                  bool nonBlockingTool = false);
 
     // 仅结束仍存活的受管进程；可重复调用，不凭历史 PID 查找系统进程。
     static void stopAllProcesses();

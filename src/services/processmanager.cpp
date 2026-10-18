@@ -28,10 +28,14 @@ void discardDestroyedProcesses()
 }
 }
 
-QProcess *ProcessManager::createProcess(QObject *parent, bool newConsole)
+QProcess *ProcessManager::createProcess(QObject *parent, bool newConsole, bool nonBlockingTool)
 {
     discardDestroyedProcesses();
     QProcess *process = new QProcess(parent);
+    if (nonBlockingTool) {
+        // 常驻外部工具（如下载器）不占用设备通道，仅受退出管理。
+        process->setProperty("orangeNonBlockingTool", true);
+    }
 #ifdef Q_OS_WIN
     if (newConsole) {
         // 用户交互控制台、投屏等只受退出管理，不视为占用设备通道的后台操作。
@@ -53,10 +57,11 @@ QProcess *ProcessManager::createProcess(QObject *parent, bool newConsole)
 }
 
 QProcess *ProcessManager::startProcess(const QString &program, const QStringList &arguments,
-                                      const QString &workingDirectory, bool newConsole)
+                                      const QString &workingDirectory, bool newConsole,
+                                      bool nonBlockingTool)
 {
     if (DeviceOperationLease::owner()) return nullptr;
-    QProcess *process = createProcess(QCoreApplication::instance(), newConsole);
+    QProcess *process = createProcess(QCoreApplication::instance(), newConsole, nonBlockingTool);
     process->setWorkingDirectory(workingDirectory);
 
     QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
