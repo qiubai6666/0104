@@ -1498,6 +1498,60 @@ private slots:
         QVERIFY(!service->download(dir)); QVERIFY(failed.isEmpty());
         w.close();
     }
+    void runningQueueDoesNotOverlapCancel() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;
+        network.handler = [&](const QNetworkRequest &request, const QJsonObject &) {
+            if (request.url().path() == "/api/fs/list")
+                return new Reply(request, api({{"content", QJsonArray{}}, {"total", 0}}), 200);
+            if (request.url().path() == "/api/fs/get")
+                return new Reply(request, api({{"raw_url", "https://files.example.com/queued.apk"}, {"size", 3}}), 200, {}, true);
+            return new Reply(request, QByteArray("abc"), 200, {}, true);
+        };
+        OpenListService service(nullptr, &network, dir.path());
+        Runner runner;
+        OpenListInstaller installer(nullptr, &runner, "fake-adb", "fake-7z");
+        OpenListWindow w(nullptr, &service, &installer);
+        QSignalSpy listed(&service, &OpenListService::listingReady);
+        w.show();
+        QTest::qWait(20);
+        QTRY_COMPARE(listed.size(), 1);
+        QList<OpenList::Entry> entries;
+        for (int i = 1; i <= 20; ++i) {
+            OpenList::Entry entry;
+            entry.name = QStringLiteral("queued-%1.apk").arg(i);
+            entry.relativePath = entry.name;
+            entry.remotePath = QStringLiteral("/A秋白工作室/") + entry.name;
+            entry.size = 1000000 + i;
+            entries.append(entry);
+        }
+        emit service.listingReady(entries, QString());
+        auto *table = w.findChild<QTableWidget *>("openListFiles");
+        auto *install = w.findChild<QPushButton *>("openListInstallSelected");
+        QVERIFY(table && install);
+        QCOMPARE(table->rowCount(), 20);
+        table->selectAll();
+        install->click();
+        QVERIFY(w.isBusy());
+        QTRY_VERIFY(!runner.calls.isEmpty());
+        runner.respond(QStringLiteral("phone\tdevice\n"));
+        QTest::qWait(40);
+
+        auto *queue = w.findChild<QScrollArea *>("openListQueueScroll");
+        auto *cancel = w.findChild<QPushButton *>("openListCancel");
+        auto *recent = w.findChild<QWidget *>("openListRecent");
+        QVERIFY(queue && cancel && recent);
+        QVERIFY(queue->isVisible());
+        QVERIFY(cancel->isVisible());
+        QVERIFY(!recent->isVisible());
+        QTRY_VERIFY(queue->verticalScrollBar()->isVisible());
+        QCOMPARE(queue->widget()->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly).size(), 20);
+        const QRect queueRect(queue->mapTo(&w, QPoint(0, 0)), queue->size());
+        const QRect cancelRect(cancel->mapTo(&w, QPoint(0, 0)), cancel->size());
+        QVERIFY(!queueRect.intersects(cancelRect));
+        QVERIFY(queueRect.bottom() < cancelRect.top());
+        w.close();
+    }
+
     void selectionPanelDoesNotOverlapActions() {
         OpenListWindow w;
         w.show();

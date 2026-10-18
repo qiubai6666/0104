@@ -58,6 +58,7 @@ private:
     QPushButton *m_selectAll, *m_clearSelection, *m_backToSelection;
     QWidget *m_idleView, *m_selectionList, *m_selectionEmpty;
     class QScrollArea *m_selectionScroll = nullptr;
+    class QScrollArea *m_queueScroll = nullptr;
     QWidget *m_runView, *m_queueBox, *m_successView;
     QLabel *m_runTile, *m_runFileName, *m_runFileSub, *m_runPercent, *m_runStatsLeft, *m_runStatsRight;
     QLabel *m_successOrb, *m_successTitle, *m_successMessage, *m_successStats;
@@ -65,6 +66,7 @@ private:
     QLabel *m_footerDot, *m_updatedAt, *m_logCount, *m_logTotal, *m_cancelNote;
     QPushButton *m_logButton, *m_openLogInline;
     QLabel *m_recentRow[3];
+    QWidget *m_recentPanel = nullptr;
     QFrame *m_scrim, *m_logSheet;
     bool m_logOpen = false;
     struct LogEntry { QString time; QString text; int level; }; // 0 info / 1 ok / 2 warn。

@@ -27,6 +27,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollBar>
@@ -522,7 +523,20 @@ void OpenListWindow::setupUi() {
     runLayout->addLayout(runStats);
     m_queueBox = new QWidget(m_runView);
     auto *queueLayout = new QVBoxLayout(m_queueBox); queueLayout->setContentsMargins(0,13,0,0); queueLayout->setSpacing(5);
-    runLayout->addWidget(m_queueBox);
+    // 队列放滚动区：文件较多时固定占用剩余空间并滚动，避免把取消按钮挤出或与列表重叠。
+    m_queueScroll = new QScrollArea(m_runView);
+    m_queueScroll->setObjectName("openListQueueScroll");
+    m_queueScroll->setWidgetResizable(true);
+    m_queueScroll->setFrameShape(QFrame::NoFrame);
+    m_queueScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_queueScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_queueScroll->setFocusPolicy(Qt::NoFocus);
+    m_queueScroll->setMinimumHeight(1);
+    m_queueScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_queueScroll->setMaximumHeight(0);
+    m_queueScroll->setWidget(m_queueBox);
+    m_queueScroll->setVisible(false);
+    runLayout->addWidget(m_queueScroll, 1);
     m_cancel = new QPushButton(QStringLiteral("取消下载"), m_runView); m_cancel->setObjectName("openListCancel");
     m_cancel->setEnabled(false); m_cancel->setCursor(Qt::PointingHandCursor);
     runLayout->addSpacing(13); runLayout->addWidget(m_cancel);
@@ -572,6 +586,7 @@ void OpenListWindow::setupUi() {
     panelLayout->addSpacing(6); panelLayout->addWidget(m_installMt);
 
     auto *recent = new QFrame(panel); recent->setObjectName("openListRecent");
+    m_recentPanel = recent;
     auto *recentLayout = new QVBoxLayout(recent); recentLayout->setContentsMargins(8,6,8,6); recentLayout->setSpacing(4);
     auto *recentHead = new QHBoxLayout; recentHead->setContentsMargins(0,0,0,0); recentHead->setSpacing(6);
     auto *recentLabel = new QLabel(QStringLiteral("最近动态"), recent);
@@ -707,6 +722,12 @@ void OpenListWindow::setupUi() {
         QScrollArea#openListSelectionScroll QScrollBar::handle:vertical:hover { background:#BFD5EA; }
         QScrollArea#openListSelectionScroll QScrollBar::add-line:vertical, QScrollArea#openListSelectionScroll QScrollBar::sub-line:vertical { height:0; }
         QScrollArea#openListSelectionScroll QScrollBar::add-page:vertical, QScrollArea#openListSelectionScroll QScrollBar::sub-page:vertical { background:transparent; }
+        QScrollArea#openListQueueScroll, QScrollArea#openListQueueScroll > QWidget > QWidget { background:transparent; border:0; }
+        QScrollArea#openListQueueScroll QScrollBar:vertical { background:transparent; width:5px; margin:1px 0; }
+        QScrollArea#openListQueueScroll QScrollBar::handle:vertical { background:#D9E6F3; border-radius:2px; min-height:24px; }
+        QScrollArea#openListQueueScroll QScrollBar::handle:vertical:hover { background:#BFD5EA; }
+        QScrollArea#openListQueueScroll QScrollBar::add-line:vertical, QScrollArea#openListQueueScroll QScrollBar::sub-line:vertical { height:0; }
+        QScrollArea#openListQueueScroll QScrollBar::add-page:vertical, QScrollArea#openListQueueScroll QScrollBar::sub-page:vertical { background:transparent; }
         QFrame#openListTargetStrip { background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #F7FBFF,stop:1 #F4F9FF); border:1px solid #E9F2FB; border-radius:10px; }
         QPushButton#openListInstallSelected { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #4B97FA,stop:0.54 #2F80ED,stop:1 #226EDB); color:#FFFFFF; border:1px solid #2C7CE9; border-radius:10px; min-height:36px; font-size:11.5px; font-weight:600; }
         QPushButton#openListInstallSelected:hover { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #5AA3FF,stop:0.54 #3B8BF2,stop:1 #2A77E3); }
@@ -1227,6 +1248,8 @@ void OpenListWindow::showTaskView(int view) {
     m_idleView->setVisible(view == 0);
     m_runView->setVisible(view == 1);
     m_successView->setVisible(view == 2);
+    // 执行中把底部最近动态让给任务队列；日志仍可从底部状态条打开。
+    if (m_recentPanel) m_recentPanel->setVisible(view != 1);
 }
 
 void OpenListWindow::updateRunProgress(qint64 received, qint64 total, double speed, const QString &footer) {
@@ -1253,13 +1276,22 @@ void OpenListWindow::rebuildQueue() {
         if (auto *widget = item->widget()) widget->deleteLater();
         delete item;
     }
-    if (m_queue.isEmpty()) { m_queueBox->setVisible(false); return; }
+    if (m_queue.isEmpty()) {
+        m_queueBox->setVisible(false);
+        m_queueScroll->setVisible(false);
+        m_queueScroll->setMaximumHeight(0);
+        return;
+    }
+    m_queueScroll->setVisible(true);
     m_queueBox->setVisible(true);
-    const int visible = qMin(m_queue.size(), 6);
-    for (int i = 0; i < visible; ++i) {
+    constexpr int QueueRowHeight = 18;
+    QPointer<QWidget> activeRow;
+    for (int i = 0; i < m_queue.size(); ++i) {
         const bool done = i < m_queueIndex - 1 || m_installingBatch;
         const bool active = !done && i == m_queueIndex - 1 && !m_installingBatch;
         auto *row = new QWidget(m_queueBox);
+        row->setFixedHeight(QueueRowHeight);
+        if (active) activeRow = row;
         auto *rowLayout = new QHBoxLayout(row); rowLayout->setContentsMargins(0,0,0,0); rowLayout->setSpacing(6);
         auto *state = new QLabel(row); state->setFixedSize(14,14); state->setAlignment(Qt::AlignCenter);
         if (done) {
@@ -1280,10 +1312,17 @@ void OpenListWindow::rebuildQueue() {
         rowLayout->addWidget(state); rowLayout->addWidget(name,1); rowLayout->addWidget(size);
         layout->addWidget(row);
     }
-    if (m_queue.size() > visible) {
-        auto *more = new QLabel(QStringLiteral("… 共 %1 个").arg(m_queue.size()), m_queueBox);
-        more->setStyleSheet("font-size:9px;color:#9BABBB;");
-        layout->addWidget(more);
+    layout->activate();
+    // 内容高度由任务面板剩余空间约束；超出时滚动查看，不再压缩行或覆盖按钮。
+    const int queueRows = m_queue.size();
+    const int naturalHeight = 13 + queueRows * QueueRowHeight + qMax(0, queueRows - 1) * 5;
+    m_queueScroll->setMaximumHeight(naturalHeight);
+    m_queueScroll->setMinimumHeight(1);
+    if (activeRow) {
+        QTimer::singleShot(0, m_queueScroll, [this, activeRow] {
+            if (activeRow && m_queueScroll && m_queueScroll->isVisible())
+                m_queueScroll->ensureWidgetVisible(activeRow, 0, 6);
+        });
     }
 }
 
