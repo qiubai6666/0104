@@ -134,10 +134,6 @@ bool OpenListInstaller::validModuleProperties(const QString &output) {
     }
     return QRegularExpression("^[A-Za-z][A-Za-z0-9._-]*$").match(properties.value("id")).hasMatch() && !properties.value("name").isEmpty();
 }
-bool OpenListInstaller::cleanupDownloadedFile(const QString &file) {
-    const QFileInfo info(file);
-    return info.isFile() && !info.isSymLink() && OpenList::safeDirectory(info.absolutePath(),false) && QFile::remove(file);
-}
 bool OpenListInstaller::inspectDevices() {
     if (busy()) return false;
     if (DeviceOperationLease::owner() && DeviceOperationLease::owner() != this) {
@@ -364,18 +360,11 @@ bool OpenListInstaller::handleTransfer(int code,bool normal,const QString &out) 
             return true;
         }
         const QFileInfo info(m_file);
-        QString name = info.completeBaseName();
+        QString name = info.fileName();
         name.replace(QRegularExpression("[\\x00-\\x1f\\x7f]"),QStringLiteral("_"));
-        m_fallbackRemote = QStringLiteral("/sdcard/") + name + '-' +
-            QUuid::createUuid().toString(QUuid::Id128) + '.' + info.suffix();
-        // Reserve a unique file with shell noclobber; never replace existing user files.
-        adb(TransferDestination,{"shell","set -C; : > " + ShellCommand::quote(m_fallbackRemote)});
-        return true;
-    }
-    if (m_stage == TransferDestination) {
-        if (!success(code,normal,out,false))
-            finish(false,m_result + QStringLiteral(" 无法写入手机内部存储根目录，文件传输失败。"));
-        else adb(TransferPush,{"push",m_file,m_fallbackRemote});
+        // 传输使用下载后的原始文件名，不追加 UUID 或额外后缀。
+        m_fallbackRemote = QStringLiteral("/sdcard/") + name;
+        adb(TransferPush,{"push",m_file,m_fallbackRemote});
         return true;
     }
     if (m_stage == TransferPush) {
@@ -422,10 +411,15 @@ void OpenListInstaller::end(bool ok,const QString &message) {
 }
 void OpenListInstaller::finish(bool ok,const QString &message) {
     QString result = message;
-    if (ok && !m_transferOnly) {
-        if (!cleanupDownloadedFile(m_file))
-            result += (m_script ? QStringLiteral(" 脚本执行成功，但下载文件清理失败：%1") : QStringLiteral(" 安装成功，但下载文件清理失败：%1")).arg(m_file);
-    } else if (!m_file.isEmpty()) result += (m_transferOnly ? QStringLiteral(" 下载文件保留在：%1") : m_script ? QStringLiteral(" 脚本保留在：%1") : QStringLiteral(" 安装包保留在：%1")).arg(m_file);
+    // 电脑端下载文件永不自动删除；明确提示保留位置，供下次直接复用。
+    if (!m_file.isEmpty()) {
+        if (ok) result += (m_transferOnly ? QStringLiteral(" 下载文件保留在：%1")
+                                           : m_script ? QStringLiteral(" 脚本已保留：%1")
+                                                      : QStringLiteral(" 安装包已保留：%1")).arg(m_file);
+        else result += (m_transferOnly ? QStringLiteral(" 下载文件保留在：%1")
+                                        : m_script ? QStringLiteral(" 脚本保留在：%1")
+                                                   : QStringLiteral(" 安装包保留在：%1")).arg(m_file);
+    }
     m_stage = Idle; DeviceOperationLease::release(this); m_file.clear(); m_remoteTouched = false; m_canTransferFailure = false; m_fallbackRemote.clear(); m_transferOnly = false; m_script = false; m_scriptSuccessMarker.clear();
     emit completed(ok,result);
 }

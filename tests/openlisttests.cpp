@@ -551,7 +551,7 @@ private slots:
         QTest::addColumn<int>("mode");
         const char *names[]={"shell-root","su-c","su-s","root-denied","disconnected","push-failed",
             "exit-nonzero","abnormal-exit","missing-marker","error-output-with-marker","remote-cleanup-failed",
-            "local-cleanup-failed","root-lost","cleanup-error-output","repeat-execution-prohibited"};
+            "locked-local-file","root-lost","cleanup-error-output","repeat-execution-prohibited"};
         for (int i=0;i<15;++i) QTest::newRow(names[i]) << i;
     }
     void scriptExecution() {
@@ -611,8 +611,8 @@ private slots:
         // 优先于关键词（模块脚本常输出 "xxx not found, skip" 的正常检查信息）。
         const bool success=mode==0 || mode==1 || mode==2 || mode==9 || mode==10 || mode==11 || mode==13;
         QCOMPARE(done.size(),1); QCOMPARE(done[0][0].toBool(),success);
-        QCOMPARE(QFileInfo::exists(file),!success || mode==11); QVERIFY(QFileInfo::exists(old));
-        if(mode==11) QVERIFY(done[0][1].toString().contains(QStringLiteral("清理失败")));
+        // 电脑端下载文件永不自动删除；成功执行后仍保留供下次直接复用。
+        QVERIFY(QFileInfo::exists(file)); QVERIFY(QFileInfo::exists(old));
         QVERIFY(!installer.busy()); QVERIFY(!DeviceOperationLease::owner());
         int executions=0; for(const auto &call:runner.calls) {
             if(call.args.join(' ').contains("/system/bin/sh")) ++executions;
@@ -657,7 +657,7 @@ private slots:
         runner.respond("phone\tdevice");
         QTRY_COMPARE(downloads,1); QTRY_COMPARE(runner.calls.size(),2);
         runner.respond("phone\tdevice");
-        if(transfer) { runner.respond(""); QVERIFY(runner.calls.last().args.contains("push")); runner.respond("1 file pushed"); }
+        if(transfer) { QVERIFY(runner.calls.last().args.contains("push")); runner.respond("1 file pushed"); }
         else if(mode==0) { runner.denyApkRoot(); QVERIFY(runner.calls.last().args.contains("install")); runner.respond("Success\n"); }
         else {
             runner.respond("0\n"); QVERIFY(runner.calls.last().args.contains("push")); runner.respond("1 file pushed");
@@ -665,7 +665,7 @@ private slots:
             QVERIFY(!marker.isEmpty()); runner.respond(marker+'\n'); runner.respond("");
         }
         QTRY_VERIFY(!window.isBusy()); QVERIFY(table->selectedItems().isEmpty());
-        QCOMPARE(QFileInfo::exists(dir.filePath(QStringLiteral("软件/")+file.relativePath)),transfer);
+        QVERIFY(QFileInfo::exists(dir.filePath(QStringLiteral("软件/")+file.relativePath)));
     }
     void listingFailureReported(){
         Network network;network.handler=[](const QNetworkRequest&r,const QJsonObject&){return new Reply(r,QByteArray("bad"),200);};
@@ -726,6 +726,20 @@ private slots:
         QVERIFY(service.download(entry));
         QTRY_COMPARE(ready.size(),2);
         QCOMPARE(QFileInfo(ready[1][1].toString()).absolutePath(),QDir(root.filePath(QStringLiteral("软件/sub"))).absolutePath());
+    }
+    void localFileReuseResolution() {
+        QTemporaryDir root, desktop; QVERIFY(root.isValid()); QVERIFY(desktop.isValid());
+        OpenListService service(nullptr,nullptr,root.path());
+        OpenList::Entry entry; entry.name="x.apk"; entry.relativePath="sub/x.apk";
+        entry.remotePath=QStringLiteral("/A秋白工作室/sub/x.apk"); entry.size=3;
+        QVERIFY(service.existingLocalFile(entry).isEmpty());
+        const QString local=root.filePath(QStringLiteral("软件/sub/x.apk"));
+        QVERIFY(QDir().mkpath(QFileInfo(local).absolutePath())); QVERIFY(writeFile(local,"abc"));
+        QCOMPARE(service.existingLocalFile(entry),QFileInfo(local).absoluteFilePath());
+        const QString flat=QDir(desktop.path()).filePath("x.apk"); QVERIFY(writeFile(flat,"abc"));
+        QCOMPARE(service.existingLocalFile(entry,desktop.path()),QFileInfo(flat).absoluteFilePath());
+        auto mismatched=entry; mismatched.remotePath=QStringLiteral("/A秋白工作室/other.apk");
+        QVERIFY(service.existingLocalFile(mismatched,desktop.path()).isEmpty());
     }
     void parallelDownload() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
@@ -798,7 +812,7 @@ private slots:
         QVERIFY(all.contains("ERROR:")); QVERIFY(!all.contains("server.test")); QVERIFY(!all.contains("sign="));
         QVERIFY(!all.contains("OL_INSTALL")); QVERIFY(!all.contains("inflating:")); QVERIFY(!all.contains("Archive:"));
         QVERIFY(!all.contains("1 file pushed")); QVERIFY(!all.contains(QStringLiteral("已获得 Shell Root")));
-        r.respond("phone\tdevice"); r.respond(""); r.respond("1 file pushed");
+        r.respond("phone\tdevice"); r.respond("1 file pushed");
         QCOMPARE(done.size(),1); QVERIFY(!done[0][0].toBool());
     }
     void resultsAndModuleFormat(){
@@ -813,9 +827,9 @@ private slots:
         QCOMPARE(OpenListInstaller::authorizedDevices("List of devices attached\na\tdevice\nb\tunauthorized\nc\toffline\nd\tdevice\n"),QStringList({"a","d"}));
     }
     void apkInstall_data(){QTest::addColumn<bool>("ok");QTest::newRow("success")<<true;QTest::newRow("failure")<<false;}
-    void apkInstall(){QFETCH(bool,ok);QTemporaryDir dir;QString f=dir.filePath("a.apk"),other=dir.filePath("old.apk");QVERIFY(writeFile(f,"a"));QVERIFY(writeFile(other,"old"));Runner runner;OpenListInstaller s(nullptr,&runner,"fake-adb","fake-7z");QSignalSpy done(&s,&OpenListInstaller::completed);QVERIFY(s.install(f,false,"phone"));QVERIFY(DeviceOperationLease::owner()==&s);runner.respond("phone\tdevice\n");runner.denyApkRoot();QCOMPARE(runner.calls.last().args,QStringList({"-s","phone","install","-r",f}));runner.respond(ok?"Success\n":"Success\nFailure [bad]",0);if(!ok){runner.respond("phone\tdevice");runner.respond("");runner.respond("1 file pushed");}QCOMPARE(done.size(),1);QCOMPARE(done[0][0].toBool(),ok);QCOMPARE(QFileInfo::exists(f),!ok);QVERIFY(QFileInfo::exists(other));}
-    void disconnectAndRootRefusal(){QTemporaryDir dir;QString f=dir.filePath("m.zip");QVERIFY(writeFile(f,QByteArray("PK\x03\x04",4)));Runner r;OpenListInstaller s(nullptr,&r,"adb","7z");QSignalSpy done(&s,&OpenListInstaller::completed);s.install(f,true,"original");r.respond("other\tdevice");QCOMPARE(done.size(),1);QVERIFY(QFileInfo::exists(f));s.install(f,true,"original");r.respond("original\tdevice");r.respond("Path = module.prop\nEncrypted = -");r.respond("Everything is Ok");r.respond("id=test\nname=Test");r.respond("permission denied",1);r.respond("original\tdevice");r.respond("");r.respond("1 file pushed");QCOMPARE(done.size(),2);QVERIFY(QFileInfo::exists(f));}
-    void moduleChoiceAndCleanup(){QTemporaryDir dir;QString f=dir.filePath("m.zip");QVERIFY(writeFile(f,QByteArray("PK\x03\x04",4)));Runner r;OpenListInstaller s(nullptr,&r,"adb","7z");QSignalSpy choice(&s,&OpenListInstaller::rootChoiceRequired),done(&s,&OpenListInstaller::completed);s.install(f,true,"phone");r.respond("phone\tdevice");r.respond("Path = module.prop\nEncrypted = -");r.respond("Everything is Ok");r.respond("id=test\nname=Test");r.respond("0\n");r.respond("OL_MAGISK=/data/adb/magisk/magisk\nOL_KERNELSU=/data/adb/ksu/bin/ksud\n");QCOMPARE(choice.size(),1);s.chooseRoot("KernelSU");QCOMPARE(r.calls.last().args.value(2),QString("push"));QString remote=r.calls.last().args.last();QVERIFY(remote.startsWith("/data/local/tmp/orange-openlist-"));r.respond("1 file pushed");QVERIFY(r.calls.last().args.last().contains("ksud"));r.respond("Done\nOL_INSTALL_SUCCESS\n");QVERIFY(r.calls.last().args.last().contains("rm -f"));r.respond("device disconnected",1);QCOMPARE(done.size(),1);QVERIFY(done[0][0].toBool());QVERIFY(!QFileInfo::exists(f));}
+    void apkInstall(){QFETCH(bool,ok);QTemporaryDir dir;QString f=dir.filePath("a.apk"),other=dir.filePath("old.apk");QVERIFY(writeFile(f,"a"));QVERIFY(writeFile(other,"old"));Runner runner;OpenListInstaller s(nullptr,&runner,"fake-adb","fake-7z");QSignalSpy done(&s,&OpenListInstaller::completed);QVERIFY(s.install(f,false,"phone"));QVERIFY(DeviceOperationLease::owner()==&s);runner.respond("phone\tdevice\n");runner.denyApkRoot();QCOMPARE(runner.calls.last().args,QStringList({"-s","phone","install","-r",f}));runner.respond(ok?"Success\n":"Success\nFailure [bad]",0);if(!ok){runner.respond("phone\tdevice");runner.respond("1 file pushed");}QCOMPARE(done.size(),1);QCOMPARE(done[0][0].toBool(),ok);QVERIFY(QFileInfo::exists(f));QVERIFY(QFileInfo::exists(other));}
+    void disconnectAndRootRefusal(){QTemporaryDir dir;QString f=dir.filePath("m.zip");QVERIFY(writeFile(f,QByteArray("PK\x03\x04",4)));Runner r;OpenListInstaller s(nullptr,&r,"adb","7z");QSignalSpy done(&s,&OpenListInstaller::completed);s.install(f,true,"original");r.respond("other\tdevice");QCOMPARE(done.size(),1);QVERIFY(QFileInfo::exists(f));s.install(f,true,"original");r.respond("original\tdevice");r.respond("Path = module.prop\nEncrypted = -");r.respond("Everything is Ok");r.respond("id=test\nname=Test");r.respond("permission denied",1);r.respond("original\tdevice");r.respond("1 file pushed");QCOMPARE(done.size(),2);QVERIFY(QFileInfo::exists(f));}
+    void moduleChoiceAndCleanup(){QTemporaryDir dir;QString f=dir.filePath("m.zip");QVERIFY(writeFile(f,QByteArray("PK\x03\x04",4)));Runner r;OpenListInstaller s(nullptr,&r,"adb","7z");QSignalSpy choice(&s,&OpenListInstaller::rootChoiceRequired),done(&s,&OpenListInstaller::completed);s.install(f,true,"phone");r.respond("phone\tdevice");r.respond("Path = module.prop\nEncrypted = -");r.respond("Everything is Ok");r.respond("id=test\nname=Test");r.respond("0\n");r.respond("OL_MAGISK=/data/adb/magisk/magisk\nOL_KERNELSU=/data/adb/ksu/bin/ksud\n");QCOMPARE(choice.size(),1);s.chooseRoot("KernelSU");QCOMPARE(r.calls.last().args.value(2),QString("push"));QString remote=r.calls.last().args.last();QVERIFY(remote.startsWith("/data/local/tmp/orange-openlist-"));r.respond("1 file pushed");QVERIFY(r.calls.last().args.last().contains("ksud"));r.respond("Done\nOL_INSTALL_SUCCESS\n");QVERIFY(r.calls.last().args.last().contains("rm -f"));r.respond("device disconnected",1);QCOMPARE(done.size(),1);QVERIFY(done[0][0].toBool());QVERIFY(QFileInfo::exists(f));}
     void rootApkInstall_data() {
         QTest::addColumn<int>("mode");
         QTest::newRow("root-shell") << 0;
@@ -867,14 +881,14 @@ private slots:
         const bool ok=mode<=3 || mode==7;
         if (!ok) {
             QCOMPARE(r.calls.last().args,QStringList({"devices"}));
-            r.respond("original\tdevice"); r.respond("");
+            r.respond("original\tdevice");
             QCOMPARE(r.calls.last().args.mid(0,4),QStringList({"-s","original","push",file}));
             QVERIFY(r.calls.last().args.last().startsWith("/sdcard/"));
             r.respond("1 file pushed");
         }
         for(const auto &line:logs) QVERIFY(!line[0].toString().contains(QStringLiteral("已获得 Shell Root 权限")));
         QCOMPARE(done.size(),1); QCOMPARE(done[0][0].toBool(),ok);
-        QCOMPARE(QFileInfo::exists(file),!ok);
+        QVERIFY(QFileInfo::exists(file));
         QVERIFY(!s.busy()); QVERIFY(!DeviceOperationLease::owner());
         for (const auto &call:r.calls) {
             if(call.args==QStringList({"devices"})) continue;
@@ -886,7 +900,6 @@ private slots:
         QTest::newRow("transferred") << 0;
         QTest::newRow("disconnected-no-switch") << 1;
         QTest::newRow("unauthorized") << 2;
-        QTest::newRow("destination-unwritable") << 3;
         QTest::newRow("push-failed") << 4;
         QTest::newRow("push-crashed") << 5;
         QTest::newRow("push-keyword-with-zero-exit") << 6;
@@ -908,26 +921,18 @@ private slots:
         QCOMPARE(r.calls.last().args,QStringList({"devices"}));
         r.respond(mode==1 ? "other\tdevice" : mode==2 ? "original\tunauthorized" : "original\tdevice");
         if (mode!=1 && mode!=2) {
-            QCOMPARE(r.calls.last().args.mid(0,3),QStringList({"-s","original","shell"}));
-            QVERIFY(r.calls.last().args.last().contains("/sdcard/"));
-            QVERIFY(r.calls.last().args.last().startsWith("set -C;"));
-            r.respond(mode==3 ? "permission denied" : "",mode==3 ? 1 : 0);
-            if (mode!=3) {
-                QCOMPARE(r.calls.last().args.mid(0,4),QStringList({"-s","original","push",file}));
-                const QString remote=r.calls.last().args.last();
-                QVERIFY(remote.startsWith("/sdcard/"));
-                QVERIFY(remote.endsWith(".apk"));
-                QVERIFY(remote.contains(QFileInfo(file).completeBaseName()));
-                QCOMPARE(remote.split('/').size(),3);
-                QVERIFY(DeviceOperationLease::owner()==&s);
-                // mode 6：push 输出 error 字样但退出码 0——按退出码判定推送成功，
-                // 不再触发关键词误判后的降级清理。
-                r.respond(mode==0 || mode==6 ? "1 file pushed" : "error: no space",mode==4 || mode==7 ? 1 : 0,mode!=5);
-                if(mode!=0 && mode!=6) {
-                    QVERIFY(r.calls.last().args.last().contains("rm -f"));
-                    QVERIFY(!r.calls.last().args.last().contains("rmdir"));
-                    r.respond(mode==7 ? "device offline" : "",mode==7 ? 1 : 0);
-                }
+            // 传输直接使用下载后的原始文件名，不再先创建占位文件或追加 UUID。
+            QCOMPARE(r.calls.last().args.mid(0,3),QStringList({"-s","original","push"}));
+            const QString remote=r.calls.last().args.last();
+            QCOMPARE(remote,QStringLiteral("/sdcard/")+QFileInfo(file).fileName());
+            QVERIFY(DeviceOperationLease::owner()==&s);
+            // mode 6：push 输出 error 字样但退出码 0——按退出码判定推送成功，
+            // 不再触发关键词误判后的降级清理。
+            r.respond(mode==0 || mode==6 ? "1 file pushed" : "error: no space",mode==4 || mode==7 ? 1 : 0,mode!=5);
+            if(mode!=0 && mode!=6) {
+                QVERIFY(r.calls.last().args.last().contains("rm -f"));
+                QVERIFY(!r.calls.last().args.last().contains("rmdir"));
+                r.respond(mode==7 ? "device offline" : "",mode==7 ? 1 : 0);
             }
         }
         QCOMPARE(done.size(),1); QVERIFY(!done[0][0].toBool());
@@ -944,7 +949,6 @@ private slots:
         QTest::newRow("success") << 0;
         QTest::newRow("disconnected") << 1;
         QTest::newRow("unauthorized") << 2;
-        QTest::newRow("storage-denied") << 3;
         QTest::newRow("push-failed") << 4;
         QTest::newRow("abnormal-exit") << 5;
         QTest::newRow("cleanup-failed") << 6;
@@ -960,20 +964,15 @@ private slots:
         QVERIFY(!s.transfer(file,"other")); QCOMPARE(r.calls.size(),1);
         r.respond(mode==1 ? "other\tdevice" : mode==2 ? "original\tunauthorized" : "original\tdevice");
         if (mode!=1 && mode!=2) {
-            QCOMPARE(r.calls.last().args.mid(0,3),QStringList({"-s","original","shell"}));
-            QVERIFY(r.calls.last().args.last().startsWith("set -C;"));
-            r.respond(mode==3 ? "permission denied" : "",mode==3 ? 1 : 0);
-            if (mode!=3) {
-                QCOMPARE(r.calls.last().args.mid(0,4),QStringList({"-s","original","push",file}));
-                const QString remote=r.calls.last().args.last();
-                QVERIFY(remote.startsWith("/sdcard/")); QVERIFY(remote.endsWith(".zip"));
-                QCOMPARE(remote.split('/').size(),3);
-                r.respond(mode==0 ? "1 file pushed" : "error: no space",mode==0 ? 0 : 1,mode!=5);
-                if (mode!=0) {
-                    QVERIFY(r.calls.last().args.last().contains("rm -f"));
-                    QVERIFY(r.calls.last().args.last().contains(ShellCommand::quote(remote)));
-                    r.respond(mode==6 ? "device offline" : "",mode==6 ? 1 : 0);
-                }
+            QCOMPARE(r.calls.last().args.mid(0,3),QStringList({"-s","original","push"}));
+            QCOMPARE(r.calls.last().args.mid(0,4),QStringList({"-s","original","push",file}));
+            const QString remote=r.calls.last().args.last();
+            QCOMPARE(remote,QStringLiteral("/sdcard/")+QFileInfo(file).fileName());
+            r.respond(mode==0 ? "1 file pushed" : "error: no space",mode==0 ? 0 : 1,mode!=5);
+            if (mode!=0) {
+                QVERIFY(r.calls.last().args.last().contains("rm -f"));
+                QVERIFY(r.calls.last().args.last().contains(ShellCommand::quote(remote)));
+                r.respond(mode==6 ? "device offline" : "",mode==6 ? 1 : 0);
             }
         }
         QCOMPARE(done.size(),1); QCOMPARE(done[0][0].toBool(),mode==0);
@@ -983,11 +982,11 @@ private slots:
         for (const auto &call : r.calls) {
             QVERIFY(!call.args.contains("install")); QVERIFY(!call.args.join(' ').contains("pm install"));
         }
-        // A subsequent APK installation returns to normal cleanup; a ZIP is not an APK.
+        // 成功安装后也保留电脑端文件，供后续直接复用。
         const QString apk=dir.filePath("next.apk"); QVERIFY(writeFile(apk,"apk"));
         QVERIFY(s.install(apk,"original"));
         r.respond("original\tdevice"); r.denyApkRoot(); r.respond("Success");
-        QCOMPARE(done.size(),2); QVERIFY(done[1][0].toBool()); QVERIFY(!QFileInfo::exists(apk));
+        QCOMPARE(done.size(),2); QVERIFY(done[1][0].toBool()); QVERIFY(QFileInfo::exists(apk));
         QVERIFY(QFileInfo::exists(file));
     }
     void transferPreflightRejectsInvalidTargetOrFile() {
@@ -1001,20 +1000,22 @@ private slots:
         QVERIFY(!DeviceOperationLease::owner()); QCOMPARE(r.calls.size(),0);
         QCOMPARE(done.size(),4); QVERIFY(QFileInfo::exists(file));
     }
-    void cleanupFailure() {
+    void lockedLocalFileDoesNotAffectInstall() {
         QTemporaryDir dir; QString f=dir.filePath("a.apk"); QVERIFY(writeFile(f,"a"));
         Runner r; OpenListInstaller s(nullptr,&r,"adb","7z"); QSignalSpy done(&s,&OpenListInstaller::completed);
         s.install(f,false,"p"); r.respond("p\tdevice"); r.denyApkRoot();
 #ifdef Q_OS_WIN
+        // 安装成功不再尝试删除电脑端文件，锁定文件也不影响结果。
         const auto handle=CreateFileW(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(f).utf16()),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
         QVERIFY(handle!=INVALID_HANDLE_VALUE);
         r.respond("Success\n"); CloseHandle(handle);
-        QVERIFY(QFileInfo::exists(f));
-        QVERIFY(done[0][1].toString().contains(QStringLiteral("清理失败")));
 #else
         r.respond("Success\n");
 #endif
         QCOMPARE(done.size(),1); QVERIFY(done[0][0].toBool());
+        QVERIFY(done[0][1].toString().contains(QStringLiteral("APK 安装成功")));
+        QVERIFY(!done[0][1].toString().contains(QStringLiteral("清理失败")));
+        QVERIFY(QFileInfo::exists(f));
     }
     void linkedDirectoryRejected() {
 #ifdef Q_OS_WIN
@@ -1070,7 +1071,7 @@ private slots:
                 r.respond(stage==2 ? "error: disconnected" : "1 file pushed",stage==2 ? 1 : 0);
                 if(stage>2) r.respond(stage==3 ? "OL_INSTALL_SUCCESS\nERROR: denied" : stage==4 ? "" : "OL_INSTALL_SUCCESS",stage==3 ? 1 : 0,stage!=5);
                 r.respond("");
-                r.respond("phone\tdevice"); r.respond(""); r.respond("1 file pushed");
+                r.respond("phone\tdevice"); r.respond("1 file pushed");
             }
         }
         QCOMPARE(done.size(),1); QVERIFY(!done[0][0].toBool()); QVERIFY(QFileInfo::exists(file));
@@ -1152,7 +1153,6 @@ private slots:
             } else {
                 runner.respond("phone\tdevice");
                 if (mode==7) {
-                    runner.respond("");
                     QCOMPARE(runner.calls.last().args.mid(0,3),QStringList({"-s","phone","push"}));
                     QVERIFY(runner.calls.last().args.last().startsWith("/sdcard/"));
                     runner.respond("1 file pushed");
@@ -1167,14 +1167,15 @@ private slots:
                     runner.denyApkRoot();
                     QCOMPARE(runner.calls.last().args.mid(0,4),QStringList({"-s","phone","install","-r"}));
                     runner.respond(mode==1 && i==0 ? "Failure [INSTALL_FAILED_USER_RESTRICTED]" : "Success",mode==1 && i==0 ? 1 : 0);
-                    if(mode==1 && i==0) { runner.respond("phone\tdevice"); runner.respond(""); runner.respond("1 file pushed"); }
+                    if(mode==1 && i==0) { runner.respond("phone\tdevice"); runner.respond("1 file pushed"); }
                 }
             }
             if (i+1<installations) QTRY_VERIFY(runner.active);
         }
         QTRY_VERIFY(!window.isBusy()); QVERIFY(button->isEnabled());
-        QCOMPARE(QFileInfo::exists(firstFile),mode==1 || mode==4 || mode==7);
-        QCOMPARE(QFileInfo::exists(secondFile),mode==4 || mode==7);
+        // 下载成功或安装失败的文件都保留；只有下载本身失败时首个文件不存在。
+        QCOMPARE(QFileInfo::exists(firstFile),mode!=2);
+        QVERIFY(QFileInfo::exists(secondFile));
     }
     void ctrlOnlyMultiSelection() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;
@@ -1284,6 +1285,92 @@ private slots:
         QVERIFY(!QFileInfo::exists(root.filePath(QStringLiteral("软件/说明.txt"))));
         QVERIFY(!QFileInfo::exists(root.filePath(QStringLiteral("软件/app.apk"))));
         QVERIFY(table->selectedItems().isEmpty());
+        // 再次传输同一批文件：桌面已有文件时直接复用，不再访问网络。
+        table->selectAll();
+        button->click();
+        QVERIFY(window.isBusy());
+        QTRY_VERIFY(!window.isBusy());
+        QCOMPARE(downloads,2);
+        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("说明.txt")));
+        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("app.apk")));
+    }
+    void installReusesExistingLocalFile() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network; int downloads=0;
+        network.handler=[&](const QNetworkRequest &r,const QJsonObject &body){
+            if (r.url().path()=="/api/fs/list") return new Reply(r,api({{"content",QJsonArray{}},{"total",0}}),200);
+            if (r.url().path()=="/api/fs/get") {
+                ++downloads;
+                return new Reply(r,api({{"raw_url","https://files.example.com/"+body.value("path").toString().section('/',-1)},{"size",3}}),200);
+            }
+            return new Reply(r,QByteArray("abc"),200);
+        };
+        OpenListService service(nullptr,&network,dir.path()); Runner runner;
+        OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z");
+        OpenListWindow window(nullptr,&service,&installer);
+        QSignalSpy listed(&service,&OpenListService::listingReady); QTRY_COMPARE(listed.size(),1);
+        OpenList::Entry entry; entry.name="app.apk"; entry.relativePath=entry.name;
+        entry.remotePath=QStringLiteral("/A秋白工作室/")+entry.name; entry.size=3;
+        emit service.listingReady({entry},{});
+        auto *table=window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table);
+        auto *button=window.findChild<QPushButton*>("openListInstallSelected"); QVERIFY(button);
+        table->selectRow(0);
+        button->click(); QVERIFY(window.isBusy());
+        runner.respond("phone\tdevice");
+        QTRY_COMPARE(downloads,1);
+        QTRY_VERIFY(runner.active);
+        QVERIFY(runner.calls.last().args.contains("devices"));
+        runner.respond("phone\tdevice");
+        runner.denyApkRoot();
+        QVERIFY(runner.calls.last().args.contains("install"));
+        runner.respond("Success");
+        QTRY_VERIFY(!window.isBusy());
+        const QString local=dir.filePath(QStringLiteral("软件/app.apk"));
+        QVERIFY(QFileInfo::exists(local));
+        // 第二次安装：本地文件已存在，不重新下载，安装成功后也不删除。
+        table->selectRow(0);
+        button->click(); QVERIFY(window.isBusy());
+        runner.respond("phone\tdevice");
+        QTRY_VERIFY(runner.active);
+        QTRY_VERIFY(runner.calls.last().args.contains("devices"));
+        QCOMPARE(downloads,1);
+        runner.respond("phone\tdevice");
+        runner.denyApkRoot();
+        QVERIFY(runner.calls.last().args.contains("install"));
+        runner.respond("Success");
+        QTRY_VERIFY(!window.isBusy());
+        QCOMPARE(downloads,1);
+        QVERIFY(QFileInfo::exists(local));
+    }
+    void transferReusesExistingLocalFile() {
+        QTemporaryDir dir; QVERIFY(dir.isValid()); Network network; int downloads=0;
+        network.handler=[&](const QNetworkRequest &r,const QJsonObject &){
+            if (r.url().path()=="/api/fs/list") return new Reply(r,api({{"content",QJsonArray{}},{"total",0}}),200);
+            if (r.url().path()=="/api/fs/get") { ++downloads; return new Reply(r,"bad",500); }
+            return new Reply(r,QByteArray("abc"),200);
+        };
+        OpenListService service(nullptr,&network,dir.path()); Runner runner;
+        OpenListInstaller installer(nullptr,&runner,"fake-adb","fake-7z");
+        OpenListWindow window(nullptr,&service,&installer);
+        QSignalSpy listed(&service,&OpenListService::listingReady); QTRY_COMPARE(listed.size(),1);
+        OpenList::Entry entry; entry.name="说明.txt"; entry.relativePath=entry.name;
+        entry.remotePath=QStringLiteral("/A秋白工作室/")+entry.name; entry.size=3;
+        emit service.listingReady({entry},{});
+        const QString local=dir.filePath(QStringLiteral("软件/说明.txt"));
+        QVERIFY(QDir().mkpath(QFileInfo(local).absolutePath())); QVERIFY(writeFile(local,"abc"));
+        auto *table=window.findChild<QTableWidget*>("openListFiles"); QVERIFY(table); table->selectRow(0);
+        auto *button=window.findChild<QPushButton*>("openListTransferSelected"); QVERIFY(button);
+        button->click(); QVERIFY(window.isBusy());
+        runner.respond("phone\tdevice");
+        QTRY_VERIFY(runner.active);
+        QVERIFY(runner.calls.last().args.contains("devices"));
+        QCOMPARE(downloads,0);
+        runner.respond("phone\tdevice");
+        QVERIFY(runner.calls.last().args.contains("push"));
+        QCOMPARE(runner.calls.last().args.last(),QStringLiteral("/sdcard/说明.txt"));
+        runner.respond("1 file pushed");
+        QTRY_VERIFY(!window.isBusy());
+        QCOMPARE(downloads,0);
+        QVERIFY(QFileInfo::exists(local));
     }
     void installOrderFollowsSelectionOrder() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); Network network; int downloads=0;
@@ -1382,8 +1469,8 @@ private slots:
         runner.respond("phone\tdevice");
         QTRY_COMPARE(runner.calls.size(), 3);
         if (transferOnly) {
-            runner.respond("");
             QCOMPARE(runner.calls.last().args.mid(0,3),QStringList({"-s","phone","push"}));
+            QCOMPARE(runner.calls.last().args.last(),QStringLiteral("/sdcard/child.apk"));
             runner.respond("1 file pushed");
         } else {
             runner.denyApkRoot();
@@ -1392,7 +1479,7 @@ private slots:
         }
         QTRY_VERIFY(!window.isBusy());
         QVERIFY(table->selectedItems().isEmpty());
-        QCOMPARE(QFileInfo::exists(dir.filePath(QStringLiteral("软件/folder/child.apk"))),transferOnly);
+        QVERIFY(QFileInfo::exists(dir.filePath(QStringLiteral("软件/folder/child.apk"))));
     }
     void selectionPersistsAcrossFolders() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); Network network;

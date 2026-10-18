@@ -40,7 +40,6 @@ public:
     static bool success(int code, bool normal, const QString &output, bool apk);
     static bool validModuleListing(const QString &output);
     static bool validModuleProperties(const QString &output);
-    static bool cleanupDownloadedFile(const QString &file);
 signals:
     void devicesReady(const QStringList &serials);
     void rootChoiceRequired(const QStringList &managers);
@@ -49,7 +48,7 @@ signals:
 private:
     enum Stage { Idle, WaitingDevice, Discover, Verify, ZipList, ZipTest, ZipProperties, RootAccess,
                  Managers, RootChoice, Push, ModuleInstall, RemoteCleanup, ApkInstall,
-                 TransferVerify, TransferDestination, TransferPush, TransferCleanup,
+                 TransferVerify, TransferPush, TransferCleanup,
                  ApkRootProbe, ApkRootPush, ApkRootInstall, ScriptPush, ScriptRun };
     Stage m_stage = Idle;
     QTimer m_deviceWait;

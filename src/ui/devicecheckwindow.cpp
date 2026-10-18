@@ -659,6 +659,7 @@ void DeviceCheckWindow::setupUI()
     cmdButton->setFixedHeight(34);
     cmdButton->setCursor(Qt::PointingHandCursor);
     cmdButton->setStyleSheet(utilityButtonStyle);
+    cmdButton->setToolTip("无设备时也可打开，手动执行 adb devices 检测。");
     connect(cmdButton, &QPushButton::clicked, this, &DeviceCheckWindow::onOpenCmdClicked);
     actionRow->addWidget(cmdButton);
     mainLayout->addLayout(actionRow);
@@ -813,14 +814,10 @@ void DeviceCheckWindow::onRebootButtonClicked()
 
 void DeviceCheckWindow::onOpenCmdClicked()
 {
-    if (DeviceOperationLease::busyFor(this)) return;
     if (operationInProgress) return;
-    QString serialError;
-    const QString serial = DeviceManager::instance()->uniqueDeviceSerial(&serialError);
-    if (serial.isEmpty()) {
-        UIHelper::showCenteredMessageBox(QMessageBox::Warning, "无法打开 CMD", serialError, this);
-        return;
-    }
+    // 设备列表还没加载出来时也允许打开 CMD，供用户手动执行 adb devices；
+    // 只有唯一设备才注入 ANDROID_SERIAL，多设备/无设备交给命令自行指定。
+    const QString serial = DeviceManager::instance()->uniqueDeviceSerial();
     QString qiubaiPath = ResourceExtractor::getResourcePath();
     QString cmdBatPath = qiubaiPath + "/CMD.bat";
     
@@ -834,7 +831,8 @@ void DeviceCheckWindow::onOpenCmdClicked()
     QProcess *process = ProcessManager::createProcess(this, true);
     process->setWorkingDirectory(qiubaiPath);
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    environment.insert(QStringLiteral("ANDROID_SERIAL"), serial);
+    if (!serial.isEmpty()) environment.insert(QStringLiteral("ANDROID_SERIAL"), serial);
+    else environment.remove(QStringLiteral("ANDROID_SERIAL"));
     process->setProcessEnvironment(environment);
     process->start("cmd.exe", QStringList() << "/d" << "/c" << "CMD.bat");
     if (!process->waitForStarted(3000)) {

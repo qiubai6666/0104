@@ -116,6 +116,7 @@ private slots:
     void repairMenuCanHideAndResume();
     void destructionRestoresMonitoring();
     void successfulFlashAndRebootRestoreMonitoring();
+    void openCmdWithoutDeviceOrLease();
     void failedStartRestoresMonitoring();
     void waitTimeoutReleasesOperation();
     void fastbootDelayRemainsExclusive();
@@ -1026,6 +1027,22 @@ void DeviceOperationTests::transferDeviceChangeStopsBatch()
     QVERIFY(lastMessage.contains(QStringLiteral("未传输：1")));
     QVERIFY(lastMessage.contains(QStringLiteral("原设备已断开或改变")));
     QVERIFY(DeviceOperationLease::owner() == nullptr);
+}
+
+void DeviceOperationTests::openCmdWithoutDeviceOrLease()
+{
+    DeviceManager::instance()->setDetectedDevice(DeviceManager::None, {});
+    DeviceCheckWindow window;
+    QVERIFY(window.cmdButton->isEnabled());
+    QObject operation;
+    QVERIFY(DeviceOperationLease::acquire(&operation));
+    // 无设备且设备通道被占用时仍应打开 CMD；缺少 CMD.bat 是唯一阻止原因。
+    window.cmdButton->click();
+    QTRY_COMPARE(messages, 1);
+    QVERIFY(lastMessage.contains(QStringLiteral("找不到 CMD.bat")));
+    QVERIFY(!lastMessage.contains(QStringLiteral("无法打开 CMD")));
+    QVERIFY(!lastMessage.contains(QStringLiteral("未检测到")));
+    DeviceOperationLease::release(&operation);
 }
 
 void DeviceOperationTests::repeatedActionsKeepRunningFlash()

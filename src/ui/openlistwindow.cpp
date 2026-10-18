@@ -38,6 +38,15 @@
 #include <functional>
 
 namespace {
+// 本地路径键：Windows 不区分大小写，避免同一文件因大小写不同被重复下载。
+QString localPathKey(const QString &path) {
+    const QString clean = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+#ifdef Q_OS_WIN
+    return clean.toCaseFolded();
+#else
+    return clean;
+#endif
+}
 // 日志分级：WARN 命中失败/取消类关键词，OK 命中成功/完成，其余 INFO。
 int classifyLog(const QString &text) {
     if (text.contains(QStringLiteral("失败")) || text.contains(QStringLiteral("错误")) || text.contains(QStringLiteral("取消"))
@@ -198,6 +207,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     connect(m_service,&OpenListService::ready,this,[this](const OpenList::Entry &entry,const QString &file) {
         if (!m_busy || !m_downloading) return;
         m_downloading = false;
+        m_usedLocalFiles.insert(localPathKey(file));
         m_downloaded.append({entry,file});
         if (m_batchMode == BatchMode::DesktopTransfer)
             log(QStringLiteral("已传输到电脑桌面：%1").arg(QFileInfo(file).fileName()));
@@ -960,6 +970,7 @@ void OpenListWindow::startSelection(BatchMode mode) {
     }
     m_batchMode = mode;
     m_downloaded.clear(); m_serial.clear(); m_queueIndex = 0; m_installIndex = 0;
+    m_usedLocalFiles.clear();
     m_succeeded = 0; m_failed = 0; m_installingBatch = false; m_cancelled = false;
     setBusy(true);
     m_runTile->setPixmap(typeTilePixmap(m_queue.first(),35));
@@ -979,13 +990,36 @@ void OpenListWindow::startSelection(BatchMode mode) {
 void OpenListWindow::advanceBatch() {
     if (!m_busy || m_downloading || m_installer->busy()) return;
     const bool desktop = m_batchMode == BatchMode::DesktopTransfer;
+    const bool phone = m_batchMode == BatchMode::PhoneTransfer;
     if (m_cancelled) {
         for (const auto &download : m_downloaded)
             log(QStringLiteral("已取消，下载文件保留在：%1").arg(download.file));
         finish(QStringLiteral("批量任务已取消；已完成的下载保留。"),false); return;
     }
     if (!m_installingBatch && m_queueIndex < m_queue.size()) {
-        m_selected = m_queue[m_queueIndex++]; m_downloading = true; m_cancel->setEnabled(true);
+        m_selected = m_queue[m_queueIndex++];
+        const QString existing = m_service->existingLocalFile(
+            m_selected, desktop ? m_desktopDirectory : QString());
+        if (!existing.isEmpty() && !m_usedLocalFiles.contains(localPathKey(existing))) {
+            m_usedLocalFiles.insert(localPathKey(existing));
+            m_downloaded.append({m_selected, existing});
+            m_runTile->setPixmap(typeTilePixmap(m_selected,35));
+            m_runFileName->setText(m_selected.name);
+            m_runFileSub->setText(QStringLiteral("本地文件 · 第 %1/%2 个").arg(m_queueIndex).arg(m_queue.size()));
+            m_runPercent->setText(QStringLiteral("100%"));
+            m_runStatsLeft->setText(QStringLiteral("本地文件"));
+            m_runStatsRight->setText(QStringLiteral("第 %1/%2 个").arg(m_queueIndex).arg(m_queue.size()));
+            m_progress->setRange(0,100); m_progress->setValue(100);
+            m_status->setText((desktop ? QStringLiteral("检测到本地文件，直接传输到桌面（%1/%2）：%3")
+                                       : phone ? QStringLiteral("检测到本地文件，直接传输（%1/%2）：%3")
+                                               : QStringLiteral("检测到本地文件，直接安装（%1/%2）：%3"))
+                .arg(m_queueIndex).arg(m_queue.size()).arg(m_selected.name));
+            log(QStringLiteral("本地已存在，直接使用：%1").arg(m_selected.name));
+            rebuildQueue();
+            QTimer::singleShot(0, this, &OpenListWindow::advanceBatch);
+            return;
+        }
+        m_downloading = true; m_cancel->setEnabled(true);
         m_runTile->setPixmap(typeTilePixmap(m_selected,35));
         m_runFileName->setText(m_selected.name);
         m_runFileSub->setText(desktop ? QStringLiteral("下载到电脑桌面 · 第 %1/%2 个").arg(m_queueIndex).arg(m_queue.size())
@@ -1010,7 +1044,6 @@ void OpenListWindow::advanceBatch() {
         finish(summary, m_failed == 0);
         return;
     }
-    const bool phone = m_batchMode == BatchMode::PhoneTransfer;
     m_installingBatch = true; m_cancel->setEnabled(false);
     if (m_installIndex < m_downloaded.size()) {
         const auto download = m_downloaded[m_installIndex++];

@@ -380,18 +380,32 @@ void OpenListService::pump(quint64 generation) {
     }
     if (listing.active == 0 && listing.pending.isEmpty()) finishListing(generation);
 }
+QString OpenListService::destinationDirectory(const OpenList::Entry &entry, const QString &directory) const {
+    const QStringList parts = entry.relativePath.split('/');
+    if (parts.isEmpty()) return {};
+    for (const auto &part : parts) if (!OpenList::safeComponent(part)) return {};
+    if (!directory.isEmpty()) return QDir::cleanPath(directory);
+    QString dir = QDir(m_root).filePath(QStringLiteral("软件"));
+    for (int i = 0; i + 1 < parts.size(); ++i) dir += '/' + parts[i];
+    return dir;
+}
+QString OpenListService::existingLocalFile(const OpenList::Entry &entry, const QString &directory) const {
+    if (entry.directory || entry.relativePath.isEmpty()) return {};
+    if (!entry.remotePath.startsWith(remoteRoot() + '/') ||
+        entry.remotePath != remoteRoot() + '/' + entry.relativePath) return {};
+    const QString dir = destinationDirectory(entry, directory);
+    if (dir.isEmpty()) return {};
+    const QString path = QDir(dir).filePath(entry.relativePath.section('/', -1));
+    const QFileInfo info(path);
+    if (!info.isFile() || info.isSymLink() || !OpenList::safeDirectory(dir, false)) return {};
+    return info.absoluteFilePath();
+}
 bool OpenListService::prepareFile() {
     const QStringList parts = m_entry.relativePath.split('/');
     if (parts.isEmpty()) return false;
     for (const auto &part : parts) if (!OpenList::safeComponent(part)) return false;
-    QString dir;
-    if (m_targetDirectory.isEmpty()) {
-        dir = QDir(m_root).filePath(QStringLiteral("软件"));
-        for (int i = 0; i + 1 < parts.size(); ++i) dir += '/' + parts[i];
-    } else {
-        dir = QDir::cleanPath(m_targetDirectory);
-    }
-    if (!OpenList::safeDirectory(dir, true)) return false;
+    const QString dir = destinationDirectory(m_entry, m_targetDirectory);
+    if (dir.isEmpty() || !OpenList::safeDirectory(dir, true)) return false;
     const QString name = parts.last();
     m_path = QDir(dir).filePath(name);
     int suffix = 1;

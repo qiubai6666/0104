@@ -36,6 +36,7 @@ private:
     QSet<QString> m_entryPaths; // 已加载条目，缓存快照与分块结果按 remotePath 去重。
     QSet<QString> m_selectedPaths; // 跨目录保留的选中项（remotePath）。
     QList<QString> m_selectionOrder; // 勾选顺序；批量下载与安装按此顺序执行。
+    QSet<QString> m_usedLocalFiles; // 本次批量已占用的本地路径，避免同名云端文件互相复用。
     OpenList::Entry m_selected;
     struct Downloaded { OpenList::Entry entry; QString file; };
     QList<OpenList::Entry> m_queue;

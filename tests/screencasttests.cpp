@@ -619,12 +619,35 @@ private slots:
         QVERIFY(DeviceOperationLease::acquire(&operation));
         QVERIFY(writeFile(fixturePath + "/close-request.txt", "close"));
         QTRY_COMPARE(controller.state(), ScreenCastController::WaitingForDevice);
-        QVERIFY(!controller.m_retryTimer.isActive());
+        QVERIFY(controller.m_retryTimer.isActive());
         QTest::qWait(150);
         QCOMPARE(scrcpyCommands().size(), 1);
         DeviceOperationLease::release(&operation);
         QTRY_COMPARE_WITH_TIMEOUT(scrcpyCommands().size(), 2, 1500);
         QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+    }
+    void leaseReleaseWithoutSignalStillRestarts() {
+        ScreenCastController controller;
+        controller.m_retryTimer.setInterval(80);
+        DeviceManager::instance()->setDetectedDevice(DeviceManager::ADB, "PHONE_A");
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        QObject operation;
+        QVERIFY(DeviceOperationLease::acquire(&operation));
+        QVERIFY(writeFile(fixturePath + "/close-request.txt", "close"));
+        QTRY_COMPARE(controller.state(), ScreenCastController::WaitingForDevice);
+        QVERIFY(controller.m_retryTimer.isActive());
+        // Simulate a missed/dropped lease release notification: the periodic
+        // fallback must still recover the cast instead of waiting forever.
+        {
+            QSignalBlocker blocker(DeviceOperationLease::instance());
+            DeviceOperationLease::release(&operation);
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(scrcpyCommands().size(), 2, 1500);
+        QTRY_COMPARE(controller.state(), ScreenCastController::Streaming);
+        controller.toggle();
+        QTRY_COMPARE(controller.state(), ScreenCastController::Idle);
     }
     void failedRestartAfterNormalCloseStillBacksOff() {
         ScreenCastController controller;

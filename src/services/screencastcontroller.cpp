@@ -25,7 +25,13 @@ ScreenCastController::ScreenCastController(QObject *parent) : QObject(parent)
     // Includes serial replacement without a mode change.
     connect(manager, &DeviceManager::deviceInfoUpdated, this, [this] { checkDevice(); });
     connect(DeviceOperationLease::instance(), &DeviceOperationLease::changed,
-            this, [this](bool held) { if (!held) tryStart(); });
+            this, [this](bool held) {
+                if (held) return;
+                // Prefer the immediate path on release; the retry timer remains a
+                // fallback if the release signal is missed or another lease starts.
+                m_retryTimer.stop();
+                tryStart();
+            });
 }
 
 ScreenCastController::~ScreenCastController()
@@ -61,9 +67,14 @@ void ScreenCastController::toggle()
 void ScreenCastController::tryStart()
 {
     auto *manager = DeviceManager::instance();
-    if (!m_autoCastEnabled || m_state != WaitingForDevice || m_retryTimer.isActive() ||
-        DeviceOperationLease::busyFor() ||
-        manager->currentMode() != DeviceManager::ADB || manager->deviceSerial().isEmpty()) return;
+    if (!m_autoCastEnabled || m_state != WaitingForDevice || m_retryTimer.isActive()) return;
+    // 设备操作锁可能覆盖整个 OpenList 安装批次；不要只等 changed(false)，
+    // 否则关闭投屏窗口后一旦错过释放信号就会永久停在“等待设备”。
+    if (DeviceOperationLease::busyFor()) {
+        m_retryTimer.start();
+        return;
+    }
+    if (manager->currentMode() != DeviceManager::ADB || manager->deviceSerial().isEmpty()) return;
 
     m_serial = manager->deviceSerial();
     QProcess *process = ProcessManager::createProcess(this);

@@ -41,6 +41,8 @@ public:
     // directory 非空时直接保存到该目录（文件名扁平化，不保留云端子目录）；
     // 为空时沿用默认下载根的“软件”目录并保留相对路径。
     bool download(const OpenList::Entry &entry, const QString &directory = QString());
+    // 返回本地已存在的目标文件；不存在时为空，调用方应继续下载。
+    QString existingLocalFile(const OpenList::Entry &entry, const QString &directory = QString()) const;
     // Direct HTTPS downloads share the same range, validation and cleanup engine.
     bool downloadDirect(const OpenList::Entry &entry, const QUrl &url);
     void cancel();
@@ -87,6 +89,7 @@ private:
     bool consumeSegment(int index, QNetworkReply *reply);
     void fail(const QString &reason);
     bool prepareFile();
+    QString destinationDirectory(const OpenList::Entry &entry, const QString &directory) const;
     QString m_root, m_path, m_part;
     QString m_targetDirectory;
     QNetworkAccessManager *m_network;
