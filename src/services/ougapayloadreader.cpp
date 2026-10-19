@@ -31,6 +31,12 @@ bool isMeizuHost(const QUrl &url) {
   return host == "flyme.com" || host.endsWith(".flyme.com");
 }
 
+bool isOplusOtaHost(const QUrl &url) {
+  const QString host = url.host().toLower();
+  return url.scheme() == "https" &&
+         (host == "allawnfs.com" || host.endsWith(".allawnfs.com"));
+}
+
 bool safeRemoteUrl(const QUrl &url) {
   return url.isValid() && !url.host().isEmpty() && url.userInfo().isEmpty() &&
          (url.scheme() == "https" ||
@@ -44,6 +50,15 @@ QMap<QByteArray, QByteArray> meizuHeaders() {
   headers.insert("Referer", "https://www.flyme.com/firmware.html");
   headers.insert("User-Agent",
                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SmartTool");
+  return headers;
+}
+
+QMap<QByteArray, QByteArray> oplusHeaders() {
+  QMap<QByteArray, QByteArray> headers;
+  // The OPPO/OnePlus OTA CDN rejects Qt's default/browser-like User-Agent with
+  // HTTP 403, while a neutral application UA is accepted. Keep this explicit:
+  // an empty raw header is also rejected.
+  headers.insert("User-Agent", "OrangeTools/1.0");
   return headers;
 }
 }
@@ -116,6 +131,8 @@ QMap<QByteArray, QByteArray>
 OugaHttpRangeReader::requestHeadersForUrl(const QUrl &url) {
   if (isMeizuFirmwareUrl(url) || isMeizuDownloadEntry(url))
     return meizuHeaders();
+  if (isOplusOtaHost(url))
+    return oplusHeaders();
   return {};
 }
 

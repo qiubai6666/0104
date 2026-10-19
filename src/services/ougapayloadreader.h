@@ -46,11 +46,13 @@ public:
   create(const QUrl &url, const std::atomic_bool *cancel,
          QString *error = nullptr);
 
-  // Meizu's firmware CDN rejects Range requests with `EmptyReferer` unless the
-  // request carries the official firmware page as its Referer. Keep this
-  // policy next to the HTTP reader so every caller (Payload window and Ouga
-  // preparation) behaves the same. Download-entry links are resolved once,
-  // within flyme.com, to the signed HTTPS firmware URL.
+  // Vendor CDN request policy. Meizu's firmware CDN rejects Range requests with
+  // `EmptyReferer` unless the request carries the official firmware page as its
+  // Referer. OPPO/OnePlus OTA CDNs (allawnfs.com) reject Qt's default/browser
+  // User-Agent with HTTP 403, while a neutral application UA is accepted. Keep
+  // this policy next to the HTTP reader so every caller (Payload window and
+  // Ouga preparation) behaves the same. Meizu download-entry links are resolved
+  // within flyme.com to the signed HTTPS firmware URL.
   static bool isMeizuDownloadEntry(const QUrl &url);
   static bool isMeizuFirmwareUrl(const QUrl &url);
   static QMap<QByteArray, QByteArray> requestHeadersForUrl(const QUrl &url);

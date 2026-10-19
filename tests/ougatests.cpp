@@ -5699,6 +5699,28 @@ private slots:
     QVERIFY(!OugaHttpRangeReader::isMeizuDownloadEntry(
         QUrl("https://www.flyme.com.evil.example/zh/download?key=abc")));
 
+    // OPPO/OnePlus OTA CDN rejects Qt's default/browser UA with HTTP 403.
+    // A neutral application UA is accepted; no Referer is required.
+    const QUrl oplusOta(
+        "https://gauss-compotacostauto-cn.allawnfs.com/remove-x/component-ota/"
+        "25/08/14/update.zip");
+    const auto oplusHeaders = OugaHttpRangeReader::requestHeadersForUrl(oplusOta);
+    QCOMPARE(oplusHeaders.value("User-Agent"), QByteArray("OrangeTools/1.0"));
+    QVERIFY(!oplusHeaders.contains("Referer"));
+    QCOMPARE(OugaHttpRangeReader::requestHeadersForUrl(
+                 QUrl("https://allawnfs.com/update.zip"))
+                 .value("User-Agent"),
+             QByteArray("OrangeTools/1.0"));
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("https://allawnfs.com.evil.example/update.zip"))
+                .isEmpty());
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("https://evil.example/?u=https://allawnfs.com/update.zip"))
+                .isEmpty());
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("http://gauss-compotacostauto-cn.allawnfs.com/update.zip"))
+                .isEmpty());
+
     // Do not attach the Meizu Referer/UA to unrelated or lookalike hosts.
     QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
                 QUrl("https://example.com/update.zip")).isEmpty());
