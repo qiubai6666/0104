@@ -177,7 +177,7 @@ private slots:
         MtManagerService service(nullptr, &network, dir.path());
         QSignalSpy ready(&service, &MtManagerService::ready), failed(&service, &MtManagerService::failed);
         service.start(); QTRY_COMPARE(ready.size(), 1); QVERIFY(failed.isEmpty());
-        QCOMPARE(network.requests.size(), 8); // Page, 1-byte probe, six simultaneous ranges.
+        QCOMPARE(network.requests.size(), 9); // Page, MT probe, OpenList size probe, six ranges.
         QFile file(ready[0][1].toString()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), apk);
         QVERIFY(!service.active());
         QCOMPARE(QDir(dir.filePath(QStringLiteral("软件"))).entryList({"*.part"}, QDir::Files).size(), 0);
@@ -196,6 +196,76 @@ private slots:
         QFile file(ready[0][1].toString()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), payload);
         QVERIFY(network.requests.last().rawHeader("Range").isEmpty());
         QVERIFY(!service.downloadDirect(entry, QUrl("http://files.example.com/file")));
+    }
+    void lanzouMismatchedSizeAndBrowserAgent() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QByteArray payload(3 * 1024 * 1024 + 409, 'L');
+        const qint64 reported = payload.size() - 409;
+        Network network;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &) {
+            if (r.url().path() == "/api/fs/get")
+                return new Reply(r, api({{"raw_url", "https://cdn.example.com/lanzou.zip"},
+                                         {"size", double(reported)}}), 200);
+            if (!r.header(QNetworkRequest::UserAgentHeader).toString().startsWith("Mozilla/5.0"))
+                return new Reply(r, "<html>405 Method Not Allowed</html>", 405);
+            const QByteArray range = r.rawHeader("Range");
+            if (range == "bytes=0-0") {
+                auto *reply = new Reply(r, payload.left(1), 206);
+                reply->setHeader("Content-Range", QByteArray("bytes 0-0/") + QByteArray::number(payload.size()));
+                return reply;
+            }
+            const auto match = QRegularExpression("^bytes=(\\d+)-(\\d+)$").match(QString::fromLatin1(range));
+            if (!match.hasMatch()) {
+                auto *reply = new Reply(r, payload, 200);
+                reply->setHeader("Content-Length", QByteArray::number(payload.size()));
+                return reply;
+            }
+            const qint64 first = match.captured(1).toLongLong();
+            const qint64 last = match.captured(2).toLongLong();
+            auto *reply = new Reply(r, payload.mid(first, last - first + 1), 206);
+            reply->setHeader("Content-Range", QByteArray("bytes ") + QByteArray::number(first) + '-' +
+                QByteArray::number(last) + '/' + QByteArray::number(payload.size()));
+            return reply;
+        };
+        OpenListService service(nullptr, &network, dir.path());
+        OpenList::Entry entry; entry.name = "lanzou.zip"; entry.relativePath = entry.name;
+        entry.remotePath = QStringLiteral("/A秋白工作室/lanzou.zip"); entry.size = reported;
+        QSignalSpy ready(&service, &OpenListService::ready), failed(&service, &OpenListService::failed);
+        QSignalSpy logs(&service, &OpenListService::log);
+        QVERIFY(service.download(entry));
+        QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 5000);
+        QVERIFY(failed.isEmpty());
+        QFile file(ready.first()[1].toString());
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), payload);
+        bool adjusted = false;
+        for (const auto &line : logs) if (line[0].toString().contains(QStringLiteral("不一致"))) adjusted = true;
+        QVERIFY(adjusted);
+    }
+    void singleStreamAdoptsServerSize() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QByteArray payload(1024, 'S');
+        const qint64 reported = payload.size() - 100;
+        Network network;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &) {
+            if (r.url().path() == "/api/fs/get")
+                return new Reply(r, api({{"raw_url", "https://cdn.example.com/small.apk"},
+                                         {"size", double(reported)}}), 200);
+            auto *reply = new Reply(r, payload, 200);
+            reply->setHeader("Content-Length", QByteArray::number(payload.size()));
+            return reply;
+        };
+        OpenListService service(nullptr, &network, dir.path());
+        OpenList::Entry entry; entry.name = "small.apk"; entry.relativePath = entry.name;
+        entry.remotePath = QStringLiteral("/A秋白工作室/small.apk"); entry.size = reported;
+        QSignalSpy ready(&service, &OpenListService::ready), failed(&service, &OpenListService::failed);
+        QVERIFY(service.download(entry));
+        QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 5000);
+        QVERIFY(failed.isEmpty());
+        QFile file(ready.first()[1].toString());
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), payload);
+        QCOMPARE(network.requests.size(), 2); // 小文件不探测，直接单线程。
     }
     void mtRangeCancel() {
         QTemporaryDir dir; Network network; int ranges = 0;
@@ -768,8 +838,14 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 5000);
         QCOMPARE(failed.size(), 0);
         for(const auto &line:logs) QVERIFY(!line[0].toString().contains(QStringLiteral("未提供发布方 SHA-256")));
-        int ranged = 0;
-        for (const auto &request : network.requests) if (!request.rawHeader("Range").isEmpty()) ++ranged;
+        int ranged = 0, probes = 0;
+        for (const auto &request : network.requests) {
+            const QByteArray range = request.rawHeader("Range");
+            if (range == "bytes=0-0") ++probes;
+            else if (!range.isEmpty()) ++ranged;
+            QVERIFY(request.header(QNetworkRequest::UserAgentHeader).toString().startsWith("Mozilla/5.0"));
+        }
+        QCOMPARE(probes, 1);
         QCOMPARE(ranged, 6);
         QFile file(ready.first()[1].toString());
         QVERIFY(file.open(QIODevice::ReadOnly));

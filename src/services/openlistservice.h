@@ -84,9 +84,11 @@ private:
         qint64 received = 0;
         bool finished = false;
     };
-    void getFile(const QUrl &url, int redirects, quint64 generation);
+    void getFile(const QUrl &url, int redirects, quint64 generation, bool allowParallel = true);
+    void probeRange(const QUrl &url, int redirects, quint64 generation);
     void startParallel(const QUrl &url, quint64 generation);
     void fallbackToSingleStream(const QUrl &url, quint64 generation);
+    void adoptDownloadSize(qint64 total);
     bool consume(QNetworkReply *reply);
     bool consumeSegment(int index, QNetworkReply *reply);
     void fail(const QString &reason);
@@ -99,6 +101,7 @@ private:
     QList<QPointer<QNetworkReply>> m_lists;
     QVector<Segment> m_segments;
     qint64 m_parallelReceived = 0;
+    qint64 m_responseSize = -1;
     bool m_parallel = false;
     bool m_parallelFallback = false;
     Listing m_listing;
