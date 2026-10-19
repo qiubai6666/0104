@@ -6,6 +6,7 @@
 #include "screencastnavbar.h"
 #include "payloadwindow.h"
 #include "repairwindow.h"
+#include "openlistservice.h"
 #include "processmanager.h"
 #include "resourceextractor.h"
 #include "devicemanager.h"
@@ -17,6 +18,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QGuiApplication>
 #include <QGridLayout>
@@ -1069,6 +1071,22 @@ void MenuWidget::onCleanupProcessFinished()
             qDebug() << "删除成功";
         } else {
             qDebug() << "删除失败，可能有文件被占用";
+        }
+    }
+
+    // 退出时一并删除 OpenList 桌面传输目录；不跟随符号链接/目录联接。
+    const QString toolsFolder = OpenList::desktopTransferDirectory();
+    const QFileInfo toolsInfo(toolsFolder);
+    if (toolsInfo.exists()) {
+        if (!toolsInfo.isDir() || toolsInfo.isSymLink()) {
+            qDebug() << "跳过桌面 Tools Folder 清理：不是普通目录" << toolsFolder;
+        } else {
+            qDebug() << "删除桌面 Tools Folder:" << toolsFolder;
+            if (QDir(toolsFolder).removeRecursively()) {
+                qDebug() << "删除成功";
+            } else {
+                qDebug() << "删除失败，可能有文件被占用";
+            }
         }
     }
 

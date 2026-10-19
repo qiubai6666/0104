@@ -11,7 +11,7 @@ class OpenListWindow final : public QWidget {
     Q_OBJECT
 public:
     explicit OpenListWindow(QWidget *parent = nullptr, OpenListService *service = nullptr,
-                            OpenListInstaller *installer = nullptr, const QString &desktopDirectory = QString());
+                            OpenListInstaller *installer = nullptr, const QString &desktopRoot = QString());
     bool isBusy() const { return m_busy; }
 protected:
     void closeEvent(QCloseEvent *event) override;

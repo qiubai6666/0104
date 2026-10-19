@@ -9,7 +9,6 @@
 #include <QScreen>
 #include <QShowEvent>
 #include <QShortcut>
-#include <QStandardPaths>
 #include <QStyle>
 #include <QDateTime>
 #include <QDir>
@@ -115,13 +114,11 @@ protected:
 }
 
 OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenListInstaller *installer,
-                               const QString &desktopDirectory)
+                               const QString &desktopRoot)
     : QWidget(nullptr), m_launcher(parent),
       m_service(service ? service : new OpenListService(this, nullptr, QString(), OpenList::defaultListingCacheFile())),
       m_installer(installer ? installer : new OpenListInstaller(this)), m_mtService(new MtManagerService(this)),
-      m_desktopDirectory(desktopDirectory.isEmpty()
-                             ? QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)
-                             : QDir::cleanPath(desktopDirectory)) {
+      m_desktopDirectory(OpenList::desktopTransferDirectory(desktopRoot)) {
     if (parent) connect(parent, &QObject::destroyed, this, &QObject::deleteLater);
     setWindowTitle(QStringLiteral("Openlist"));
     setAttribute(Qt::WA_DeleteOnClose,false); setAttribute(Qt::WA_QuitOnClose,false);

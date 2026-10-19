@@ -24,6 +24,8 @@ bool safeComponent(const QString &name);
 bool safeDirectory(const QString &path, bool create);
 QString resolveDownloadRoot(const QString &applicationDirectory, const QString &localDataDirectory);
 QString defaultDownloadRoot();
+// 桌面传输固定写入 <桌面>/Tools Folder；空参数使用系统桌面，可用环境变量覆盖桌面根目录（测试/便携场景）。
+QString desktopTransferDirectory(const QString &desktopRoot = QString());
 // Empty when the cache is disabled or the user cache directory is unavailable.
 QString defaultListingCacheFile();
 }

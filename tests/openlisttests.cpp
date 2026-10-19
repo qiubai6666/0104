@@ -1253,6 +1253,7 @@ private slots:
     void desktopTransfer() {
         QTemporaryDir root; QVERIFY(root.isValid());
         const QString desktop=root.filePath("Desktop"); QVERIFY(QDir().mkpath(desktop));
+        const QString toolsFolder=QDir(desktop).filePath("Tools Folder");
         Network network; int downloads=0;
         network.handler=[&](const QNetworkRequest &r,const QJsonObject &body){
             if (r.url().path()=="/api/fs/list") return new Reply(r,api({{"content",QJsonArray{}},{"total",0}}),200);
@@ -1280,19 +1281,21 @@ private slots:
         QTRY_COMPARE(downloads,2);
         QTRY_VERIFY(!window.isBusy());
         QVERIFY(runner.calls.isEmpty());
-        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("说明.txt")));
-        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("app.apk")));
+        QVERIFY(QFileInfo::exists(QDir(toolsFolder).filePath("说明.txt")));
+        QVERIFY(QFileInfo::exists(QDir(toolsFolder).filePath("app.apk")));
+        QVERIFY(!QFileInfo::exists(QDir(desktop).filePath("说明.txt")));
+        QVERIFY(!QFileInfo::exists(QDir(desktop).filePath("app.apk")));
         QVERIFY(!QFileInfo::exists(root.filePath(QStringLiteral("软件/说明.txt"))));
         QVERIFY(!QFileInfo::exists(root.filePath(QStringLiteral("软件/app.apk"))));
         QVERIFY(table->selectedItems().isEmpty());
-        // 再次传输同一批文件：桌面已有文件时直接复用，不再访问网络。
+        // 再次传输同一批文件：桌面 Tools Folder 已有文件时直接复用，不再访问网络。
         table->selectAll();
         button->click();
         QVERIFY(window.isBusy());
         QTRY_VERIFY(!window.isBusy());
         QCOMPARE(downloads,2);
-        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("说明.txt")));
-        QVERIFY(QFileInfo::exists(QDir(desktop).filePath("app.apk")));
+        QVERIFY(QFileInfo::exists(QDir(toolsFolder).filePath("说明.txt")));
+        QVERIFY(QFileInfo::exists(QDir(toolsFolder).filePath("app.apk")));
     }
     void installReusesExistingLocalFile() {
         QTemporaryDir dir; QVERIFY(dir.isValid()); Network network; int downloads=0;

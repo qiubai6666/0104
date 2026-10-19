@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -458,8 +459,16 @@ void DeviceOperationTests::openListApplicationExit_data()
 void DeviceOperationTests::openListApplicationExit()
 {
     QFETCH(QString, state);
+    // 退出清理只允许作用于本次测试的桌面隔离目录，绝不触碰真实桌面。
+    const QString desktop = fixturePath + "/desktop";
+    QVERIFY(QDir().mkpath(desktop + "/Tools Folder"));
+    QVERIFY(putFile(desktop + "/Tools Folder/leftover.txt", "leftover"));
+    QVERIFY(putFile(desktop + "/keep.txt", "keep"));
     QProcess child;
     child.setWorkingDirectory(fixturePath);
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("ORANGE_TOOLS_DESKTOP_ROOT"), desktop);
+    child.setProcessEnvironment(environment);
     child.start(QCoreApplication::applicationFilePath(), {"--exit-helper", state, fixturePath});
     QVERIFY(child.waitForFinished(10000));
     const QByteArray output = child.readAllStandardOutput() + child.readAllStandardError();
@@ -467,6 +476,8 @@ void DeviceOperationTests::openListApplicationExit()
     QVERIFY2(child.exitCode() == 0, output.constData());
     QCOMPARE(readFile(fixturePath + "/exit-result.txt"), QByteArray("all windows closed"));
     if (state == "busy") QCOMPARE(readFile(fixturePath + "/busy-result.txt"), QByteArray("exit blocked"));
+    QVERIFY2(!QFileInfo::exists(desktop + "/Tools Folder"), "exit must remove desktop Tools Folder");
+    QVERIFY2(QFileInfo::exists(desktop + "/keep.txt"), "exit must not delete unrelated desktop files");
 }
 
 int DeviceOperationTests::exitHelper(QApplication &application, const QStringList &arguments)

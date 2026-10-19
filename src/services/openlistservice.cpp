@@ -172,6 +172,13 @@ QString OpenList::defaultDownloadRoot() {
     return resolveDownloadRoot(QCoreApplication::applicationDirPath(),
                                QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation));
 }
+QString OpenList::desktopTransferDirectory(const QString &desktopRoot) {
+    QString root = desktopRoot;
+    if (root.isEmpty()) root = qEnvironmentVariable("ORANGE_TOOLS_DESKTOP_ROOT");
+    if (root.isEmpty()) root = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    if (root.isEmpty()) return {};
+    return QDir(QDir::cleanPath(root)).filePath(QStringLiteral("Tools Folder"));
+}
 QString OpenList::defaultListingCacheFile() {
     if (qEnvironmentVariableIsSet("OPENLIST_DISABLE_LISTING_CACHE")) return {};
     const QString directory = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
