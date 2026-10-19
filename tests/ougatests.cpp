@@ -5672,6 +5672,47 @@ private slots:
     QVERIFY(OugaPackage::payloadManifest(file, &entries, &delta, &error, &layout));
     QVERIFY(!OugaPayloadExtractor::supported(entries, {}, layout));
   }
+  void remotePayloadRequestPolicy() {
+    // Meizu's firmware CDN answers 403 (X-Error-Info: EmptyReferer) unless the
+    // request carries the official firmware page as Referer. The reference
+    // implementation also sends SmartTool's User-Agent. Keep the policy scoped
+    // to flyme hosts so unrelated downloads never receive extra credentials.
+    const QByteArray referer("https://www.flyme.com/firmware.html");
+    const QByteArray userAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SmartTool");
+    const QUrl firmware(
+        "https://firmware-res.flyme.com/Firmware/Flyme/x/update.zip?auth_key=1-2-3");
+    QVERIFY(OugaHttpRangeReader::isMeizuFirmwareUrl(firmware));
+    const auto firmwareHeaders =
+        OugaHttpRangeReader::requestHeadersForUrl(firmware);
+    QCOMPARE(firmwareHeaders.value("Referer"), referer);
+    QCOMPARE(firmwareHeaders.value("User-Agent"), userAgent);
+
+    const QUrl entry("https://www.flyme.com/zh/download?key=abc123");
+    QVERIFY(OugaHttpRangeReader::isMeizuDownloadEntry(entry));
+    QCOMPARE(OugaHttpRangeReader::requestHeadersForUrl(entry).value("Referer"),
+             referer);
+    QVERIFY(!OugaHttpRangeReader::isMeizuDownloadEntry(
+        QUrl("https://www.flyme.com/firmwarelist-202.html")));
+    QVERIFY(!OugaHttpRangeReader::isMeizuDownloadEntry(
+        QUrl("https://www.flyme.com/zh/download")));
+    QVERIFY(!OugaHttpRangeReader::isMeizuDownloadEntry(
+        QUrl("https://www.flyme.com.evil.example/zh/download?key=abc")));
+
+    // Do not attach the Meizu Referer/UA to unrelated or lookalike hosts.
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("https://example.com/update.zip")).isEmpty());
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("https://firmware-res.flyme.com.evil.example/x")).isEmpty());
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("https://evil.example/?u=https://firmware-res.flyme.com/x"))
+                .isEmpty());
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("https://firmware-res.flyme.com@evil.example/x")).isEmpty());
+    QVERIFY(OugaHttpRangeReader::requestHeadersForUrl(
+                QUrl("http://firmware-res.flyme.com/x")).isEmpty());
+  }
+
   void remotePayloadRange_data() {
     QTest::addColumn<QString>("kind");
     for (const QString kind : {"raw", "large", "stored", "zip64", "compressed", "duplicate",

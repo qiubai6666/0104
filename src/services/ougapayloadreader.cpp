@@ -9,6 +9,7 @@
 #include <QRegularExpression>
 #include <QTimer>
 #include <QThreadStorage>
+#include <QUrlQuery>
 #include <QtGlobal>
 #include <algorithm>
 #include <cstring>
@@ -23,6 +24,27 @@ bool fail(QString *error, const QString &message) {
 
 bool validRange(quint64 offset, quint64 length, quint64 total) {
   return offset <= total && length <= total - offset;
+}
+
+bool isMeizuHost(const QUrl &url) {
+  const QString host = url.host().toLower();
+  return host == "flyme.com" || host.endsWith(".flyme.com");
+}
+
+bool safeRemoteUrl(const QUrl &url) {
+  return url.isValid() && !url.host().isEmpty() && url.userInfo().isEmpty() &&
+         (url.scheme() == "https" ||
+          (url.scheme() == "http" &&
+           (url.host() == "127.0.0.1" || url.host() == "localhost" ||
+            url.host() == "::1")));
+}
+
+QMap<QByteArray, QByteArray> meizuHeaders() {
+  QMap<QByteArray, QByteArray> headers;
+  headers.insert("Referer", "https://www.flyme.com/firmware.html");
+  headers.insert("User-Agent",
+                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SmartTool");
+  return headers;
 }
 }
 
@@ -71,23 +93,152 @@ QByteArray OugaLocalFileReader::read(quint64 offset, quint64 length,
   return data;
 }
 
-OugaHttpRangeReader::OugaHttpRangeReader(const QUrl &url,
-                                         const std::atomic_bool *cancel)
-    : m_url(url), m_cancel(cancel) {}
+OugaHttpRangeReader::OugaHttpRangeReader(
+    const QUrl &url, const std::atomic_bool *cancel,
+    const QMap<QByteArray, QByteArray> &headers)
+    : m_url(url), m_cancel(cancel), m_headers(headers) {}
+
+bool OugaHttpRangeReader::isMeizuDownloadEntry(const QUrl &url) {
+  if (url.scheme() != "https" || !isMeizuHost(url))
+    return false;
+  QString path = url.path();
+  if (path.endsWith('/'))
+    path.chop(1);
+  return path == "/zh/download" && QUrlQuery(url).hasQueryItem("key");
+}
+
+bool OugaHttpRangeReader::isMeizuFirmwareUrl(const QUrl &url) {
+  return url.scheme() == "https" &&
+         url.host().compare("firmware-res.flyme.com", Qt::CaseInsensitive) == 0;
+}
+
+QMap<QByteArray, QByteArray>
+OugaHttpRangeReader::requestHeadersForUrl(const QUrl &url) {
+  if (isMeizuFirmwareUrl(url) || isMeizuDownloadEntry(url))
+    return meizuHeaders();
+  return {};
+}
+
+bool OugaHttpRangeReader::resolveMeizuDownloadEntry(
+    const QUrl &entry, const QMap<QByteArray, QByteArray> &headers,
+    const std::atomic_bool *cancel, QUrl *resolved, QString *error) {
+  QUrl current = entry;
+  // The official page currently performs one redirect. Allow a small bounded
+  // chain, but never leave flyme.com: this is a firmware-link resolver, not a
+  // general redirect follower.
+  for (int hop = 0; hop < 3; ++hop) {
+    QNetworkAccessManager network;
+    QNetworkRequest request(current);
+    for (auto i = headers.begin(); i != headers.end(); ++i)
+      request.setRawHeader(i.key(), i.value());
+    request.setTransferTimeout(30000);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::ManualRedirectPolicy);
+    QNetworkReply *reply = network.get(request);
+    QEventLoop loop;
+    QTimer timeout, cancellation;
+    timeout.setSingleShot(true);
+    timeout.setInterval(30000);
+    cancellation.setInterval(50);
+    QString failure;
+    int status = 0;
+    QByteArray location;
+    bool inspected = false;
+    const auto inspect = [&] {
+      if (inspected)
+        return;
+      status = reply->attribute(
+          QNetworkRequest::HttpStatusCodeAttribute).toInt();
+      if (!status)
+        return;
+      inspected = true;
+      if (status < 300 || status >= 400) {
+        failure = QString("魅族固件链接返回 HTTP %1，未提供直链跳转").arg(status);
+        reply->abort();
+        return;
+      }
+      location = reply->rawHeader("Location").trimmed();
+      if (location.isEmpty()) {
+        failure = "魅族固件链接未返回直链地址";
+        reply->abort();
+        return;
+      }
+      // Only the redirect headers are needed; do not buffer a response body.
+      reply->abort();
+    };
+    QObject::connect(reply, &QNetworkReply::metaDataChanged, &loop, inspect);
+    QObject::connect(reply, &QNetworkReply::finished, &loop,
+                     &QEventLoop::quit);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+      failure = "魅族固件跳转请求超时";
+      reply->abort();
+    });
+    QObject::connect(&cancellation, &QTimer::timeout, &loop, [&] {
+      if (cancel && cancel->load()) {
+        failure = "远程 Payload 读取已取消";
+        reply->abort();
+      }
+    });
+    timeout.start();
+    cancellation.start();
+    if (!reply->isFinished())
+      loop.exec();
+    timeout.stop();
+    cancellation.stop();
+    inspect();
+    const QNetworkReply::NetworkError replyError = reply->error();
+    delete reply;
+    if (cancel && cancel->load()) {
+      failure = "远程 Payload 读取已取消";
+    }
+    if (!failure.isEmpty())
+      return fail(error, failure);
+    if (!inspected) {
+      if (replyError != QNetworkReply::NoError)
+        return fail(error, QString("魅族固件跳转请求失败（网络错误 %1）")
+                               .arg(int(replyError)));
+      return fail(error, "魅族固件跳转响应无效");
+    }
+    // abort() after reading the headers is expected to report a cancellation.
+    if (replyError != QNetworkReply::NoError &&
+        replyError != QNetworkReply::OperationCanceledError)
+      return fail(error, QString("魅族固件跳转请求失败（网络错误 %1）")
+                             .arg(int(replyError)));
+    QUrl target = current.resolved(QUrl::fromEncoded(location));
+    if (!safeRemoteUrl(target))
+      return fail(error, "魅族固件跳转目标不是有效的 HTTPS 地址");
+    if (isMeizuDownloadEntry(target)) {
+      current = target;
+      continue;
+    }
+    if (!isMeizuFirmwareUrl(target))
+      return fail(error, "魅族固件跳转目标不是有效的 HTTPS 固件地址");
+    *resolved = target;
+    return true;
+  }
+  return fail(error, "魅族固件链接跳转次数过多");
+}
 
 QSharedPointer<OugaHttpRangeReader>
 OugaHttpRangeReader::create(const QUrl &url, const std::atomic_bool *cancel,
                            QString *error) {
-  if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() ||
-      (url.scheme() != "https" &&
-       !(url.scheme() == "http" &&
-         (url.host() == "127.0.0.1" || url.host() == "localhost" ||
-          url.host() == "::1")))) {
+  if (!safeRemoteUrl(url)) {
     fail(error, "无效或不安全的远程 Payload 地址");
     return {};
   }
+  QUrl source = url;
+  QMap<QByteArray, QByteArray> headers = requestHeadersForUrl(url);
+  if (isMeizuDownloadEntry(url)) {
+    if (!resolveMeizuDownloadEntry(url, headers, cancel, &source, error))
+      return {};
+    if (!safeRemoteUrl(source) || !isMeizuHost(source)) {
+      fail(error, "魅族固件跳转目标无效");
+      return {};
+    }
+    headers = meizuHeaders();
+  }
   auto reader = QSharedPointer<OugaHttpRangeReader>(
-      new OugaHttpRangeReader(url, cancel));
+      new OugaHttpRangeReader(source, cancel, headers));
   if (!reader->probe(error))
     return {};
   return reader;
@@ -149,6 +300,11 @@ QByteArray OugaHttpRangeReader::requestSingleRange(quint64 offset, quint64 lengt
     managers.setLocalData(new QNetworkAccessManager);
   auto network = managers.localData();
   QNetworkRequest request(m_url);
+  // Host-scoped policy headers (for example Meizu's required Referer) apply to
+  // the probe and every later range. Range/If-Range/encoding stay below so a
+  // future profile can never change their semantics.
+  for (auto i = m_headers.begin(); i != m_headers.end(); ++i)
+    request.setRawHeader(i.key(), i.value());
   request.setRawHeader("Range", "bytes=" + QByteArray::number(offset) +
                                    "-" + QByteArray::number(end));
   // Match VioletToolBox's raw response stream, not Qt's default decoding.

@@ -174,7 +174,7 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 | --- | --- | --- |
 | 投屏 | 点击后按钮显示圆圈旋转，等待已授权的 ADB 设备后启动 scrcpy；启动后恢复“投屏”，再次点击停止。等待期间再次点击可取消，不再打开旧设备信息卡片 | USB 调试已开启，设备已授权；未授权/离线/Fastboot 时继续等待 |
 | 秋白工作室 | 打开修复菜单：USB 修复、修复 TMP、安装 APK、安装模块（全部成功后自动重启）、欧加线刷、小米线刷 | 多数操作使用 `su`，依赖 Root 权限及相应管理器 |
-| PAYLOAD | 输入本地 payload.bin/OTA ZIP 路径，用 payload-dumper-go.exe 提取到桌面 IMG | 拒绝远程链接；提取/校验行为由外部 Payload 工具决定 |
+| PAYLOAD | 输入本地 payload.bin/OTA ZIP 路径，或支持 HTTP Range 的 HTTPS OTA 直链，提取到桌面 IMG | 本地路径用 payload-dumper-go.exe；远程直链按需读取、不落盘整包；魅族固件直链会自动携带官方 Referer，其他跳转/整包下载仍拒绝 |
 | 提取IMG | 从手机 `/sdcard/Download/*.img` 中拉取按时间排序的最新一个到桌面 IMG | 已检测到连接设备且目录可读；不是直接读取手机分区 |
 | 设备检测 | 查看模式/设备信息、选择重启方式、打开 CMD、刷写 boot/init_boot | 模式与命令必须匹配；刷写前确认镜像兼容性 |
 | 配置 | 前六项按下载配置获取工具；另有 GeekFlashTool、网盘、NDM 入口 | 网络可用，只使用可信下载来源 |

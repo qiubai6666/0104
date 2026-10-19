@@ -46,6 +46,15 @@ public:
   create(const QUrl &url, const std::atomic_bool *cancel,
          QString *error = nullptr);
 
+  // Meizu's firmware CDN rejects Range requests with `EmptyReferer` unless the
+  // request carries the official firmware page as its Referer. Keep this
+  // policy next to the HTTP reader so every caller (Payload window and Ouga
+  // preparation) behaves the same. Download-entry links are resolved once,
+  // within flyme.com, to the signed HTTPS firmware URL.
+  static bool isMeizuDownloadEntry(const QUrl &url);
+  static bool isMeizuFirmwareUrl(const QUrl &url);
+  static QMap<QByteArray, QByteArray> requestHeadersForUrl(const QUrl &url);
+
   quint64 size() const override { return m_size; }
   QByteArray read(quint64 offset, quint64 length,
                   QString *error = nullptr) const override;
@@ -54,7 +63,11 @@ public:
 
 private:
   explicit OugaHttpRangeReader(const QUrl &url,
-                               const std::atomic_bool *cancel);
+                               const std::atomic_bool *cancel,
+                               const QMap<QByteArray, QByteArray> &headers);
+  static bool resolveMeizuDownloadEntry(
+      const QUrl &entry, const QMap<QByteArray, QByteArray> &headers,
+      const std::atomic_bool *cancel, QUrl *resolved, QString *error);
   bool probe(QString *error);
   QByteArray requestRange(quint64 offset, quint64 length,
                           quint64 *reportedTotal, QString *error) const;
@@ -64,6 +77,7 @@ private:
 
   QUrl m_url;
   const std::atomic_bool *m_cancel = nullptr;
+  QMap<QByteArray, QByteArray> m_headers;
   quint64 m_size = 0;
   mutable QByteArray m_etag, m_modified, m_validator;
   mutable QMutex m_mutex;
