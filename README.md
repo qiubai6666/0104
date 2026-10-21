@@ -10,12 +10,16 @@
 .
 ├── OrangeTools.pro             # qmake 工程：模块、编译选项、源码和资源清单
 ├── README.md                   # 使用、源码导航和开发说明（本文）
+├── AGENTS.md                   # 目录放置规则与 agent 工作约定
 ├── deploy.ps1                  # 部署 Release、精简可选依赖，可选择 UPX
 ├── compress-release.ps1        # 只压缩未签名主程序/MinGW 运行库，并解压校验
 ├── package-release.ps1         # 保留的 7z 下载包入口
 ├── release.ps1                 # TEMP 完整构建、回归、四候选、部署；默认单 EXE
 ├── package-single-exe.ps1      # 已验证的干净部署目录 → 安装型 SFX 单 EXE
-├── scripts/SingleExe.Common.ps1 # 清单、许可、签名/依赖验证和 SFX 公共函数
+├── build-protected-release.ps1 # 普通/保护 Release 构建与验证
+├── scripts/
+│   ├── SingleExe.Common.ps1    # 清单、许可、签名/依赖验证和 SFX 公共函数
+│   └── check-workspace.ps1     # 只读目录自检：白名单、资源引用、未跟踪文件
 ├── resources.qrc               # 需要编进 exe 的工具资源清单
 ├── resources.pri               # 主程序/测试共用资源配置；默认不压缩，可选 zlib
 ├── app.rc / app.manifest        # Windows 图标、权限和兼容性配置
@@ -38,17 +42,20 @@
 │       ├── processmanager.cpp/.h
 │       ├── resourceextractor.cpp/.h
 │       └── integritychecker.cpp/.h
+├── assets/                     # 运行时图标、动图等资源
 ├── qiubai/                     # 外部工具、工具 DLL、脚本及图片
-├── tests/                      # 不操作真实设备的 Qt Test 回归测试
-│   ├── readabilitytests.pro
-│   ├── readabilitytests.cpp
-│   ├── processmanagertests.pro/.cpp # 验证受管进程与外部同名实例隔离
-│   ├── deploymentsmoke.pro/.cpp # 只验证发布插件、PNG、绘制及 TLS 能力
-│   └── check-deployment.ps1     # 隔离开发环境后运行发布检查并清理临时 exe
-├── build/                      # 编译/测试时生成，可清理，Git 忽略
+├── tests/                      # 不操作真实设备的 Qt Test 回归测试与 fixtures
+├── third_party/                # zstd、7zip-sfx 等第三方构建输入
+├── docs/
+│   ├── protected-release.md    # 离线保护 Release 的构建与审计说明
+│   └── assets/icon-reference.jpg # 单 EXE 图标来源图，不参与构建
+├── build/                      # 构建输出：build/<task-id>/，只保留最近一次验证构建
 ├── OrangeToolsApp/             # 部署后的完整程序目录，Git 忽略
-└── dist/                       # 单 EXE / 7z 下载包及校验文件，Git 忽略
+├── dist/                       # 单 EXE / 7z 下载包及校验文件，Git 忽略
+└── TEMP/                       # 任务临时目录；只保留最近 1 个任务，Git 忽略
 ```
+
+根目录只允许上面这些工程入口、文档/许可和约定目录，不得新增其他文件。新文件应放入 `src/`、`assets/`、`tests/`、`scripts/`、`docs/`、`third_party/`、`qiubai/` 或生成目录；完整规则见 `AGENTS.md`。任务收尾运行 `pwsh -NoProfile -File scripts/check-workspace.ps1`。
 
 ### 每个源码文件负责什么？
 
@@ -197,7 +204,7 @@ APK 安装：Push → InstallWithSuC → 必要时 InstallWithSuS → DeleteTemp
 
 ### 欧加线刷
 
-秋白工作室次级菜单「欧加线刷」使用 Qt 原生窗口复刻 SMT 原版两栏卡片、四列分区表、全量/售后选项、快捷提取方案和操作按钮，不增加独立设备读取、计划生成、工具配置或救砖按钮。「开始线刷」内部完成准备、设备读取和计划确认；售后「自动救砖模式」沿用原机型/版本选择。保留不自动解锁、不擦 FRP、不进入 EDL 等已约定边界，远程 Payload 使用 HTTP Range 按需提取（直接 Payload 或 Stored ZIP，不支持时明确失败，不回退下载整包），不宣称无差别 1:1。详见 [欧加线刷使用与安全说明](docs/ouga-flash.md)。模拟回归不代表真机兼容性认证。
+秋白工作室次级菜单「欧加线刷」使用 Qt 原生窗口复刻 SMT 原版两栏卡片、四列分区表、全量/售后选项、快捷提取方案和操作按钮，不增加独立设备读取、计划生成、工具配置或救砖按钮。「开始线刷」内部完成准备、设备读取和计划确认；售后「自动救砖模式」沿用原机型/版本选择。保留不自动解锁、不擦 FRP、不进入 EDL 等已约定边界，远程 Payload 使用 HTTP Range 按需提取（直接 Payload 或 Stored ZIP，不支持时明确失败，不回退下载整包），不宣称无差别 1:1。模拟回归不代表真机兼容性认证。
 
 ### 小米线刷
 
@@ -433,9 +440,7 @@ try {
 
 对比其他候选时，A 的主程序/测试 qmake 命令均增加 `CONFIG+=compressed_resources`，部署不加 UPX；C 使用默认不压资源配置，部署增加第 4 节所示 `-UseUpx -UpxPath $upx`。每个候选使用不同的工作目录和压缩包名称，包内均保持 `OrangeToolsApp`，打包参数不变。复现命令中的回归使用开发环境；本轮验收还把对应测试程序和 Qt6Test.dll 临时放到每个候选目录，在隔离环境下测试，打包前已移除。
 
-收尾已核实本轮实验材料的归属、项目内路径及链接风险；自动删除被环境执行策略拦截，未绕过限制，实验目录 `build/download-opt-20261001-92ffa206/` 暂保留（191 个临时文件，1,294,259,130 字节，约 1.21 GiB）。其中包含实验包、部署/解压验证副本、构建材料和验证日志，不参与正式发布。正式交付仍只有上列优化包及校验文件、本次配置和文档修改；已有构建目录和历史验证材料均未删除。
-
-将方案 B 设为默认后，已重新通过独立 Release 主程序/测试构建、11 项回归、23 项资源大小及 SHA-256 校验、Windows/PNG/Schannel 加载和 8 个 Qt 文件签名检查；默认资源数据与之前选定的 B 方案一致，部署目录无测试残留。仅针对本次新建验证目录的收尾删除也被环境执行策略拦截，未绕过；`build/default-download-20261001-b47a124b/` 暂保留（95 个验证文件，661,979,324 字节，约 631.31 MiB），不参与发布，现有包没有重制。
+早期下载优化实验目录（`build/download-opt-20261001-92ffa206/`、`build/default-download-20261001-b47a124b/`）已在 2026-10-22 目录整理中清理；实验结论保留，构建材料可按第 4、5 节重新生成。
 
 ### 双击提示缺少 Qt6Gui.dll 等运行库
 
@@ -567,46 +572,25 @@ try {
 - 下载配置由“反复拼接/拆分字符串”改为结构体；移除主菜单中空的兼容函数与无用状态。
 - 校正资源清单中与本地工具包不一致的旧 DLL 名及不存在的资源项，并增加独立回归测试。
 
-## 9. 哪些文件可以清理？
+## 9. 目录维护与可清理文件
 
-清理只针对可重新生成的产物和确认未引用的文件，不按“代码中没有出现文件名”删除 DLL：外部工具和 Qt 插件可能动态加载它们。
+整理后的放置规则：
 
-| 可清理项目 | 原因 |
-| --- | --- |
-| `build/` | 本地编译/测试的 Makefile、MOC/RCC 生成源码、目标文件、exe、日志，以及 `readability-review` 中的临时源码副本；可按第 4、5 节重新生成 |
-| `build/upx-check/Orange Tools.packed.exe`、`Orange Tools.restored.exe` | 本轮 UPX 验证的临时副本，合计约 46.23 MiB；不参与发布，自动删除被环境拦截，可手动删除 |
-| 根目录 `Makefile`、`Makefile.Debug`、`Makefile.Release`、`.qmake.stash` | qmake 的旧生成文件和工具链缓存；项目应使用独立的 build 目录构建 |
-| `OrangeToolsApp/_deployment_smoke.exe` | 临时部署检查程序；不是正式程序的运行依赖 |
-| `qiubai/disconnected.png` | 源码、资源清单和脚本均未引用 |
-| `qiubai/scrcpy.png` | 源码、资源清单和脚本均未引用，且与保留的 `icon.png` 内容完全相同 |
+- 根目录只允许 `AGENTS.md` 白名单中的工程入口、文档/许可和约定目录；新文件不得直接放在根目录。
+- 构建输出只进 `build/<task-id>/`，部署只写 `OrangeToolsApp/`，发布包只写 `dist/`，临时/一次性文件只进 `TEMP/<task-id>/`。
+- 可随时删除的只有可再生产物：`build/<task-id>/`、`TEMP/<task-id>/`、`dist/` 中旧交付、`OrangeToolsApp/_deployment_smoke.exe`。保留最近一次验证构建和当前运行包。
+- 不删除 `src/`、工程/资源/许可输入、`.git/`、`qiubai/` 工具及 DLL、当前 `OrangeToolsApp/` 运行文件；不使用 `git clean -fdx`。
 
-**不要删除** `src/`、`tests/`、工程/资源/部署配置、`.git/`、许可证、`qiubai/` 中的工具及 DLL，或部署包必需的 Qt 运行库和插件。`OrangeToolsApp/` 保留为现有可运行包，但不会随源码修改自动更新；如需最新版本，请先按第 4 节重新编译和部署。
-
-下面是手动清理命令，仅在项目根目录执行。它会删除 `build/` 内的编译程序和测试报告；需要保留这些产物时先另行保存。不存在的目标会跳过。执行前先确认清理清单，不要使用 `git clean -fdx`，它会连同忽略的发布包、构建输出及其他未跟踪文件一起删除。
+任务收尾自检：
 
 ```powershell
-$projectRoot = (Resolve-Path -LiteralPath '.').Path
-if (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'OrangeTools.pro') -PathType Leaf)) {
-    throw 'Run from the project root.'
-}
-$cleanupTargets = @(
-    'build', '.qmake.stash', 'Makefile', 'Makefile.Debug', 'Makefile.Release',
-    'OrangeToolsApp\_deployment_smoke.exe',
-    'qiubai\disconnected.png', 'qiubai\scrcpy.png'
-)
-$workspacePrefix = $projectRoot.TrimEnd('\') + '\'
-foreach ($relativePath in $cleanupTargets) {
-    $target = [IO.Path]::GetFullPath((Join-Path $projectRoot $relativePath))
-    if (-not $target.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Cleanup target outside project: $target"
-    }
-    if (Test-Path -LiteralPath $target) {
-        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
-    }
-}
+pwsh -NoProfile -File .\scripts\check-workspace.ps1
+pwsh -NoProfile -File .\scripts\check-workspace.ps1 -Strict
 ```
 
-这份清单表示“已核实可清理”，不代表文件已经自动删除。清理不触碰手机或 `%LOCALAPPDATA%` 中的运行数据，也不改变 `resources.qrc` 中列出的内嵌资源。
+普通模式把 TEMP/build 多目录等作为警告；`-Strict` 会把警告升级为失败。脚本只读，不会删除文件。清理仍按任务手动确认，不提供整目录一键清空命令。
+
+`OrangeToolsApp/` 保留为当前可运行包，但不会随源码修改自动更新；如需最新版本，请先按第 4 节重新编译和部署。`dist/` 中现存的历史交付名为 `OrangeTools-Single-Icon.exe`；新 `release.ps1` 默认输出仍为 `OrangeTools-Single.exe`，不会自动覆盖。
 
 本项目自身源码采用 MIT 许可证；Qt、ADB、scrcpy、Payload 及其他分发工具遵循各自许可证。
 
@@ -618,7 +602,7 @@ foreach ($relativePath in $cleanupTargets) {
 
 ### 10.1 脚本职责与复现
 
-- `release.ps1`：选定同一 Qt Release kit；源码快照、构建、回归、干净部署、四候选比较、依赖/签名验证、工作树部署和交付。实验和日志全部位于独立系统 TEMP，不以旧运行目录为打包输入。
+- `release.ps1`：选定同一 Qt Release kit；源码快照、构建、回归、干净部署、四候选比较、依赖/签名验证、工作树部署和交付。实验和日志全部位于独立系统 TEMP（发布脚本内部例外；手工实验仍放项目 `TEMP/`），不以旧运行目录为打包输入。
 - `package-single-exe.ps1`：低层打包器，**必须显式传入已验证的全新 `-ReleaseDirectory`**；严格检查文件清单、模块 pin 和许可证，复制到 TEMP 后可选 UPX，再创建 SFX、实际解压并逐文件比对。单独使用不能代替完整构建/回归流程。
 - `scripts/SingleExe.Common.ps1`：安全路径、SHA-256 清单、许可证收集、Qt 文件签名、PE 依赖和部署烟雾验证。
 - `tests/test-single-exe.ps1` / `tests/fixtures/sfxprobe.cpp`：以只写测试标记并短暂等待的无害程序验证 SFX 生命周期，**不启动真实主程序**。
@@ -705,11 +689,11 @@ UPX 只在 TEMP 副本中处理未签名主程序和三项允许的 MinGW DLL；
 
 验收不连接手机，不刷写，不执行真实外网下载；回归网络测试只使用本机 loopback，工具版本/归档/镜像测试只处理无害本地夹具。最终 EXE 没有被执行，只由 7-Zip 解压做清单与 hash 比对。没有把这些检查说成真实手机联调或所有设备兼容性验证。
 
-脚本失败时保留证据，不交付未经验证的新包；运行包更新失败时可能不完整，不继续分发。TEMP 实验不会自动删除，确认排错结束且无进程占用后再手动清理本任务路径。
+脚本失败时保留证据，不交付未经验证的新包；运行包更新失败时可能不完整，不继续分发。TEMP 任务目录按 `AGENTS.md` 的规则管理：全项目最多保留最近 1 个，确认排错结束且无进程占用后再清理旧目录。
 
 ### 单 EXE 的自解压图标
 
-单 EXE 打包默认使用 `assets/sfx.ico`（来自用户提供的 `图标.jpg`，含 16、24、32、48、64、128、256 像素的 32 位图标）。原 JPG 不作为构建输入；图标仅改变交付的自解压 EXE 外壳，不改变解压后的主程序图标或离线功能。
+单 EXE 打包默认使用 `assets/sfx.ico`（来自用户提供的 `docs/assets/icon-reference.jpg`，含 16、24、32、48、64、128、256 像素的 32 位图标）。原 JPG 不作为构建输入；图标仅改变交付的自解压 EXE 外壳，不改变解压后的主程序图标或离线功能。
 
 仍按原命令运行 `release.ps1` 即可，无需额外参数。直接使用 `package-single-exe.ps1` 时，可通过 `-IconPath 'C:\path\custom.ico'` 指定另一个 ICO。已有 EXE 不会自动修改或覆盖，重新打包时请使用新的输出文件名。
 

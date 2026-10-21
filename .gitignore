@@ -74,3 +74,29 @@ dist/
 
 # 云端下载文件属于用户数据，不提交
 /OrangeToolsApp/download/
+
+# 任务临时目录与旧工具预览
+/tmp/
+/.trae/
+/.trae-html-share-packages/
+/qt.conf
+/licenses/
+/sfx.ico
+/target_wrapper.bat
+
+# IDE 与编译器辅助文件
+.vscode/
+.idea/
+.vs/
+*.pdb
+*.ilk
+*.idb
+*.exp
+compile_commands.json
+.clangd/
+
+# 归档与补丁
+*.7z
+*.tar.gz
+*.orig
+*.rej
