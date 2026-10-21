@@ -435,6 +435,7 @@ MenuWidget::MenuWidget(QWidget *parent)
     , payloadWindow(nullptr)
     , deviceCheckWindow(nullptr)
     , configWindow(nullptr)
+    , openListService(nullptr)
     , imgProcess(nullptr)
 {
     setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
@@ -451,6 +452,12 @@ MenuWidget::MenuWidget(QWidget *parent)
 
     // 启动预热：后台预下载配置文件，首次打开配置窗口无需等待网络。
     QTimer::singleShot(500, this, [] { ConfigWindow::preloadConfigFile(); });
+
+    // OpenList 复用同一服务：启动后预加载列表，首次打开窗口直接显示快照。
+    openListService = new OpenListService(this, nullptr, QString(), OpenList::defaultListingCacheFile());
+    QTimer::singleShot(800, this, [this] {
+        if (openListService) openListService->preload();
+    });
 }
 
 MenuWidget::~MenuWidget()
@@ -934,7 +941,7 @@ void MenuWidget::togglePanel()
 RepairWindow *MenuWidget::ensureRepairWindow()
 {
     if (!repairWindow) {
-        repairWindow = new RepairWindow(pages);
+        repairWindow = new RepairWindow(pages, openListService);
         pages->addWidget(repairWindow);
         pageTitles.insert(repairWindow, QStringLiteral("秋白工作室"));
     }

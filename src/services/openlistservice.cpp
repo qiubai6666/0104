@@ -45,7 +45,7 @@ bool apiObject(QNetworkReply *r, QJsonObject *result) {
 constexpr int listingPageSize = 100;
 // OpenList 的目录读取主要是请求往返耗时；并发几路即可明显缩短整树时间，
 // 同时给下载连接留出余量。
-constexpr int maxConcurrentListRequests = 4;
+constexpr int maxConcurrentListRequests = 6;
 constexpr int maxListRequests = 2048;
 constexpr int maxListingEntries = 50000;
 constexpr int maxListingDepth = 32;
@@ -232,11 +232,42 @@ void OpenListService::refresh() {
     const auto replies = m_lists; m_lists.clear();
     for (auto r : replies) if (r) { r->abort(); r->deleteLater(); }
     m_listing = Listing();
+    m_listing.started = true;
+    m_lastResultOk = false;
     loadCacheOnce();
     if (generation != m_listGeneration) return;
     m_listing.pending.enqueue({remoteRoot(), 1, 0});
     m_listing.visited.insert(remoteRoot());
     pump(generation);
+}
+void OpenListService::preload() {
+    if (m_active || m_listing.started) return;
+    loadCacheOnce();
+    if (snapshotFresh()) {
+        m_listing.started = true;
+        m_listing.finished = true;
+        m_lastResult = m_cachedEntries;
+        m_lastResultTime = m_cacheTime;
+        m_lastResultOk = true;
+        return;
+    }
+    refresh();
+}
+QList<OpenList::Entry> OpenListService::snapshotEntries() const {
+    if (listingInProgress()) return mergedWithCache(m_listing.entries);
+    if (m_lastResultOk || !m_lastResult.isEmpty()) return m_lastResult;
+    return m_cachedEntries;
+}
+QDateTime OpenListService::snapshotTime() const {
+    if (m_lastResultOk && m_lastResultTime.isValid()) return m_lastResultTime;
+    if (m_cacheTime.isValid()) return m_cacheTime;
+    return m_lastResultTime;
+}
+bool OpenListService::snapshotFresh(int seconds) const {
+    const QDateTime time = snapshotTime();
+    if (!time.isValid()) return false;
+    const qint64 age = time.secsTo(QDateTime::currentDateTimeUtc());
+    return age >= 0 && age <= qMax(0, seconds);
 }
 void OpenListService::loadCacheOnce() {
     if (m_cacheLoaded) return;
@@ -325,7 +356,12 @@ void OpenListService::finishListing(quint64 generation) {
         m_cacheTime = QDateTime::currentDateTimeUtc();
         m_cacheLoaded = true;
         saveCache(result, m_cacheTime);
+        m_lastResultOk = true;
+    } else {
+        m_lastResultOk = false;
     }
+    m_lastResult = result;
+    m_lastResultTime = m_cacheTime.isValid() ? m_cacheTime : QDateTime();
     emit listingReady(result, listing.error);
 }
 void OpenListService::pump(quint64 generation) {
@@ -383,8 +419,17 @@ void OpenListService::pump(quint64 generation) {
                     }
                 }
                 const int total = data.value("total").toInt();
-                if (!content.isEmpty() && page.page * listingPageSize < total)
-                    list.pending.enqueue({page.path, page.page + 1, page.depth});
+                // 只有第一页负责展开剩余页，避免后续页再次链式入队造成重复；
+                // 页数同时受请求预算与条目上限约束，不能依赖服务端 total 无界扩张。
+                if (page.page == 1 && !content.isEmpty() && total > listingPageSize) {
+                    const int totalPages = (total + listingPageSize - 1) / listingPageSize;
+                    const int budget = qMax(0, maxListRequests - list.requests);
+                    const int entryPages = qMax(1, maxListingEntries / listingPageSize);
+                    const int lastPage = qMin(totalPages, qMin(budget, entryPages));
+                    for (int next = 2; next <= lastPage; ++next)
+                        list.pending.enqueue({page.path, next, page.depth});
+                    if (lastPage < totalPages) list.error = QStringLiteral("目录过多，列表不完整");
+                }
             }
             if (!added.isEmpty()) emit listingUpdated(added);
             if (generation != m_listGeneration) return;

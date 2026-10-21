@@ -37,6 +37,10 @@
 #include <functional>
 
 namespace {
+QString relativeParent(const QString &path) {
+    const int slash = path.lastIndexOf('/');
+    return slash < 0 ? QString() : path.left(slash);
+}
 // 本地路径键：Windows 不区分大小写，避免同一文件因大小写不同被重复下载。
 QString localPathKey(const QString &path) {
     const QString clean = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
@@ -122,6 +126,10 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     if (parent) connect(parent, &QObject::destroyed, this, &QObject::deleteLater);
     setWindowTitle(QStringLiteral("Openlist"));
     setAttribute(Qt::WA_DeleteOnClose,false); setAttribute(Qt::WA_QuitOnClose,false);
+    m_renderTimer = new QTimer(this);
+    m_renderTimer->setSingleShot(true);
+    m_renderTimer->setInterval(80);
+    connect(m_renderTimer, &QTimer::timeout, this, [this] { render(true); });
     setupUi();
     connect(m_refresh,&QPushButton::clicked,this,&OpenListWindow::refresh);
     connect(m_cancel,&QPushButton::clicked,this,[this] {
@@ -160,16 +168,18 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
         m_installer->inspectDevices();
     });
     connect(m_service,&OpenListService::listingCached,this,[this](const QList<OpenList::Entry> &entries,const QDateTime &savedAt) {
+        m_renderTimer->stop();
         setListingEntries(entries); m_listingComplete = true; m_hasCachedSnapshot = true; render();
         m_updatedAt->setText(QStringLiteral("缓存于 %1").arg(savedAt.toLocalTime().toString("MM-dd HH:mm")));
         if (!m_busy) m_status->setText(QStringLiteral("已显示缓存 · 正在更新…"));
     });
     connect(m_service,&OpenListService::listingUpdated,this,[this](const QList<OpenList::Entry> &entries) {
-        if (appendListingEntries(entries)) render(true);
+        if (appendListingEntries(entries)) m_renderTimer->start();
         if (!m_busy && !m_listingComplete) m_status->setText(QStringLiteral("正在加载资源…"));
     });
     connect(m_service,&OpenListService::listingReady,this,[this](const QList<OpenList::Entry> &entries,const QString &error) {
         // 刷新失败时保留已有缓存行；服务层已尽量把缓存与本次结果合并。
+        m_renderTimer->stop();
         if (error.isEmpty() || !entries.isEmpty() || m_entries.isEmpty()) setListingEntries(entries);
         m_listingComplete = error.isEmpty();
         if (m_listingComplete) pruneSelection();
@@ -252,7 +262,7 @@ OpenListWindow::OpenListWindow(QWidget *parent, OpenListService *service, OpenLi
     connect(DeviceManager::instance(),&DeviceManager::deviceInfoUpdated,this,[this] { updateDevice(); });
     DeviceManager::instance()->ensureAdbOnlyMonitoring();
     connect(this,&QObject::destroyed,DeviceManager::instance(),[] { DeviceManager::instance()->releaseAdbOnlyMonitoring(); });
-    updateDevice(); QTimer::singleShot(0,this,&OpenListWindow::refresh);
+    updateDevice(); QTimer::singleShot(0,this,&OpenListWindow::beginListing);
 }
 void OpenListWindow::setupUi() {
     setObjectName("openListWindow");
@@ -779,8 +789,50 @@ void OpenListWindow::setupUi() {
     updateDrawerGeometry();
     updateRecent();
 }
+void OpenListWindow::beginListing() {
+    if (m_busy) return;
+    m_renderTimer->stop();
+    const QList<OpenList::Entry> snapshot = m_service->snapshotEntries();
+    auto showSnapshot = [this, &snapshot] {
+        if (!snapshot.isEmpty()) {
+            setListingEntries(snapshot);
+            m_hasCachedSnapshot = true;
+            const QDateTime time = m_service->snapshotTime();
+            if (time.isValid())
+                m_updatedAt->setText(QStringLiteral("缓存于 %1").arg(time.toLocalTime().toString("MM-dd HH:mm")));
+        }
+    };
+    if (m_service->listingInProgress()) {
+        showSnapshot();
+        m_pending = 1; m_refresh->setEnabled(false);
+        m_currentDirectory.clear(); m_listingComplete = false;
+        m_status->setText(QStringLiteral("正在加载资源…"));
+        render();
+        return;
+    }
+    // 启动预热刚完成且数据仍新鲜时直接复用，避免重复一次网络往返。
+    if (m_service->listingComplete() && m_service->snapshotFresh()) {
+        setListingEntries(snapshot);
+        m_listingComplete = true; m_hasCachedSnapshot = true; m_pending = 0;
+        m_currentDirectory.clear();
+        m_refresh->setEnabled(true);
+        const QDateTime time = m_service->snapshotTime();
+        m_updatedAt->setText(QStringLiteral("更新于 %1")
+            .arg((time.isValid() ? time : QDateTime::currentDateTime()).toLocalTime().toString("MM-dd HH:mm")));
+        m_status->setText(QStringLiteral("资源已就绪 · 单击单选，按住 Ctrl 多选，双击文件直接安装"));
+        render();
+        return;
+    }
+    showSnapshot();
+    m_pending = 1; m_refresh->setEnabled(false); m_status->setText(QStringLiteral("正在读取资源…"));
+    m_currentDirectory.clear(); m_listingComplete = false;
+    // 保留上一次结果与已选项：服务端缓存会在 refresh() 内同步先发，网络失败时也不闪空。
+    render(); m_count->setText(QStringLiteral("正在读取…"));
+    m_service->refresh();
+}
 void OpenListWindow::refresh() {
     if (m_busy) return;
+    m_renderTimer->stop();
     m_pending = 1; m_refresh->setEnabled(false); m_status->setText(QStringLiteral("正在读取资源…"));
     m_currentDirectory.clear(); m_listingComplete = false;
     // 保留上一次结果与已选项：服务端缓存会在 refresh() 内同步先发，网络失败时也不闪空。
@@ -791,22 +843,38 @@ void OpenListWindow::setListingEntries(const QList<OpenList::Entry> &entries) {
     m_entries = entries;
     m_entryPaths.clear();
     for (const auto &entry : m_entries) m_entryPaths.insert(entry.remotePath);
+    rebuildEntryIndexes();
+}
+void OpenListWindow::rebuildEntryIndexes() {
+    m_entryIndex.clear();
+    m_childrenByParent.clear();
+    m_entryIndex.reserve(m_entries.size());
+    for (int index = 0; index < m_entries.size(); ++index) {
+        const auto &entry = m_entries[index];
+        // 展示层保留重复路径的原始条目；索引只记录首个，用于选中项定位。
+        if (!m_entryIndex.contains(entry.remotePath)) m_entryIndex.insert(entry.remotePath, index);
+        m_childrenByParent[relativeParent(entry.relativePath)].append(index);
+    }
 }
 bool OpenListWindow::appendListingEntries(const QList<OpenList::Entry> &entries) {
     bool changed = false;
     for (const auto &entry : entries) {
         if (m_entryPaths.contains(entry.remotePath)) continue;
         m_entryPaths.insert(entry.remotePath);
+        const int index = m_entries.size();
         m_entries.append(entry);
+        m_entryIndex.insert(entry.remotePath, index);
+        m_childrenByParent[relativeParent(entry.relativePath)].append(index);
         changed = true;
     }
     return changed;
 }
 void OpenListWindow::pruneSelection() {
-    QSet<QString> valid;
-    for (const auto &entry : m_entries) if (!entry.directory) valid.insert(entry.remotePath);
     QSet<QString> kept;
-    for (const auto &path : m_selectedPaths) if (valid.contains(path)) kept.insert(path);
+    for (const auto &path : m_selectedPaths) {
+        const int index = m_entryIndex.value(path, -1);
+        if (index >= 0 && !m_entries[index].directory) kept.insert(path);
+    }
     m_selectedPaths = kept;
     QList<QString> order;
     for (const auto &path : m_selectionOrder) if (kept.contains(path)) order.append(path);
@@ -816,23 +884,23 @@ void OpenListWindow::pruneSelection() {
 void OpenListWindow::render(bool preserveScroll) {
     auto *table = m_table;
     const int scrollValue = preserveScroll ? table->verticalScrollBar()->value() : 0;
-    QHash<QString, int> childCounts;
-    for (const auto &entry : m_entries) {
-        const QString parent = entry.relativePath.contains('/')
-            ? entry.relativePath.left(entry.relativePath.lastIndexOf('/')) : QString();
-        ++childCounts[parent];
+    const auto filter = m_search->text().trimmed();
+    QList<int> visible;
+    if (filter.isEmpty()) {
+        visible = m_childrenByParent.value(m_currentDirectory);
+    } else {
+        visible.reserve(m_entries.size());
+        for (int index = 0; index < m_entries.size(); ++index)
+            if (m_entries[index].relativePath.contains(filter, Qt::CaseInsensitive)) visible.append(index);
     }
+    table->setUpdatesEnabled(false);
     table->blockSignals(true);
     table->setRowCount(0);
-    const auto filter = m_search->text().trimmed();
     m_up->setEnabled(!m_busy && !m_currentDirectory.isEmpty());
     m_directory->setText(m_currentDirectory.isEmpty() ? QStringLiteral("秋白工作室")
                                                      : QStringLiteral("秋白工作室 / %1").arg(m_currentDirectory));
-    for (int index=0;index<m_entries.size();++index) {
+    for (int index : visible) {
         const auto &entry = m_entries[index];
-        const QString parent = entry.relativePath.contains('/') ? entry.relativePath.left(entry.relativePath.lastIndexOf('/')) : QString();
-        if (filter.isEmpty() && parent != m_currentDirectory) continue;
-        if (!filter.isEmpty() && !entry.relativePath.contains(filter,Qt::CaseInsensitive)) continue;
         const int row = table->rowCount(); table->insertRow(row);
         auto *name = new QTableWidgetItem(entry.name);
         // 目录行 accent 蓝文件夹图标；文件按类型着色（APK 绿 / ZIP 蓝 / SH 琥珀 / 其他墨灰）。
@@ -853,13 +921,13 @@ void OpenListWindow::render(bool preserveScroll) {
             name->setCheckState(m_selectedPaths.contains(entry.remotePath) ? Qt::Checked : Qt::Unchecked);
         }
         table->setItem(row,0,name);
-        QString dir = QFileInfo(entry.relativePath).path(); if (dir == QStringLiteral(".")) dir = QStringLiteral("根目录");
+        QString dir = relativeParent(entry.relativePath); if (dir.isEmpty()) dir = QStringLiteral("根目录");
         auto *dirItem = new QTableWidgetItem(dir);
         dirItem->setForeground(QColor("#5E7287")); dirItem->setToolTip(dir);
         table->setItem(row,1,dirItem);
         QString sizeText;
         if (entry.directory) {
-            const int children = childCounts.value(entry.relativePath);
+            const int children = m_childrenByParent.value(entry.relativePath).size();
             sizeText = (!m_listingComplete && children == 0) ? QStringLiteral("—")
                                                              : QStringLiteral("%1 项").arg(children);
         } else {
@@ -884,6 +952,7 @@ void OpenListWindow::render(bool preserveScroll) {
         }
     }
     table->blockSignals(false);
+    table->setUpdatesEnabled(true);
     if (preserveScroll) table->verticalScrollBar()->setValue(scrollValue);
     syncChecks();
     updateCount();
@@ -896,10 +965,12 @@ void OpenListWindow::updateCount() {
     else if (m_selectedPaths.isEmpty()) m_count->setText(QStringLiteral("共 %1 项资源").arg(rows));
     else {
         qint64 total = 0; bool unknown = false;
-        for (const auto &entry : m_entries)
-            if (m_selectedPaths.contains(entry.remotePath)) {
-                if (entry.size >= 0) total += entry.size; else unknown = true;
-            }
+        for (const auto &path : m_selectedPaths) {
+            const int index = m_entryIndex.value(path, -1);
+            if (index < 0) continue;
+            const auto &entry = m_entries[index];
+            if (entry.size >= 0) total += entry.size; else unknown = true;
+        }
         m_count->setText(QStringLiteral("共 %1 项资源 · 已选 %2 项 · 合计 %3")
                              .arg(rows).arg(m_selectedPaths.size())
                              .arg(unknown ? QStringLiteral("大小未知") : QLocale().formattedDataSize(total)));
@@ -936,13 +1007,11 @@ void OpenListWindow::clearSelectionState() {
 }
 void OpenListWindow::startSelection(BatchMode mode) {
     if (m_busy) return;
-    QHash<QString, const OpenList::Entry*> byPath;
-    for (const auto &entry : m_entries) byPath.insert(entry.remotePath, &entry);
     QList<OpenList::Entry> selected;
     // 按勾选顺序收集，而不是按服务器列表顺序；批量下载和安装都沿用该顺序。
     for (const auto &path : m_selectionOrder) {
-        const auto it = byPath.constFind(path);
-        if (it != byPath.constEnd() && m_selectedPaths.contains(path)) selected.append(*it.value());
+        const int index = m_entryIndex.value(path, -1);
+        if (index >= 0 && m_selectedPaths.contains(path)) selected.append(m_entries[index]);
     }
     if (selected.isEmpty()) log(QStringLiteral("请先选择文件；单击单选，按住 Ctrl 点击可多选。"));
     else startBatch(selected, mode);
@@ -1157,11 +1226,24 @@ bool OpenListWindow::eventFilter(QObject *watched, QEvent *event) {
 }
 
 QPixmap OpenListWindow::glyphPixmap(const QString &name, const QColor &color, int size) const {
-    return UIHelper::menuIcon(name, color, devicePixelRatioF()).pixmap(QSize(size, size));
+    const qreal dpr = devicePixelRatioF();
+    const QString key = QStringLiteral("%1|%2|%3|%4")
+        .arg(name, color.name(QColor::HexArgb)).arg(size).arg(dpr, 0, 'f', 3);
+    const auto cached = m_glyphCache.constFind(key);
+    if (cached != m_glyphCache.constEnd()) return cached.value();
+    const QPixmap pixmap = UIHelper::menuIcon(name, color, dpr).pixmap(QSize(size, size));
+    if (m_glyphCache.size() >= 256) m_glyphCache.clear();
+    m_glyphCache.insert(key, pixmap);
+    return pixmap;
 }
 
 QPixmap OpenListWindow::tilePixmap(const QString &name, const QColor &glyph, const QColor &bg, const QColor &border, int size, int radius) const {
     const qreal dpr = devicePixelRatioF();
+    const QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|%7")
+        .arg(name, glyph.name(QColor::HexArgb), bg.name(QColor::HexArgb),
+             border.name(QColor::HexArgb)).arg(size).arg(radius).arg(dpr, 0, 'f', 3);
+    const auto cached = m_tileCache.constFind(key);
+    if (cached != m_tileCache.constEnd()) return cached.value();
     QPixmap canvas(qRound(size * dpr), qRound(size * dpr));
     canvas.setDevicePixelRatio(dpr); canvas.fill(Qt::transparent);
     QPainter painter(&canvas); painter.setRenderHint(QPainter::Antialiasing);
@@ -1179,6 +1261,9 @@ QPixmap OpenListWindow::tilePixmap(const QString &name, const QColor &glyph, con
         const int logicalHeight = qRound(icon.height() / glyphRatio);
         painter.drawPixmap(QPoint((size - logicalWidth) / 2, (size - logicalHeight) / 2), icon);
     }
+    painter.end();
+    if (m_tileCache.size() >= 256) m_tileCache.clear();
+    m_tileCache.insert(key, canvas);
     return canvas;
 }
 
@@ -1209,18 +1294,17 @@ void OpenListWindow::syncChecks() {
 }
 
 void OpenListWindow::updateSelectionPanel() {
-    QHash<QString, const OpenList::Entry*> byPath;
-    for (const auto &entry : m_entries) byPath.insert(entry.remotePath, &entry);
     // 已选面板按勾选顺序显示，和实际批量下载 / 安装顺序一致。
     const QList<QString> &paths = m_selectionOrder;
     QList<const OpenList::Entry*> picked;
     qint64 total = 0; bool unknown = false;
     for (const auto &path : paths) {
-        const auto it = byPath.constFind(path);
-        if (it == byPath.constEnd()) continue;
-        if (it.value()->directory) continue; // 文件夹不可勾选，已选列表只显示文件。
-        picked.append(it.value());
-        if (it.value()->size >= 0) total += it.value()->size; else unknown = true;
+        const int index = m_entryIndex.value(path, -1);
+        if (index < 0) continue;
+        const auto &entry = m_entries[index];
+        if (entry.directory) continue; // 文件夹不可勾选，已选列表只显示文件。
+        picked.append(&entry);
+        if (entry.size >= 0) total += entry.size; else unknown = true;
     }
     m_selectionMeta->setText(picked.isEmpty() ? QString()
         : QStringLiteral("%1 个文件 · %2").arg(picked.size())

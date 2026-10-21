@@ -13,13 +13,14 @@
 class OugaFlashWindow;
 class XiaomiFlashWindow;
 class OpenListWindow;
+class OpenListService;
 
 class RepairWindow : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit RepairWindow(QWidget *parent = nullptr);
+    explicit RepairWindow(QWidget *parent = nullptr, OpenListService *openListService = nullptr);
     ~RepairWindow();
 
     void setPosition(int mainMenuX, int mainMenuY, int mainMenuHeight);
@@ -75,6 +76,7 @@ private:
     OugaFlashWindow *ougaWindow = nullptr;
     XiaomiFlashWindow *xiaomiWindow = nullptr;
     OpenListWindow *openListWindow = nullptr;
+    OpenListService *openListService = nullptr;
     QVBoxLayout *mainLayout;
     QVector<QPushButton*> buttons;
     QProcess *repairProcess;

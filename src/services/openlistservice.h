@@ -39,7 +39,17 @@ public:
     explicit OpenListService(QObject *parent = nullptr, QNetworkAccessManager *network = nullptr,
                              const QString &downloadRoot = QString(), const QString &cacheFile = QString());
     ~OpenListService() override;
+    static constexpr int SnapshotFreshSeconds = 120;
     void refresh();
+    // 启动预热：缓存新鲜时直接完成，不发信号也不联网；否则开始一次刷新。
+    void preload();
+    bool listingStarted() const { return m_listing.started; }
+    bool listingInProgress() const { return m_listing.started && !m_listing.finished; }
+    // 仅在最近一次加载成功且已结束时为 true，调用方可据此安全复用快照。
+    bool listingComplete() const { return m_listing.started && m_listing.finished && m_lastResultOk; }
+    QList<OpenList::Entry> snapshotEntries() const;
+    QDateTime snapshotTime() const;
+    bool snapshotFresh(int seconds = SnapshotFreshSeconds) const;
     // directory 非空时直接保存到该目录（文件名扁平化，不保留云端子目录）；
     // 为空时沿用默认下载根的“软件”目录并保留相对路径。
     bool download(const OpenList::Entry &entry, const QString &directory = QString());
@@ -69,6 +79,7 @@ private:
         QString error;
         int requests = 0;
         int active = 0;
+        bool started = false;
         bool finished = false;
     };
     void pump(quint64 generation);
@@ -105,6 +116,9 @@ private:
     bool m_parallel = false;
     bool m_parallelFallback = false;
     Listing m_listing;
+    QList<OpenList::Entry> m_lastResult;
+    QDateTime m_lastResultTime;
+    bool m_lastResultOk = false;
     QString m_cacheFile;
     QList<OpenList::Entry> m_cachedEntries;
     QDateTime m_cacheTime;

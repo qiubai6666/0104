@@ -476,7 +476,7 @@ private slots:
         OpenListService service(nullptr, &network, "unused");
         QSignalSpy ready(&service, &OpenListService::listingReady);
         service.refresh();
-        QTRY_COMPARE(network.requests.size(), 5); // Root + four in-flight directory requests.
+        QTRY_COMPARE(network.requests.size(), 7); // Root + six in-flight directory requests.
         for (int i = 0; i < 6; ++i) {
             QTRY_VERIFY(!pending.isEmpty());
             finishReply(pending.takeFirst());
@@ -485,6 +485,122 @@ private slots:
         QTRY_COMPARE(ready.size(), 1);
         QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(ready[0][0]).size(), 12);
         QCOMPARE(network.requests.size(), 7);
+    }
+    void preloadCompletesBeforeWindowReuse() {
+        Network network;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &b) -> Reply* {
+            if (b.value("path").toString() == testRemoteRoot())
+                return new Reply(r, api({{"content", QJsonArray{entry("ready.apk")}}, {"total", 1}}), 200);
+            return new Reply(r, api({{"content", QJsonArray{}}, {"total", 0}}), 200);
+        };
+        OpenListService service(nullptr, &network, "unused");
+        QSignalSpy ready(&service, &OpenListService::listingReady);
+        service.preload();
+        QTRY_COMPARE(ready.size(), 1);
+        QVERIFY(service.listingComplete());
+        QVERIFY(service.snapshotFresh());
+        const int requests = network.requests.size();
+        OpenListWindow window(nullptr, &service, nullptr);
+        auto *table = window.findChild<QTableWidget *>("openListFiles"); QVERIFY(table);
+        auto *refresh = window.findChild<QPushButton *>("openListRefresh"); QVERIFY(refresh);
+        QTRY_COMPARE(table->rowCount(), 1);
+        QCOMPARE(table->item(0, 0)->text(), QStringLiteral("ready.apk"));
+        QCOMPARE(network.requests.size(), requests);
+        QVERIFY(refresh->isEnabled());
+        window.close();
+    }
+    void preloadUsesFreshCache() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString cache = dir.filePath(QStringLiteral("cache/openlist.json"));
+        QVERIFY(writeFile(cache, cachedListing(QJsonArray{cacheEntry("cached.apk", "cached.apk")})));
+        Network network; int requests = 0;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &) -> Reply* {
+            ++requests; return new Reply(r, api({{"content", QJsonArray{}}, {"total", 0}}), 200);
+        };
+        OpenListService service(nullptr, &network, "unused", cache);
+        QSignalSpy ready(&service, &OpenListService::listingReady);
+        service.preload();
+        QVERIFY(service.listingStarted());
+        QVERIFY(service.listingComplete());
+        QVERIFY(service.snapshotFresh());
+        QCOMPARE(requests, 0);
+        QVERIFY(ready.isEmpty());
+        QCOMPARE(service.snapshotEntries().size(), 1);
+        QCOMPARE(service.snapshotEntries().first().name, QStringLiteral("cached.apk"));
+    }
+    void preloadRefreshesStaleCache() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const QString cache = dir.filePath(QStringLiteral("cache/openlist.json"));
+        const QByteArray stale = QJsonDocument(QJsonObject{
+            {"version", 1}, {"root", testRemoteRoot()},
+            {"savedAt", double(QDateTime::currentDateTimeUtc().addSecs(-600).toMSecsSinceEpoch())},
+            {"entries", QJsonArray{cacheEntry("cached.apk", "cached.apk")}}
+        }).toJson(QJsonDocument::Compact);
+        QVERIFY(writeFile(cache, stale));
+        Network network; int requests = 0;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &) -> Reply* {
+            ++requests;
+            return new Reply(r, api({{"content", QJsonArray{entry("fresh.apk")}}, {"total", 1}}), 200);
+        };
+        OpenListService service(nullptr, &network, "unused", cache);
+        QSignalSpy ready(&service, &OpenListService::listingReady);
+        service.preload();
+        QCOMPARE(requests, 1);
+        QTRY_COMPARE(ready.size(), 1);
+        QVERIFY(service.listingComplete());
+        const auto entries = qvariant_cast<QList<OpenList::Entry>>(ready[0][0]);
+        QCOMPARE(entries.size(), 1);
+        QCOMPARE(entries.first().name, QStringLiteral("fresh.apk"));
+    }
+    void preloadInProgressHandsOffToWindow() {
+        Network network; QList<Reply*> pending;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &) -> Reply* {
+            auto *reply = new Reply(r, api({{"content", QJsonArray{entry("late.apk")}}, {"total", 1}}), 200, {}, true);
+            pending.append(reply); return reply;
+        };
+        OpenListService service(nullptr, &network, "unused");
+        service.preload();
+        QCOMPARE(network.requests.size(), 1);
+        QVERIFY(service.listingInProgress());
+        OpenListWindow window(nullptr, &service, nullptr);
+        auto *table = window.findChild<QTableWidget *>("openListFiles"); QVERIFY(table);
+        auto *refresh = window.findChild<QPushButton *>("openListRefresh"); QVERIFY(refresh);
+        QTRY_VERIFY(!refresh->isEnabled());
+        QCOMPARE(table->rowCount(), 0);
+        QCOMPARE(network.requests.size(), 1);
+        finishReply(pending.takeFirst());
+        QTRY_COMPARE(table->rowCount(), 1);
+        QVERIFY(refresh->isEnabled());
+        QVERIFY(service.listingComplete());
+        QCOMPARE(network.requests.size(), 1);
+        window.close();
+    }
+    void listingPaginatesInParallel() {
+        Network network; QList<Reply*> pending;
+        network.handler = [&](const QNetworkRequest &r, const QJsonObject &b) -> Reply* {
+            if (b.value("path").toString() != testRemoteRoot())
+                return new Reply(r, api({{"content", QJsonArray{}}, {"total", 0}}), 200);
+            const int page = b.value("page").toInt();
+            if (page == 1)
+                return new Reply(r, api({{"content", QJsonArray{entry("page1.apk")}}, {"total", 250}}), 200);
+            auto *reply = new Reply(r, api({{"content", QJsonArray{entry(QStringLiteral("page%1.apk").arg(page))}}, {"total", 250}}),
+                                    200, {}, true);
+            pending.append(reply); return reply;
+        };
+        OpenListService service(nullptr, &network, "unused");
+        QSignalSpy ready(&service, &OpenListService::listingReady);
+        service.refresh();
+        QTRY_COMPARE(network.requests.size(), 3);
+        QCOMPARE(pending.size(), 2);
+        QList<int> pages;
+        for (const auto &body : network.bodies) pages.append(body.value("page").toInt());
+        QVERIFY(pages.contains(2));
+        QVERIFY(pages.contains(3));
+        finishReply(pending.takeFirst());
+        finishReply(pending.takeFirst());
+        QTRY_COMPARE(ready.size(), 1);
+        QCOMPARE(qvariant_cast<QList<OpenList::Entry>>(ready[0][0]).size(), 3);
+        QCOMPARE(network.requests.size(), 3);
     }
     void listingCacheRoundTrip() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

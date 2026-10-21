@@ -19,8 +19,9 @@
 #include <QStandardPaths>
 #include <QPointer>
 
-RepairWindow::RepairWindow(QWidget *parent)
+RepairWindow::RepairWindow(QWidget *parent, OpenListService *openListService)
     : QWidget(parent)
+    , openListService(openListService)
     , repairProcess(nullptr)
     , usbFixStep(UsbFixStep::Push)
     , tmpFixStep(TmpFixStep::CreateDirectory)
@@ -116,7 +117,7 @@ void RepairWindow::onButtonClicked()
         installModule();
         break;
     case OpenList:
-        if (!openListWindow) openListWindow = new OpenListWindow(this);
+        if (!openListWindow) openListWindow = new OpenListWindow(this, openListService);
         openListWindow->showNormal();
         openListWindow->raise();
         openListWindow->activateWindow();
