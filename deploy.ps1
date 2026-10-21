@@ -134,7 +134,7 @@ if (-not $IncludeSoftwareOpenGL) {
 if (-not $IncludeOptionalDependencies) {
     $deployArguments += @('--no-system-d3d-compiler',
                           '--skip-plugin-types', 'generic,iconengines',
-                          '--exclude-plugins', 'qgif,qico,qjpeg,qsvg,qcertonlybackend')
+                          '--exclude-plugins', 'qico,qjpeg,qsvg,qcertonlybackend')
 }
 # Inspect the build artifact, not the output beside potentially stale Qt DLLs.
 $deployArguments += $executable
@@ -169,7 +169,8 @@ Copy-Item -LiteralPath $zstdLicense -Destination (Join-Path $licenseDirectory 'z
 [IO.File]::WriteAllText((Join-Path $output 'qt.conf'), "[Paths]`r`nPrefix = .`r`nPlugins = .`r`n", [Text.UTF8Encoding]::new($false))
 $required = @('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll', 'Qt6Concurrent.dll', 'Qt6Svg.dll',
               'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll', 'libbz2-1.dll',
-              'licenses\zstd-BSD.txt', 'platforms\qwindows.dll', 'styles\qmodernwindowsstyle.dll',
+              'licenses\zstd-BSD.txt', 'platforms\qwindows.dll', 'imageformats\qgif.dll',
+              'styles\qmodernwindowsstyle.dll',
               'networkinformation\qnetworklistmanager.dll', 'tls\qschannelbackend.dll')
 foreach ($file in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $output $file) -PathType Leaf)) {
@@ -183,7 +184,7 @@ if (-not $IncludeSoftwareOpenGL) {
 }
 if (-not $IncludeOptionalDependencies) {
     $optionalFiles += @('D3Dcompiler_47.dll', 'generic\qtuiotouchplugin.dll',
-                        'iconengines\qsvgicon.dll', 'imageformats\qgif.dll', 'imageformats\qico.dll',
+                        'iconengines\qsvgicon.dll', 'imageformats\qico.dll',
                         'imageformats\qjpeg.dll', 'imageformats\qsvg.dll', 'tls\qcertonlybackend.dll')
 }
 # Safe in-place application updates must not prune any existing files.

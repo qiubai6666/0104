@@ -26,6 +26,7 @@
 #include <QGridLayout>
 #include <QKeyEvent>
 #include <QList>
+#include <QMovie>
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QStackedWidget>
@@ -300,8 +301,9 @@ QString castWellStyle(const QString &tone, bool dark)
 
 } // namespace
 
-// 主入口悬浮球：空闲固定 command 图标，投屏启动中显示 spinner，
-// 流式中切换为投屏图标并叠加绿色徽标。点击由 MenuWidget 接管面板显隐。
+// 主入口悬浮球：浅玻璃外壳内常驻播放 Gengar 动画；悬停加内圈蓝环，
+// 投屏启动中压暗动画并叠加琥珀进度环，流式中显示绿色徽标。
+// 点击由 MenuWidget 接管面板显隐。
 // 定义在全局作用域，与 menuwidget.h 中的前置声明（成员 ball）保持同一类型。
 class FloatingBall : public QWidget
 {
@@ -309,6 +311,7 @@ public:
     enum CastState { Idle, Loading, Streaming };
 
     FloatingBall()
+        : mascot(new QMovie(QStringLiteral(":/mascot/gengar.gif"), QByteArrayLiteral("gif"), this))
     {
         // Qt::Tool：悬浮球不占用任务栏图标，主菜单单独保留任务栏入口。
         setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
@@ -319,6 +322,11 @@ public:
         setFixedSize(46, 46);
         setWindowTitle(APP_NAME);
         setCursor(Qt::PointingHandCursor);
+        mascot->setCacheMode(QMovie::CacheAll);
+        connect(mascot, &QMovie::frameChanged, this, [this] { update(); });
+        // 旧环境缺少 qgif 插件时保持外壳与 command 回退，不显示空球。
+        if (mascot->isValid())
+            mascot->start();
     }
 
     void setCastState(CastState value)
@@ -332,6 +340,16 @@ public:
     std::function<void()> activated;
 
 protected:
+    void enterEvent(QEnterEvent *) override
+    {
+        hovered = true;
+        update();
+    }
+    void leaveEvent(QEvent *) override
+    {
+        hovered = false;
+        update();
+    }
     void mousePressEvent(QMouseEvent *event) override
     {
         pressed = event->button() == Qt::LeftButton;
@@ -355,16 +373,41 @@ protected:
         painter.setPen(QPen(dark ? QColor(255, 255, 255, 23) : QColor(255, 255, 255, 128), 1.0));
         painter.setBrush(fill);
         painter.drawEllipse(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5));
-        const QRectF iconRect((width() - 22) / 2.0, (height() - 22) / 2.0, 22, 22);
-        if (castState == Loading) {
-            painter.setPen(QPen(accent, 2.5, Qt::SolidLine, Qt::RoundCap));
+
+        // 46px 窗口不能像预览稿那样外扩光晕，改用壳内蓝环表达悬停。
+        if (hovered && castState != Loading) {
+            painter.setPen(QPen(QColor(accent.red(), accent.green(), accent.blue(),
+                                        dark ? 140 : 120), 1.6));
             painter.setBrush(Qt::NoBrush);
-            painter.drawArc(iconRect, spinnerAngle * 16, 260 * 16);
+            painter.drawEllipse(QRectF(rect()).adjusted(2.8, 2.8, -2.8, -2.8));
+        }
+
+        // 92x87 原图等比缩至 34px，悬停只放大 1px，避免撑破外壳。
+        const qreal artWidth = hovered ? 35.0 : 34.0;
+        const qreal artHeight = artWidth * 87.0 / 92.0;
+        const QRectF artRect((width() - artWidth) / 2.0, (height() - artHeight) / 2.0,
+                             artWidth, artHeight);
+        const QPixmap frame = mascot->currentPixmap();
+        if (!frame.isNull()) {
+            if (castState == Loading)
+                painter.setOpacity(0.55);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            painter.drawPixmap(artRect, frame, QRectF(frame.rect()));
+            painter.setOpacity(1.0);
         } else {
-            const QIcon icon = UIHelper::menuIcon(
-                castState == Streaming ? QStringLiteral("monitor-smartphone") : QStringLiteral("command"),
-                accent, devicePixelRatioF());
-            icon.paint(&painter, iconRect.toRect());
+            const QRectF iconRect((width() - 22) / 2.0, (height() - 22) / 2.0, 22, 22);
+            UIHelper::menuIcon(QStringLiteral("command"), accent, devicePixelRatioF())
+                .paint(&painter, iconRect.toRect());
+        }
+
+        if (castState == Loading) {
+            const QColor amber("#C58A2B");
+            const QRectF ring = QRectF(rect()).adjusted(3.2, 3.2, -3.2, -3.2);
+            painter.setPen(QPen(QColor(amber.red(), amber.green(), amber.blue(), 46), 2.0));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(ring);
+            painter.setPen(QPen(amber, 2.0, Qt::SolidLine, Qt::RoundCap));
+            painter.drawArc(ring, spinnerAngle * 16, 260 * 16);
         }
         if (castState == Streaming) {
             const QRectF badge(width() - 16, 4, 12, 12);
@@ -380,6 +423,8 @@ protected:
 private:
     CastState castState = Idle;
     bool pressed = false;
+    bool hovered = false;
+    QMovie *mascot = nullptr;
 };
 
 MenuWidget::MenuWidget(QWidget *parent)

@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/mascot">
+    <file alias="gengar.gif">../../assets/mascot/gengar.gif</file>
+  </qresource>
+</RCC>
