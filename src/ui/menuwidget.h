@@ -75,11 +75,13 @@ private:
     void openAuthorImage();
     void updateDeviceRow();
     QString targetDisplayName() const;
+    bool isTargetLocked() const;
+    void refreshDeviceRowChrome();
     void toggleDevicePicker();
     void closeDevicePicker();
     void positionDevicePicker();
     void setDeviceRowOpen(bool open);
-    void showDeviceToast(const QString &text);
+    void showDeviceToast(const QString &text, bool warning = false);
 
     RepairWindow *ensureRepairWindow();
     PayloadWindow *ensurePayloadWindow();
@@ -97,10 +99,13 @@ private:
     QLabel *screenCastIconLabel = nullptr;
     QLabel *devicePill = nullptr;
     QPushButton *deviceRowButton = nullptr;
-    QLabel *deviceChevron = nullptr;
+    QLabel *deviceAvatar = nullptr;
+    QLabel *devicePresenceDot = nullptr;
+    QLabel *deviceEndmark = nullptr;
     ElidedLabel *deviceSerialLabel = nullptr;
     ElidedLabel *deviceNameLabel = nullptr;
     DevicePicker *devicePicker = nullptr;
+    bool deviceRowOpen = false;
     QLabel *deviceToast = nullptr;
     QTimer *deviceToastTimer = nullptr;
     QHash<QWidget *, QString> pageTitles;

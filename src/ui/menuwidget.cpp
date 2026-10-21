@@ -35,7 +35,9 @@
 #include <QTimer>
 #include <QUrl>
 #include <QCloseEvent>
+#include <QLinearGradient>
 #include <QPainter>
+#include <QPainterPath>
 #include <QIcon>
 #include <QLabel>
 #include <QEvent>
@@ -56,22 +58,16 @@ public:
 protected:
     void paintEvent(QPaintEvent *) override
     {
+        if (property("castCard").toBool()) {
+            paintCastCard();
+            return;
+        }
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         const bool dark = palette().color(QPalette::Window).lightness() < 128;
         const QColor accent = dark ? QColor(63, 140, 242) : QColor(47, 128, 237);
         QColor background = Qt::transparent;
-        const QString cardValue = property("cardBackground").toString();
-        if (!cardValue.isEmpty()) {
-            // 卡片本体模式（预览稿 .cc-scr）：常态即卡片底色，悬停仅描边，按下叠加 accent 淡底。
-            const QStringList parts = cardValue.split(',');
-            if (parts.size() == 4)
-                background = QColor(parts[0].toInt(), parts[1].toInt(), parts[2].toInt(), parts[3].toInt());
-            if (property("menuSelected").toBool() && isEnabled())
-                background = dark ? QColor(63, 140, 242, 34) : QColor(47, 128, 237, 26);
-            else if (isDown())
-                background = dark ? QColor(63, 140, 242, 44) : QColor(47, 128, 237, 34);
-        } else if (property("menuSelected").toBool() && isEnabled())
+        if (property("menuSelected").toBool() && isEnabled())
             background = dark ? QColor(63, 140, 242, 34) : QColor(47, 128, 237, 26);
         else if (isDown()) background = dark ? QColor(66, 97, 110, 200) : QColor(206, 228, 238, 230);
         else if (underMouse()) background = dark ? QColor(74, 98, 114, 128) : QColor(212, 230, 237, 128);
@@ -80,12 +76,60 @@ protected:
             painter.setBrush(background);
             painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 14, 14);
         }
-        // 预览稿：悬停/选中时以 accent 描边提示可点击区域。
         if ((underMouse() || (property("menuSelected").toBool() && isEnabled())) && isEnabled()) {
             painter.setPen(QPen(accent, 1.1));
             painter.setBrush(Qt::NoBrush);
             painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 14, 14);
         }
+    }
+
+private:
+    void paintCastCard()
+    {
+        const bool dark = palette().color(QPalette::Window).lightness() < 128;
+        const QString tone = property("castTone").toString();
+        QColor top;
+        QColor bottom;
+        QColor border;
+        if (tone == QStringLiteral("pending")) {
+            top = dark ? QColor("#33301f") : QColor("#FBF8F1");
+            bottom = dark ? QColor("#26303a") : QColor("#F4F8FB");
+            border = dark ? QColor(226, 154, 45, 64) : QColor(210, 139, 34, 61);
+        } else if (tone == QStringLiteral("live")) {
+            top = dark ? QColor("#1f332a") : QColor("#F3FAF7");
+            bottom = dark ? QColor("#24333c") : QColor("#F1F8FB");
+            border = dark ? QColor(69, 181, 126, 64) : QColor(28, 157, 91, 56);
+        } else {
+            top = dark ? QColor("#263543") : QColor("#F4F9FD");
+            bottom = dark ? QColor("#212e39") : QColor("#F8FBFD");
+            border = dark ? QColor(146, 166, 181, 46) : QColor(113, 149, 173, 36);
+        }
+        const QColor hoverBorder = dark ? QColor(63, 140, 242, 110) : QColor(47, 126, 235, 64);
+        const QRectF card = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QLinearGradient gradient(card.topLeft(), card.bottomRight());
+        gradient.setColorAt(0.0, top);
+        gradient.setColorAt(0.56, dark ? bottom.lighter(104) : QColor("#EEF5FA"));
+        gradient.setColorAt(1.0, bottom);
+        painter.setPen(QPen(underMouse() && isEnabled() ? hoverBorder : border, 1.0));
+        painter.setBrush(gradient);
+        painter.drawRoundedRect(card, 14, 14);
+
+        QPainterPath clip;
+        clip.addRoundedRect(card, 14, 14);
+        painter.save();
+        painter.setClipPath(clip);
+        painter.setPen(QPen(QColor(255, 255, 255, dark ? 26 : 235), 1.0));
+        painter.drawLine(QPointF(card.left() + 12, card.top() + 1.2),
+                         QPointF(card.right() - 12, card.top() + 1.2));
+        if (isDown()) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(47, 128, 237, dark ? 26 : 12));
+            painter.drawRect(card);
+        }
+        painter.restore();
     }
 };
 
@@ -106,29 +150,152 @@ QPixmap rotatedChevron(const QColor &color, qreal ratio, int angle)
     return pixmap;
 }
 
-// 功能 tile：把图标与文字合成为一张 DPI 感知位图，保持预览稿“图标在上、文字在下”的观感，
+// 功能 tile：把图标与文字合成为一张 DPI 感知位图，保持预览稿“图标在左、文字在右”的观感，
 // 同时按钮仍保留 tooltip/accessibleName 与原 objectName。
 QIcon tileIcon(const QString &iconName, const QString &label, qreal ratio)
 {
     const qreal dpr = qMax<qreal>(1.0, ratio);
-    const int width = 124, height = 66;
+    const int width = 128, height = 68;
     QPixmap pixmap(qRound(width * dpr), qRound(height * dpr));
     pixmap.setDevicePixelRatio(dpr);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
-    // 预览稿：tile 图标为主题 accent 色，文字为墨色。
-    const QIcon glyph = UIHelper::menuIcon(iconName,
-        QColor(dark ? "#3f8cf2" : "#2F80ED"), dpr);
-    glyph.paint(&painter, QRect(13, 9, 19, 19));
-    painter.setPen(QColor(dark ? "#e9edf3" : "#22364a"));
+
+    const QRectF well(11, 19, 30, 30);
+    QPainterPath wellPath;
+    wellPath.addRoundedRect(well, 9, 9);
+    QLinearGradient wellFill(well.topLeft(), well.bottomRight());
+    wellFill.setColorAt(0, dark ? QColor("#2c3c49") : QColor("#FFFFFF"));
+    wellFill.setColorAt(1, dark ? QColor("#263541") : QColor("#EEF5FA"));
+    painter.fillPath(wellPath, wellFill);
+    painter.setPen(QPen(dark ? QColor(146, 166, 181, 40) : QColor(110, 148, 173, 33), 1.0));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPath(wellPath);
+    UIHelper::menuIcon(iconName, QColor(dark ? "#6fa6cc" : "#4B7E9E"), dpr)
+        .paint(&painter, QRect(18, 26, 16, 16));
+
+    painter.setPen(QColor(dark ? "#dbe6ee" : "#3C5568"));
     QFont font(QStringLiteral("Microsoft YaHei"));
     font.setPixelSize(12);
+    font.setWeight(QFont::Medium);
     painter.setFont(font);
-    painter.drawText(QRect(13, 36, width - 22, 16), Qt::AlignLeft | Qt::AlignVCenter, label);
+    painter.drawText(QRect(50, 0, width - 58, height), Qt::AlignLeft | Qt::AlignVCenter, label);
     painter.end();
     return QIcon(pixmap);
+}
+
+// 柔和状态胶囊：浅色底 + 同色圆点，用于投屏卡与目标设备行。
+class StatusPill : public QLabel
+{
+public:
+    explicit StatusPill(QWidget *parent = nullptr) : QLabel(parent)
+    {
+        setAlignment(Qt::AlignCenter);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        setFixedHeight(19);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        QFont labelFont(QStringLiteral("Microsoft YaHei"));
+        labelFont.setPixelSize(10);
+        labelFont.setWeight(QFont::DemiBold);
+        setFont(labelFont);
+    }
+
+    QSize sizeHint() const override
+    {
+        return QSize(26 + fontMetrics().horizontalAdvance(text()), 19);
+    }
+
+    void setState(const QString &value)
+    {
+        setProperty("state", value);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        const bool dark = palette().color(QPalette::Window).lightness() < 128;
+        const QString state = property("state").toString();
+        QColor background;
+        QColor foreground;
+        QColor dot;
+        if (state == QStringLiteral("ok")) {
+            background = dark ? QColor(34, 163, 90, 36) : QColor("#EAF7F0");
+            foreground = dark ? QColor("#7ee2a8") : QColor("#127645");
+            dot = dark ? QColor("#42c983") : QColor("#1C9D5B");
+        } else if (state == QStringLiteral("loading") || state == QStringLiteral("warn")) {
+            background = dark ? QColor(226, 154, 45, 34) : QColor("#FBF3E3");
+            foreground = dark ? QColor("#f4c66a") : QColor("#8B5A0B");
+            dot = dark ? QColor("#e2a33e") : QColor("#D28B22");
+        } else {
+            background = dark ? QColor(154, 168, 181, 28) : QColor("#EDF2F6");
+            foreground = dark ? QColor("#93a7b6") : QColor("#6E8290");
+            dot = dark ? QColor("#8fa3b2") : QColor("#8A99A5");
+        }
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRectF pill = QRectF(rect());
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(background);
+        painter.drawRoundedRect(pill, pill.height() / 2.0, pill.height() / 2.0);
+        painter.setBrush(dot);
+        painter.drawEllipse(QPointF(10.5, pill.center().y()), 2.5, 2.5);
+        painter.setPen(foreground);
+        painter.setFont(font());
+        painter.drawText(QRectF(18, 0, pill.width() - 26, pill.height()),
+                         Qt::AlignLeft | Qt::AlignVCenter, text());
+    }
+};
+
+// 目标行尾部锁图标：投屏中替代 chevron，提示目标已被锁定。
+QPixmap lockPixmap(const QColor &color, qreal ratio)
+{
+    const qreal dpr = qMax<qreal>(1.0, ratio);
+    QPixmap pixmap(qRound(14 * dpr), qRound(14 * dpr));
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(color, 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    QPainterPath shackle;
+    shackle.moveTo(4.5, 6.2);
+    shackle.lineTo(4.5, 5.1);
+    shackle.cubicTo(4.5, 2.7, 9.5, 2.7, 9.5, 5.1);
+    shackle.lineTo(9.5, 6.2);
+    painter.drawPath(shackle);
+    painter.drawRoundedRect(QRectF(3.2, 6.1, 7.6, 5.4), 1.8, 1.8);
+    painter.end();
+    return pixmap;
+}
+
+QString castWellStyle(const QString &tone, bool dark)
+{
+    QColor top;
+    QColor bottom;
+    QColor border;
+    if (tone == QStringLiteral("pending")) {
+        top = dark ? QColor("#342f21") : QColor("#FFFFFF");
+        bottom = dark ? QColor("#2b3027") : QColor("#FDF6E9");
+        border = dark ? QColor(226, 154, 45, 48) : QColor(210, 139, 34, 46);
+    } else if (tone == QStringLiteral("live")) {
+        top = dark ? QColor("#24362e") : QColor("#FFFFFF");
+        bottom = dark ? QColor("#22332f") : QColor("#EDF9F3");
+        border = dark ? QColor(69, 181, 126, 48) : QColor(28, 157, 91, 36);
+    } else {
+        top = dark ? QColor("#2d3d4a") : QColor("#FFFFFF");
+        bottom = dark ? QColor("#27343f") : QColor("#EEF6FC");
+        border = dark ? QColor(146, 166, 181, 44) : QColor(108, 147, 173, 41);
+    }
+    return QStringLiteral(
+        "background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 %1, stop:1 %2);"
+        " border:1px solid %3; border-radius:9px;")
+        .arg(top.name(), bottom.name(),
+             QStringLiteral("rgba(%1,%2,%3,%4)").arg(border.red()).arg(border.green())
+                 .arg(border.blue()).arg(border.alpha()));
 }
 
 } // namespace
@@ -322,6 +489,8 @@ void MenuWidget::setupUI()
     });
     connect(screenCastController, &ScreenCastController::stateChanged,
             this, &MenuWidget::updateScreenCastButton);
+    connect(screenCastController, &ScreenCastController::stateChanged,
+            this, &MenuWidget::updateDeviceRow);
     // 导航条跟随投屏会话：按键请求转回控制器发送，会话窗口出现/结束驱动显隐。
     screenCastNavBar = new ScreenCastNavBar;
     connect(screenCastNavBar, &ScreenCastNavBar::keyRequested,
@@ -353,61 +522,57 @@ QWidget *MenuWidget::buildHomePage()
     auto *page = new QWidget;
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(16, 14, 16, 14);
-    layout->setSpacing(8);
+    layout->setSpacing(0);
 
     // 品牌行
     auto *brandRow = new QHBoxLayout;
+    brandRow->setContentsMargins(0, 0, 0, 0);
     brandRow->setSpacing(7);
     auto *brandIcon = new QLabel(page);
     brandIcon->setPixmap(UIHelper::menuIcon(QStringLiteral("command"),
-        QColor(dark ? "#3f8cf2" : "#2F80ED"), devicePixelRatioF()).pixmap(14, 14));
+        QColor(dark ? "#3f8cf2" : "#43779D"), devicePixelRatioF()).pixmap(14, 14));
     brandIcon->setFixedSize(14, 14);
     brandIcon->setScaledContents(true);
     auto *brandText = new QLabel(QStringLiteral("ORANGETOOLS"), page);
-    brandText->setStyleSheet(QString("font-size:11px; font-weight:600; letter-spacing:1px; color:%1;")
-                             .arg(dark ? "#93a7b6" : "#647585"));
-    brandRow->addSpacing(2);
+    brandText->setStyleSheet(QString("font-size:10px; font-weight:700; letter-spacing:1.65px; color:%1;")
+                             .arg(dark ? "#93a7b6" : "#617B8D"));
     brandRow->addWidget(brandIcon);
     brandRow->addWidget(brandText);
     brandRow->addStretch(1);
     layout->addLayout(brandRow);
-    layout->addSpacing(2);
+    layout->addSpacing(10);
 
-    // 投屏行：点击直接开始/停止投屏（buttons[ScreenCast]）。
-    // 按钮即卡片本体：悬停描边与按下淡底覆盖整个外层圆角矩形（预览稿 .cc-scr）。
+    // 投屏主卡：点击直接开始/停止投屏（buttons[ScreenCast]）。
+    // 卡片本体由 RowButton 绘制渐变与状态描边，图标 well 与文案分别排版。
     auto *castButton = new RowButton(page);
     castButton->setObjectName("screenCastButton");
     castButton->setAccessibleName(QStringLiteral("投屏"));
     castButton->setCursor(Qt::PointingHandCursor);
     castButton->setFixedHeight(58);
-    // 预览稿 --card：浅色 rgba(238,243,248,.72)，深色 rgba(38,52,66,.5)。
-    castButton->setProperty("cardBackground", dark ? QStringLiteral("38,52,66,128")
-                                                   : QStringLiteral("238,243,248,184"));
+    castButton->setProperty("castCard", true);
+    castButton->setProperty("castTone", "idle");
     auto *castGrid = new QGridLayout(castButton);
-    castGrid->setContentsMargins(12, 0, 12, 0);
+    castGrid->setContentsMargins(11, 0, 11, 0);
     castGrid->setSpacing(10);
     screenCastIconLabel = new QLabel(castButton);
-    screenCastIconLabel->setFixedSize(20, 20);
+    screenCastIconLabel->setObjectName("castWell");
+    screenCastIconLabel->setFixedSize(30, 30);
+    screenCastIconLabel->setAlignment(Qt::AlignCenter);
     screenCastIconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     auto *castTitle = new QLabel(QStringLiteral("手机投屏"), castButton);
     castTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
-    castTitle->setStyleSheet(QString("font-size:13px; font-weight:600; color:%1;")
+    castTitle->setStyleSheet(QString("font-size:12.5px; font-weight:600; color:%1;")
                              .arg(dark ? "#e9edf3" : "#22364a"));
     screenCastSubtitle = new ElidedLabel(castButton);
     screenCastSubtitle->setAttribute(Qt::WA_TransparentForMouseEvents);
-    screenCastSubtitle->setStyleSheet(QString("font-size:11px; color:%1;")
-                                      .arg(dark ? "#93a7b6" : "#647585"));
-    screenCastPill = new QLabel(castButton);
+    screenCastSubtitle->setStyleSheet(QString("font-size:10px; color:%1;")
+                                      .arg(dark ? "#93a7b6" : "#6F8494"));
+    screenCastPill = new StatusPill(castButton);
     screenCastPill->setObjectName("statusPill");
-    screenCastPill->setAttribute(Qt::WA_TransparentForMouseEvents);
     screenCastPill->setProperty("state", "off");
-    // 预览稿 pill：纯色底 + 白字（未连接 #9aa8b5 / 启动中 #f59e0b / 流式中 #22c55e）。
-    screenCastPill->setStyleSheet(
-        "QLabel#statusPill { border-radius:9px; padding:2px 9px; font-size:10.5px; color:#FFFFFF; }"
-        "QLabel#statusPill[state=\"off\"] { background:#9AA8B5; }"
-        "QLabel#statusPill[state=\"ok\"] { background:#22C55E; }"
-        "QLabel#statusPill[state=\"loading\"] { background:#F59E0B; }");
+    screenCastPill->setText(QStringLiteral("未投屏"));
     auto *castTexts = new QVBoxLayout;
+    castTexts->setContentsMargins(0, 0, 0, 0);
     castTexts->setSpacing(1);
     castTexts->addWidget(castTitle);
     castTexts->addWidget(screenCastSubtitle);
@@ -416,6 +581,7 @@ QWidget *MenuWidget::buildHomePage()
     castGrid->setColumnStretch(1, 1);
     castGrid->addWidget(screenCastPill, 0, 2, Qt::AlignVCenter | Qt::AlignRight);
     layout->addWidget(castButton);
+    layout->addSpacing(8);
     buttons.append(castButton);
     connect(castButton, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
 
@@ -429,19 +595,26 @@ QWidget *MenuWidget::buildHomePage()
     deviceRowButton->setCursor(Qt::PointingHandCursor);
     deviceRowButton->setToolTip(QStringLiteral("选择投屏与设备检测使用的设备"));
     deviceRowButton->setFixedHeight(48);
-    deviceRowButton->setStyleSheet(
-        "QPushButton { background:transparent; border:1px solid transparent; border-radius:12px; }"
-        "QPushButton:hover { background:rgba(146,166,181,60); }"
-        "QPushButton:pressed { background:rgba(146,166,181,90); }");
     auto *deviceRowLayout = new QHBoxLayout(deviceRowButton);
-    deviceRowLayout->setContentsMargins(10, 0, 10, 0);
-    deviceRowLayout->setSpacing(9);
-    auto *deviceIcon = new QLabel(deviceRowButton);
-    deviceIcon->setPixmap(UIHelper::menuIcon(QStringLiteral("smartphone"), inkDim,
-                                            devicePixelRatioF()).pixmap(16, 16));
-    deviceIcon->setFixedSize(16, 16);
-    deviceIcon->setScaledContents(true);
-    deviceIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
+    deviceRowLayout->setContentsMargins(9, 0, 9, 0);
+    deviceRowLayout->setSpacing(8);
+
+    // 设备头像：28px 渐变 well + 在线状态点。
+    deviceAvatar = new QLabel(deviceRowButton);
+    deviceAvatar->setFixedSize(28, 28);
+    deviceAvatar->setAlignment(Qt::AlignCenter);
+    deviceAvatar->setAttribute(Qt::WA_TransparentForMouseEvents);
+    deviceAvatar->setPixmap(UIHelper::menuIcon(QStringLiteral("smartphone"),
+                                              QColor(dark ? "#9db0be" : "#50738A"),
+                                              devicePixelRatioF()).pixmap(14, 14));
+    devicePresenceDot = new QLabel(deviceAvatar);
+    devicePresenceDot->setFixedSize(7, 7);
+    devicePresenceDot->move(20, 20);
+    devicePresenceDot->setAttribute(Qt::WA_TransparentForMouseEvents);
+    devicePresenceDot->setStyleSheet(QString(
+        "background:#1C9D5B; border:1px solid %1; border-radius:3px;")
+        .arg(dark ? "#1a2732" : "#FBFDFE"));
+    devicePresenceDot->hide();
 
     auto *deviceTexts = new QVBoxLayout;
     deviceTexts->setContentsMargins(0, 0, 0, 0);
@@ -451,17 +624,18 @@ QWidget *MenuWidget::buildHomePage()
     eyebrowRow->setSpacing(4);
     auto *eyebrow = new QLabel(QStringLiteral("目标设备"), deviceRowButton);
     eyebrow->setAttribute(Qt::WA_TransparentForMouseEvents);
-    eyebrow->setStyleSheet(QString("font-size:8.5px; font-weight:600; color:%1;")
-                           .arg(inkFaint.name()));
+    eyebrow->setStyleSheet(QString("font-size:8.5px; font-weight:600; letter-spacing:.8px; color:%1;")
+                           .arg(dark ? "#7f95a6" : "#93A2AE"));
     auto *eyebrowDot = new QLabel(QStringLiteral("·"), deviceRowButton);
     eyebrowDot->setAttribute(Qt::WA_TransparentForMouseEvents);
     eyebrowDot->setStyleSheet(QString("font-size:8.5px; color:%1;")
-                              .arg(dark ? "#5d7181" : "#c3ced6"));
+                              .arg(dark ? "#5d7181" : "#C1CCD4"));
     deviceSerialLabel = new ElidedLabel(deviceRowButton);
     deviceSerialLabel->setText(QStringLiteral("未连接"));
     deviceSerialLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     deviceSerialLabel->setStyleSheet(QString(
-        "font-family:'Consolas'; font-size:7.5px; color:%1;").arg(inkFaint.name()));
+        "font-family:'Consolas'; font-size:8px; letter-spacing:.4px; color:%1;")
+        .arg(dark ? "#7f95a6" : "#8B9BA8"));
     eyebrowRow->addWidget(eyebrow);
     eyebrowRow->addWidget(eyebrowDot);
     eyebrowRow->addWidget(deviceSerialLabel, 1);
@@ -473,34 +647,42 @@ QWidget *MenuWidget::buildHomePage()
     deviceTexts->addLayout(eyebrowRow);
     deviceTexts->addWidget(deviceNameLabel);
 
-    devicePill = new QLabel(deviceRowButton);
+    devicePill = new StatusPill(deviceRowButton);
     devicePill->setObjectName("statusPill");
-    devicePill->setAttribute(Qt::WA_TransparentForMouseEvents);
     devicePill->setProperty("state", "off");
-    devicePill->setStyleSheet(QString(
-        "QLabel#statusPill { border-radius:9px; padding:2px 8px; font-size:10px; font-weight:600; }"
-        "QLabel#statusPill[state=\"ok\"] { color:%1; background:%2; }"
-        "QLabel#statusPill[state=\"loading\"] { color:%3; background:%4; }"
-        "QLabel#statusPill[state=\"off\"] { color:%5; background:%6; }")
-        .arg(dark ? "#7ee2a8" : "#187a4d", dark ? "rgba(34,163,90,36)" : "#e9f7f0",
-             dark ? "#f4c66a" : "#9a6a0d", dark ? "rgba(226,154,45,34)" : "#fff4de",
-             dark ? "#93a7b6" : "#71818f", dark ? "rgba(154,168,181,28)" : "rgba(154,168,181,33)"));
-    deviceChevron = new QLabel(deviceRowButton);
-    deviceChevron->setAttribute(Qt::WA_TransparentForMouseEvents);
-    deviceChevron->setFixedSize(14, 14);
-    deviceChevron->setPixmap(rotatedChevron(inkFaint, devicePixelRatioF(), 90));
+    devicePill->setText(QStringLiteral("未连接"));
+    deviceEndmark = new QLabel(deviceRowButton);
+    deviceEndmark->setAttribute(Qt::WA_TransparentForMouseEvents);
+    deviceEndmark->setFixedSize(18, 18);
+    deviceEndmark->setAlignment(Qt::AlignCenter);
+    deviceEndmark->setPixmap(rotatedChevron(inkFaint, devicePixelRatioF(), 90));
 
-    deviceRowLayout->addWidget(deviceIcon, 0, Qt::AlignVCenter);
+    deviceRowLayout->addWidget(deviceAvatar, 0, Qt::AlignVCenter);
     deviceRowLayout->addLayout(deviceTexts, 1);
     deviceRowLayout->addWidget(devicePill, 0, Qt::AlignVCenter);
-    deviceRowLayout->addWidget(deviceChevron, 0, Qt::AlignVCenter);
+    deviceRowLayout->addWidget(deviceEndmark, 0, Qt::AlignVCenter);
     layout->addWidget(deviceRowButton);
+    layout->addSpacing(8);
     connect(deviceRowButton, &QPushButton::clicked, this, &MenuWidget::toggleDevicePicker);
+    refreshDeviceRowChrome();
 
-    // 功能 tile 2×3（buttons[RepairTools..ContactAuthor]）。
-    auto *tileGrid = new QGridLayout;
-    tileGrid->setHorizontalSpacing(8);
-    tileGrid->setVerticalSpacing(8);
+    // 功能组 2×3：六个入口共享一张圆角面板，单元格用 1px 分隔线切分。
+    auto *toolGroup = new QFrame(page);
+    toolGroup->setObjectName("toolGroup");
+    toolGroup->setFixedHeight(206);
+    toolGroup->setStyleSheet(dark
+        ? QStringLiteral("QFrame#toolGroup { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                         " stop:0 rgba(38,52,66,150), stop:1 rgba(34,47,60,140));"
+                         " border:1px solid rgba(146,166,181,48); border-radius:14px; }")
+        : QStringLiteral("QFrame#toolGroup { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                         " stop:0 rgba(254,255,255,184), stop:1 rgba(248,252,254,173));"
+                         " border:1px solid rgba(111,144,166,43); border-radius:14px; }"));
+    auto *tileGrid = new QGridLayout(toolGroup);
+    tileGrid->setContentsMargins(1, 1, 1, 1);
+    tileGrid->setHorizontalSpacing(0);
+    tileGrid->setVerticalSpacing(0);
+    tileGrid->setColumnStretch(0, 1);
+    tileGrid->setColumnStretch(1, 1);
     const QVector<QPair<int, QString>> tiles = {
         {RepairTools, QStringLiteral("秋白工作室")}, {Payload, QStringLiteral("PAYLOAD")},
         {ExtractImg, QStringLiteral("提取IMG")}, {DeviceCheck, QStringLiteral("设备检测")},
@@ -508,64 +690,85 @@ QWidget *MenuWidget::buildHomePage()
     const QStringList tileIcons = {QStringLiteral("wrench"), QStringLiteral("package-open"),
         QStringLiteral("file-down"), QStringLiteral("smartphone"), QStringLiteral("sliders-horizontal"),
         QStringLiteral("heart")};
-    // 预览稿 --card 底、无描边、圆角 14，悬停 accent 淡底。
-    const QString tileStyle = QStringLiteral(
-        "QPushButton { background:rgba(%1); border:none; border-radius:14px; }"
-        "QPushButton:hover { background:rgba(47,128,237,26); }"
-        "QPushButton:pressed { background:rgba(47,128,237,44); }")
-        .arg(dark ? "38,52,66,128" : "238,243,248,184");
+    const QString divider = dark ? QStringLiteral("rgba(146,166,181,36)")
+                                 : QStringLiteral("rgba(120,150,170,31)");
+    const QString hoverBg = dark ? QStringLiteral("rgba(63,140,242,26)")
+                                 : QStringLiteral("rgba(47,128,237,13)");
+    const QString pressedBg = dark ? QStringLiteral("rgba(63,140,242,40)")
+                                   : QStringLiteral("rgba(47,128,237,22)");
     for (int index = 0; index < tiles.size(); ++index) {
-        auto *tile = new QPushButton(page);
+        auto *tile = new QPushButton(toolGroup);
         tile->setObjectName(QString("menuAction%1").arg(tiles[index].first));
-        tile->setFixedHeight(66);
-        tile->setIconSize(QSize(124, 66));
+        tile->setFixedHeight(68);
+        tile->setIconSize(QSize(128, 68));
         tile->setIcon(tileIcon(tileIcons[index], tiles[index].second, devicePixelRatioF()));
         tile->setToolTip(tiles[index].second);
         tile->setAccessibleName(tiles[index].second);
         tile->setCursor(Qt::PointingHandCursor);
-        tile->setStyleSheet(tileStyle);
+        QString edges;
+        if (index % 2 == 0)
+            edges += QStringLiteral(" border-right:1px solid %1;").arg(divider);
+        if (index < 4)
+            edges += QStringLiteral(" border-bottom:1px solid %1;").arg(divider);
+        QString cornerRadius;
+        if (index == 0) cornerRadius = QStringLiteral("border-top-left-radius:13px;");
+        else if (index == 1) cornerRadius = QStringLiteral("border-top-right-radius:13px;");
+        else if (index == 4) cornerRadius = QStringLiteral("border-bottom-left-radius:13px;");
+        else if (index == 5) cornerRadius = QStringLiteral("border-bottom-right-radius:13px;");
+        tile->setStyleSheet(QStringLiteral(
+            "QPushButton { background:transparent; border:none; padding:0;%1 }"
+            "QPushButton:hover { background:%2; %3 }"
+            "QPushButton:pressed { background:%4; %3 }")
+            .arg(edges, hoverBg, cornerRadius, pressedBg));
         tile->setProperty("menuDirectAction", tiles[index].first == ExtractImg ||
                                               tiles[index].first == ContactAuthor);
         tileGrid->addWidget(tile, index / 2, index % 2);
         buttons.append(tile);
         connect(tile, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
     }
-    layout->addLayout(tileGrid);
+    layout->addWidget(toolGroup);
     layout->addStretch(1);
-
-    // footer 上方分隔线（与子页组间分隔线同色）。
-    auto *footerLine = new QWidget(page);
-    footerLine->setFixedHeight(1);
-    footerLine->setStyleSheet("background:rgba(146,166,181,42);");
-    layout->addWidget(footerLine);
     layout->addSpacing(8);
 
-    // 底部：收起（buttons[Minimize]）与退出（buttons[Exit]）。
-    // 预览稿 footer：透明底 + 1px 线框，图标与文字均为 ink-dim。
-    const QString footerStyle = QString(
-        "QPushButton { background:transparent; border:1px solid rgba(%1);"
-        " border-radius:10px; color:%2; font-size:12px; padding:8px; }"
-        "QPushButton:hover { background:rgba(47,128,237,20); border-color:rgba(47,128,237,120); }"
-        "QPushButton:pressed { background:rgba(47,128,237,36); }")
-        .arg(dark ? "146,166,181,56" : "146,166,181,97",
-             dark ? "#93a7b6" : "#647585");
-    auto *footerRow = new QHBoxLayout;
-    footerRow->setSpacing(8);
-    const struct { MenuAction action; const char *label; const char *icon; } footer[] = {
+    // 底部：收起（buttons[Minimize]）与退出（buttons[Exit]）共用一段式描边底栏。
+    auto *footer = new QFrame(page);
+    footer->setObjectName("panelFooter");
+    footer->setFixedHeight(36);
+    footer->setStyleSheet(dark
+        ? QStringLiteral("QFrame#panelFooter { background:rgba(255,255,255,12);"
+                         " border:1px solid rgba(146,166,181,56); border-radius:11px; }")
+        : QStringLiteral("QFrame#panelFooter { background:rgba(255,255,255,128);"
+                         " border:1px solid rgba(117,149,171,56); border-radius:11px; }"));
+    auto *footerRow = new QHBoxLayout(footer);
+    footerRow->setContentsMargins(1, 1, 1, 1);
+    footerRow->setSpacing(0);
+    const struct { MenuAction action; const char *label; const char *icon; } footerEntries[] = {
         {Minimize, "收起", "panel-right-close"}, {Exit, "退出", "power"}};
     QPushButton *footerButtons[2] = {nullptr, nullptr};
     for (int index = 0; index < 2; ++index) {
-        const auto &entry = footer[index];
-        auto *button = new QPushButton(QString::fromUtf8(entry.label), page);
+        const auto &entry = footerEntries[index];
+        auto *button = new QPushButton(QString::fromUtf8(entry.label), footer);
         button->setObjectName(QString("menuAction%1").arg(int(entry.action)));
-        button->setFixedHeight(36);
+        button->setFixedHeight(34);
         button->setIcon(UIHelper::menuIcon(QString::fromLatin1(entry.icon),
-                                           QColor(dark ? "#93a7b6" : "#647585"),
+                                           QColor(dark ? "#93a7b6" : "#607687"),
                                            devicePixelRatioF()));
-        button->setIconSize(QSize(15, 15));
+        button->setIconSize(QSize(14, 14));
         button->setCursor(Qt::PointingHandCursor);
         button->setAccessibleName(QString::fromUtf8(entry.label));
-        button->setStyleSheet(footerStyle);
+        const QString sideRadius = index == 0
+            ? QStringLiteral("border-top-left-radius:10px; border-bottom-left-radius:10px;")
+            : QStringLiteral("border-left:1px solid rgba(117,149,171,41);"
+                             " border-top-right-radius:10px; border-bottom-right-radius:10px;");
+        button->setStyleSheet(QStringLiteral(
+            "QPushButton { background:transparent; border:none; color:%1;"
+            " font-size:11.5px; padding:0 6px; %2 }"
+            "QPushButton:hover { background:%3; color:%4; }"
+            "QPushButton:pressed { background:%5; }")
+            .arg(dark ? "#93a7b6" : "#607687", sideRadius,
+                 dark ? "rgba(63,140,242,22)" : "rgba(47,128,237,15)",
+                 dark ? "#8fc0f5" : "#1F63C7",
+                 dark ? "rgba(63,140,242,38)" : "rgba(47,128,237,26)"));
         footerRow->addWidget(button);
         connect(button, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
         footerButtons[index] = button;
@@ -574,7 +777,7 @@ QWidget *MenuWidget::buildHomePage()
     // （Exit=7、Minimize=8），故按枚举顺序补入向量。
     buttons.append(footerButtons[1]);
     buttons.append(footerButtons[0]);
-    layout->addLayout(footerRow);
+    layout->addWidget(footer);
 
     // 目标设备浮层与切换提示：浮层不参与布局，覆盖在设备行下方。
     devicePicker = new DevicePicker(page);
@@ -602,10 +805,10 @@ QWidget *MenuWidget::buildHomePage()
     deviceToast->setObjectName("deviceTargetToast");
     deviceToast->setAlignment(Qt::AlignCenter);
     deviceToast->setFixedHeight(28);
+    deviceToast->setTextFormat(Qt::RichText);
     deviceToast->setStyleSheet(QString(
-        "QLabel#deviceTargetToast { background:%1; color:#FFFFFF; border-radius:10px;"
-        " padding:0 12px; font-size:10.5px; }")
-        .arg(dark ? "#0f1a24" : "#1f3447"));
+        "QLabel#deviceTargetToast { background:rgba(28,48,64,242); color:#FFFFFF;"
+        " border-radius:10px; padding:0 12px; font-size:10px; }"));
     deviceToast->hide();
     deviceToastTimer = new QTimer(this);
     deviceToastTimer->setSingleShot(true);
@@ -897,16 +1100,25 @@ void MenuWidget::updateScreenCastButton()
 {
     auto *button = buttons[ScreenCast];
     const auto state = screenCastController->state();
-    const bool loading = state == ScreenCastController::WaitingForDevice || state == ScreenCastController::Starting;
+    const bool loading = state == ScreenCastController::WaitingForDevice ||
+                         state == ScreenCastController::Starting ||
+                         state == ScreenCastController::Stopping;
+    const bool streaming = state == ScreenCastController::Streaming;
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    const QString tone = streaming ? QStringLiteral("live")
+                                   : loading ? QStringLiteral("pending")
+                                             : QStringLiteral("idle");
     button->setProperty("screenCastLoading", loading);
-    button->setProperty("menuSelected", loading || state == ScreenCastController::Streaming ||
-                        state == ScreenCastController::Stopping);
+    button->setProperty("castTone", tone);
+    button->setProperty("menuSelected", loading || streaming);
     button->setToolTip(screenCastController->statusText());
     // Remain clickable while a disconnected session is stopping so the user
     // can immediately cancel auto-reconnect as well.
     button->setEnabled(true);
     button->setAccessibleName(QStringLiteral("投屏"));
     button->setAccessibleDescription(screenCastController->statusText());
+    button->update();
+
     QString castSubtitle = screenCastController->statusText();
     if (state == ScreenCastController::Idle) {
         const QString target = targetDisplayName();
@@ -914,10 +1126,14 @@ void MenuWidget::updateScreenCastButton()
             castSubtitle = QStringLiteral("%1 · %2").arg(target, castSubtitle);
     }
     screenCastSubtitle->setText(castSubtitle);
-    const bool streaming = state == ScreenCastController::Streaming || state == ScreenCastController::Stopping;
-    screenCastPill->setText(loading ? QStringLiteral("启动中")
-                          : streaming ? QStringLiteral("流式中") : QStringLiteral("未连接"));
-    screenCastPill->setProperty("state", loading ? "loading" : streaming ? "ok" : "off");
+
+    auto *pill = static_cast<StatusPill *>(screenCastPill);
+    pill->setText(streaming ? QStringLiteral("投屏中")
+                            : loading ? QStringLiteral("连接中") : QStringLiteral("未投屏"));
+    pill->setState(streaming ? QStringLiteral("ok")
+                             : loading ? QStringLiteral("loading") : QStringLiteral("off"));
+
+    screenCastIconLabel->setStyleSheet(castWellStyle(tone, dark));
     if (ball) {
         ball->setCastState(loading ? FloatingBall::Loading
                          : streaming ? FloatingBall::Streaming : FloatingBall::Idle);
@@ -929,10 +1145,12 @@ void MenuWidget::updateScreenCastButton()
     } else {
         screenCastSpinnerTimer->stop();
         button->setText(QString());
-        const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+        const QColor iconColor = streaming
+            ? (dark ? QColor("#7ee2a8") : QColor("#127645"))
+            : (dark ? QColor("#63a7e6") : QColor("#2E74B7"));
         const QPixmap pixmap = UIHelper::menuIcon(QStringLiteral("monitor-smartphone"),
-                                                  QColor(dark ? "#3f8cf2" : "#2F80ED"),
-                                                  devicePixelRatioF()).pixmap(20, 20);
+                                                  iconColor,
+                                                  devicePixelRatioF()).pixmap(17, 17);
         button->setIcon(pixmap);
         screenCastIconLabel->setPixmap(pixmap);
     }
@@ -990,26 +1208,36 @@ void MenuWidget::updateDeviceRow()
     deviceNameLabel->setToolTip(target ? name : QString());
     deviceNameLabel->update();
 
+    auto *pill = static_cast<StatusPill *>(devicePill);
     if (operable > 1) {
-        devicePill->setText(QStringLiteral("%1 台在线").arg(operable));
-        devicePill->setProperty("state", "ok");
+        pill->setText(QStringLiteral("%1 台在线").arg(operable));
+        pill->setState(QStringLiteral("ok"));
     } else if (operable == 1) {
-        devicePill->setText(QStringLiteral("已连接"));
-        devicePill->setProperty("state", "ok");
+        pill->setText(QStringLiteral("已连接"));
+        pill->setState(QStringLiteral("ok"));
     } else if (!entries.isEmpty()) {
-        devicePill->setText(hasUnauthorized && !hasOtherUnavailable
-                                ? QStringLiteral("待授权") : QStringLiteral("不可用"));
-        devicePill->setProperty("state", "loading");
+        pill->setText(hasUnauthorized && !hasOtherUnavailable
+                          ? QStringLiteral("待授权") : QStringLiteral("不可用"));
+        pill->setState(QStringLiteral("loading"));
     } else {
-        devicePill->setText(QStringLiteral("未连接"));
-        devicePill->setProperty("state", "off");
+        pill->setText(QStringLiteral("未连接"));
+        pill->setState(QStringLiteral("off"));
     }
 
+    const bool locked = isTargetLocked();
+    if (locked && devicePicker && devicePicker->isVisible()) closeDevicePicker();
+    if (devicePresenceDot) devicePresenceDot->setVisible(target && target->isOperable());
+    const bool streaming = screenCastController &&
+                           screenCastController->state() == ScreenCastController::Streaming;
     deviceRowButton->setAccessibleDescription(
-        target ? QStringLiteral("目标设备 %1，序列号 %2").arg(name, target->serial)
+        target ? QStringLiteral("目标设备 %1，序列号 %2%3")
+                     .arg(name, target->serial,
+                          locked ? QStringLiteral("，投屏流程进行中已锁定") : QString())
                : QStringLiteral("未检测到可操作设备"));
     deviceRowButton->setToolTip(target
-        ? QStringLiteral("当前目标：%1\n点击选择其他设备").arg(name)
+        ? (locked ? (streaming ? QStringLiteral("投屏中，目标设备已锁定：%1").arg(name)
+                               : QStringLiteral("正在连接，目标设备已锁定：%1").arg(name))
+                  : QStringLiteral("当前目标：%1\n点击选择其他设备").arg(name))
         : QStringLiteral("选择投屏与设备检测使用的设备"));
 
     if (devicePicker) {
@@ -1018,6 +1246,7 @@ void MenuWidget::updateDeviceRow()
         devicePicker->setDevices(entries, serial, selectedDisplay);
         if (devicePicker->isVisible()) positionDevicePicker();
     }
+    refreshDeviceRowChrome();
     updateScreenCastButton();
 }
 
@@ -1026,6 +1255,12 @@ void MenuWidget::toggleDevicePicker()
     if (!devicePicker) return;
     if (devicePicker->isVisible()) {
         closeDevicePicker();
+        return;
+    }
+    if (isTargetLocked()) {
+        showDeviceToast(screenCastController->state() == ScreenCastController::Streaming
+                            ? QStringLiteral("投屏中，目标设备已锁定")
+                            : QStringLiteral("正在连接，目标设备已锁定"), true);
         return;
     }
     updateDeviceRow();
@@ -1056,38 +1291,118 @@ void MenuWidget::positionDevicePicker()
     devicePicker->move(x, y);
 }
 
-void MenuWidget::setDeviceRowOpen(bool open)
+bool MenuWidget::isTargetLocked() const
 {
-    if (!deviceRowButton) return;
-    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
-    const QColor faint(dark ? "#7f95a6" : "#95a5b2");
-    QString style = QStringLiteral(
-        "QPushButton { background:transparent; border:1px solid transparent; border-radius:12px; }"
-        "QPushButton:hover { background:rgba(146,166,181,60); }"
-        "QPushButton:pressed { background:rgba(146,166,181,90); }");
-    if (open) {
-        style += QStringLiteral(
-            "QPushButton { background:%1; border:1px solid %2; }"
-            "QPushButton:hover { background:%3; }")
-            .arg(dark ? QStringLiteral("rgba(63,140,242,26)") : QStringLiteral("rgba(47,128,237,14)"),
-                 dark ? QStringLiteral("rgba(63,140,242,90)") : QStringLiteral("rgba(47,128,237,66)"),
-                 dark ? QStringLiteral("rgba(63,140,242,38)") : QStringLiteral("rgba(47,128,237,24)"));
-    }
-    deviceRowButton->setStyleSheet(style);
-    if (deviceChevron)
-        deviceChevron->setPixmap(rotatedChevron(faint, devicePixelRatioF(), open ? 270 : 90));
+    if (!screenCastController) return false;
+    const auto state = screenCastController->state();
+    return state == ScreenCastController::WaitingForDevice ||
+           state == ScreenCastController::Starting ||
+           state == ScreenCastController::Streaming;
 }
 
-void MenuWidget::showDeviceToast(const QString &text)
+void MenuWidget::refreshDeviceRowChrome()
+{
+    if (!deviceRowButton || !deviceAvatar || !deviceEndmark) return;
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    const bool locked = isTargetLocked();
+    const bool open = deviceRowOpen && !locked;
+    const QColor accent = dark ? QColor("#63a7e6") : QColor("#1F63C7");
+
+    QString rowStyle;
+    if (open) {
+        rowStyle = dark
+            ? QStringLiteral("QPushButton#deviceRowButton { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(63,140,242,40), stop:1 rgba(63,140,242,22));"
+                             " border:1px solid rgba(63,140,242,90); border-radius:12px; }"
+                             "QPushButton#deviceRowButton:hover { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(63,140,242,54), stop:1 rgba(63,140,242,30)); }"
+                             "QPushButton#deviceRowButton:pressed { background:rgba(63,140,242,64); }")
+            : QStringLiteral("QPushButton#deviceRowButton { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(47,126,235,19), stop:1 rgba(47,126,235,9));"
+                             " border:1px solid rgba(47,126,235,61); border-radius:12px; }"
+                             "QPushButton#deviceRowButton:hover { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(47,126,235,23), stop:1 rgba(47,126,235,12)); }"
+                             "QPushButton#deviceRowButton:pressed { background:rgba(47,126,235,31); }");
+    } else if (locked) {
+        rowStyle = dark
+            ? QStringLiteral("QPushButton#deviceRowButton { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(255,255,255,8), stop:1 rgba(255,255,255,4));"
+                             " border:1px solid rgba(146,166,181,40); border-radius:12px; }"
+                             "QPushButton#deviceRowButton:hover, QPushButton#deviceRowButton:pressed {"
+                             " background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(255,255,255,8), stop:1 rgba(255,255,255,4)); }")
+            : QStringLiteral("QPushButton#deviceRowButton { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(255,255,255,87), stop:1 rgba(248,252,254,51));"
+                             " border:1px solid rgba(104,139,162,43); border-radius:12px; }"
+                             "QPushButton#deviceRowButton:hover, QPushButton#deviceRowButton:pressed {"
+                             " background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(255,255,255,87), stop:1 rgba(248,252,254,51)); }");
+    } else {
+        rowStyle = dark
+            ? QStringLiteral("QPushButton#deviceRowButton { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(255,255,255,10), stop:1 rgba(255,255,255,4));"
+                             " border:1px solid rgba(146,166,181,56); border-radius:12px; }"
+                             "QPushButton#deviceRowButton:hover { background:rgba(63,140,242,30);"
+                             " border-color:rgba(63,140,242,90); }"
+                             "QPushButton#deviceRowButton:pressed { background:rgba(63,140,242,44); }")
+            : QStringLiteral("QPushButton#deviceRowButton { background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                             " stop:0 rgba(255,255,255,87), stop:1 rgba(248,252,254,51));"
+                             " border:1px solid rgba(104,139,162,59); border-radius:12px; }"
+                             "QPushButton#deviceRowButton:hover { background:rgba(139,165,182,26);"
+                             " border-color:rgba(47,126,235,69); }"
+                             "QPushButton#deviceRowButton:pressed { background:rgba(139,165,182,41); }");
+    }
+    deviceRowButton->setStyleSheet(rowStyle);
+    deviceRowButton->setCursor(locked ? Qt::ArrowCursor : Qt::PointingHandCursor);
+
+    if (open) {
+        deviceAvatar->setStyleSheet(dark
+            ? QStringLiteral("background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #2b3a48, stop:1 #24384a);"
+                             " border:1px solid rgba(63,140,242,60); border-radius:9px;")
+            : QStringLiteral("background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #F8FBFF, stop:1 #E7F1FD);"
+                             " border:1px solid rgba(47,126,235,41); border-radius:9px;"));
+    } else {
+        deviceAvatar->setStyleSheet(dark
+            ? QStringLiteral("background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #2b3a46, stop:1 #26343f);"
+                             " border:1px solid rgba(146,166,181,40); border-radius:9px;")
+            : QStringLiteral("background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #F9FBFD, stop:1 #EAF2F8);"
+                             " border:1px solid rgba(107,144,168,41); border-radius:9px;"));
+    }
+    deviceAvatar->setPixmap(UIHelper::menuIcon(QStringLiteral("smartphone"),
+        open ? accent : (dark ? QColor("#9db0be") : QColor("#50738A")),
+        devicePixelRatioF()).pixmap(14, 14));
+
+    if (locked) {
+        deviceEndmark->setPixmap(lockPixmap(accent, devicePixelRatioF()));
+        deviceEndmark->setStyleSheet(dark
+            ? QStringLiteral("background:rgba(63,140,242,34); border:1px solid rgba(63,140,242,52); border-radius:6px;")
+            : QStringLiteral("background:rgba(47,126,235,26); border:1px solid rgba(47,126,235,31); border-radius:6px;"));
+    } else {
+        const QColor chevronColor = open ? (dark ? QColor("#63a7e6") : QColor("#2F7EEB"))
+                                         : (dark ? QColor("#7f95a6") : QColor("#95A6B2"));
+        deviceEndmark->setPixmap(rotatedChevron(chevronColor, devicePixelRatioF(), open ? 270 : 90));
+        deviceEndmark->setStyleSheet(QStringLiteral("background:transparent; border:none; border-radius:6px;"));
+    }
+}
+
+void MenuWidget::setDeviceRowOpen(bool open)
+{
+    deviceRowOpen = open;
+    refreshDeviceRowChrome();
+}
+
+void MenuWidget::showDeviceToast(const QString &text, bool warning)
 {
     if (!deviceToast || !homePage) return;
-    deviceToast->setText(text);
+    const QString dotColor = warning ? QStringLiteral("#F4BF57") : QStringLiteral("#7EE0A7");
+    deviceToast->setText(QStringLiteral("<span style=\"color:%1;\">●</span>&nbsp;&nbsp;%2")
+                             .arg(dotColor, text.toHtmlEscaped()));
     deviceToast->setToolTip(text);
+    deviceToast->setMaximumWidth(240);
     deviceToast->adjustSize();
-    const int width = qMin(deviceToast->width(), 240);
-    deviceToast->setFixedWidth(width);
+    const int width = deviceToast->width();
     deviceToast->move((homePage->width() - width) / 2,
-                      homePage->height() - 58 - deviceToast->height());
+                      homePage->height() - 56 - deviceToast->height());
     deviceToast->raise();
     deviceToast->show();
     if (deviceToastTimer) deviceToastTimer->start();
@@ -1098,16 +1413,16 @@ void MenuWidget::paintScreenCastSpinner()
     auto *button = buttons[ScreenCast];
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     const qreal ratio = button->devicePixelRatioF();
-    QPixmap pixmap(qRound(20 * ratio), qRound(20 * ratio));
+    QPixmap pixmap(qRound(17 * ratio), qRound(17 * ratio));
     pixmap.setDevicePixelRatio(ratio);
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
-    // 预览稿：启动中 spinner 为 accent 色。
-    painter.setPen(QPen(dark ? QColor(63, 140, 242, 60) : QColor(47, 128, 237, 60), 2.5));
-    painter.drawEllipse(QRectF(2, 2, 16, 16));
-    painter.setPen(QPen(dark ? QColor("#3f8cf2") : QColor("#2F80ED"), 2.5, Qt::SolidLine, Qt::RoundCap));
-    painter.drawArc(QRectF(2, 2, 16, 16), screenCastSpinnerAngle * 16, 260 * 16);
+    const QColor spinner = dark ? QColor("#F2C879") : QColor("#C58A2B");
+    painter.setPen(QPen(QColor(spinner.red(), spinner.green(), spinner.blue(), 56), 2.2));
+    painter.drawEllipse(QRectF(1.4, 1.4, 14.2, 14.2));
+    painter.setPen(QPen(spinner, 2.2, Qt::SolidLine, Qt::RoundCap));
+    painter.drawArc(QRectF(1.4, 1.4, 14.2, 14.2), screenCastSpinnerAngle * 16, 260 * 16);
     painter.end();
     button->setIcon(QIcon(pixmap));
     screenCastIconLabel->setPixmap(pixmap);

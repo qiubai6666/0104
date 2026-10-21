@@ -7,6 +7,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QScrollArea>
@@ -41,46 +42,39 @@ DevicePicker::DevicePicker(QWidget *parent)
     : QFrame(parent)
 {
     setObjectName("devicePicker");
-    setAttribute(Qt::WA_StyledBackground, true);
     setFocusPolicy(Qt::StrongFocus);
     setFixedWidth(UIHelper::ControlCenterWidth - 32);
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
     const bool dark = isDark();
-    const QString panel = dark ? QStringLiteral("#182430") : QStringLiteral("#FFFFFF");
-    const QString border = dark ? QStringLiteral("rgba(146,166,181,64)")
-                                : QStringLiteral("rgba(105,142,162,61)");
-    setStyleSheet(QStringLiteral(
-        "QFrame#devicePicker { background:%1; border:1px solid %2; border-radius:16px; }")
-        .arg(panel, border));
     auto *shadow = new QGraphicsDropShadowEffect(this);
-    shadow->setBlurRadius(32);
-    shadow->setOffset(0, 10);
-    shadow->setColor(QColor(31, 58, 84, dark ? 110 : 46));
+    shadow->setBlurRadius(34);
+    shadow->setOffset(0, 9);
+    shadow->setColor(QColor(31, 58, 84, dark ? 118 : 44));
     setGraphicsEffect(shadow);
 
     const QColor ink = dark ? QColor("#e9edf3") : QColor("#22364a");
-    const QColor dim = dark ? QColor("#93a7b6") : QColor("#647585");
     const QColor faint = dark ? QColor("#7f95a6") : QColor("#95a5b2");
     const QColor accent = dark ? kAccentDark : kAccentLight;
 
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(9, 9, 9, 6);
+    root->setContentsMargins(9, 12, 9, 8);
     root->setSpacing(0);
 
     auto *head = new QWidget(this);
     auto *headLayout = new QHBoxLayout(head);
-    headLayout->setContentsMargins(2, 2, 2, 6);
-    headLayout->setSpacing(6);
-    auto *title = new QLabel(QStringLiteral("选择设备"), head);
-    title->setStyleSheet(QStringLiteral("font-size:12.5px; font-weight:600; color:%1;")
+    headLayout->setContentsMargins(2, 1, 2, 5);
+    headLayout->setSpacing(5);
+    auto *title = new QLabel(QStringLiteral("切换目标设备"), head);
+    title->setStyleSheet(QStringLiteral("font-size:11.5px; font-weight:600; letter-spacing:.2px; color:%1;")
                          .arg(ink.name()));
     m_countLabel = new QLabel(QStringLiteral("0 台"), head);
     m_countLabel->setObjectName("devicePickerCount");
     m_countLabel->setStyleSheet(QStringLiteral(
-        "background:%1; color:%2; border-radius:7px; padding:2px 6px; font-size:9.5px;")
-        .arg(dark ? QStringLiteral("rgba(255,255,255,16)") : QStringLiteral("#EEF3F8"),
-             dim.name()));
+        "background:%1; color:%2; border-radius:7px; padding:2px 6px;"
+        " font-size:9px; font-weight:600;")
+        .arg(rgba(accent, dark ? 34 : 20),
+             dark ? QStringLiteral("#8fc0f5") : QStringLiteral("#1F63C7")));
     headLayout->addWidget(title);
     headLayout->addWidget(m_countLabel);
     headLayout->addStretch(1);
@@ -89,8 +83,8 @@ DevicePicker::DevicePicker(QWidget *parent)
         "QPushButton { background:transparent; border:none; border-radius:8px; }"
         "QPushButton:hover { background:%1; }"
         "QPushButton:pressed { background:%2; }")
-        .arg(rgba(accent, dark ? 40 : 24), rgba(accent, dark ? 64 : 44));
-    const QColor iconColor = dim;
+        .arg(rgba(accent, dark ? 40 : 22), rgba(accent, dark ? 64 : 42));
+    const QColor iconColor = dark ? QColor("#9db0be") : QColor("#6E8290");
     m_refreshButton = new QPushButton(head);
     m_refreshButton->setObjectName("devicePickerRefresh");
     m_refreshButton->setFixedSize(24, 24);
@@ -108,7 +102,12 @@ DevicePicker::DevicePicker(QWidget *parent)
     m_closeButton->setIcon(UIHelper::menuIcon(QStringLiteral("x"), iconColor, devicePixelRatioF()));
     m_closeButton->setToolTip(QStringLiteral("关闭"));
     m_closeButton->setAccessibleName(QStringLiteral("关闭设备选择"));
+    auto *headSep = new QFrame(head);
+    headSep->setFixedSize(1, 14);
+    headSep->setStyleSheet(QStringLiteral("background:%1;")
+        .arg(dark ? QStringLiteral("rgba(146,166,181,38)") : QStringLiteral("rgba(117,149,171,41)")));
     headLayout->addWidget(m_refreshButton);
+    headLayout->addWidget(headSep);
     headLayout->addWidget(m_closeButton);
     root->addWidget(head);
 
@@ -131,27 +130,27 @@ DevicePicker::DevicePicker(QWidget *parent)
     m_listContent->setAutoFillBackground(false);
     m_listLayout = new QVBoxLayout(m_listContent);
     m_listLayout->setContentsMargins(0, 0, 0, 0);
-    m_listLayout->setSpacing(3);
+    m_listLayout->setSpacing(2);
     m_scroll->setWidget(m_listContent);
     root->addWidget(m_scroll);
 
     auto *line = new QFrame(this);
     line->setFixedHeight(1);
     line->setStyleSheet(QStringLiteral("background:%1;")
-        .arg(dark ? QStringLiteral("rgba(146,166,181,38)") : QStringLiteral("#EEF3F7")));
-    root->addSpacing(5);
+        .arg(dark ? QStringLiteral("rgba(146,166,181,38)") : QStringLiteral("rgba(117,149,171,31)")));
+    root->addSpacing(6);
     root->addWidget(line);
 
     auto *footer = new QWidget(this);
     auto *footerLayout = new QHBoxLayout(footer);
-    footerLayout->setContentsMargins(2, 6, 2, 1);
+    footerLayout->setContentsMargins(2, 7, 2, 0);
     footerLayout->setSpacing(6);
     m_hintIcon = new QLabel(QStringLiteral("i"), footer);
     m_hintIcon->setObjectName("devicePickerHintIcon");
-    m_hintIcon->setFixedSize(12, 12);
+    m_hintIcon->setFixedSize(13, 13);
     m_hintIcon->setAlignment(Qt::AlignCenter);
     m_hintIcon->setStyleSheet(QStringLiteral(
-        "border:1px solid %1; border-radius:6px; font-size:8px; font-weight:600; color:%1;")
+        "border:1px solid %1; border-radius:6.5px; font-size:8px; font-weight:600; color:%1;")
         .arg(faint.name()));
     m_hintLabel = new QLabel(footer);
     m_hintLabel->setObjectName("devicePickerHint");
@@ -175,6 +174,37 @@ DevicePicker::DevicePicker(QWidget *parent)
     updateRefreshIcon();
     m_scroll->setFixedHeight(52);
     rebuildList();
+}
+
+void DevicePicker::paintEvent(QPaintEvent *)
+{
+    const bool dark = isDark();
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    // 圆角面板与顶部指针一次成形，阴影会沿实际轮廓绘制。
+    const QRectF body = QRectF(rect()).adjusted(0.5, 6.5, -0.5, -0.5);
+    QPainterPath surface;
+    surface.addRoundedRect(body, 14, 14);
+    QPainterPath pointer;
+    pointer.moveTo(20.5, 7.6);
+    pointer.lineTo(28.5, 1.0);
+    pointer.lineTo(36.5, 7.6);
+    pointer.closeSubpath();
+    const QPainterPath outline = surface.united(pointer);
+
+    painter.setPen(QPen(dark ? QColor(146, 166, 181, 76) : QColor(103, 141, 164, 64), 1.0));
+    painter.setBrush(dark ? QColor(24, 36, 48, 252) : QColor(255, 255, 255, 252));
+    painter.drawPath(outline);
+
+    painter.save();
+    painter.setClipPath(outline);
+    painter.setPen(QPen(QColor(255, 255, 255, dark ? 22 : 190), 1.0));
+    painter.drawLine(QPointF(body.left() + 12, body.top() + 1.1),
+                     QPointF(18, body.top() + 1.1));
+    painter.drawLine(QPointF(39, body.top() + 1.1),
+                     QPointF(body.right() - 12, body.top() + 1.1));
+    painter.restore();
 }
 
 bool DevicePicker::isDark() const
@@ -227,12 +257,18 @@ void DevicePicker::rebuildList()
     const QColor accent = dark ? kAccentDark : kAccentLight;
     const QString hoverBg = dark ? QStringLiteral("rgba(255,255,255,12)")
                                  : QStringLiteral("#F5F9FC");
-    const QString selectedBg = dark ? QStringLiteral("rgba(63,140,242,30)")
-                                     : QStringLiteral("rgba(47,128,237,15)");
-    const QString selectedHover = dark ? QStringLiteral("rgba(63,140,242,44)")
-                                        : QStringLiteral("rgba(47,128,237,22)");
+    const QString selectedBg = dark
+        ? QStringLiteral("qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                         " stop:0 rgba(63,140,242,40), stop:1 rgba(63,140,242,24))")
+        : QStringLiteral("qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                         " stop:0 rgba(47,126,235,22), stop:1 rgba(47,126,235,12))");
+    const QString selectedHover = dark
+        ? QStringLiteral("qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                         " stop:0 rgba(63,140,242,54), stop:1 rgba(63,140,242,32))")
+        : QStringLiteral("qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                         " stop:0 rgba(47,126,235,30), stop:1 rgba(47,126,235,17))");
     const QString selectedBorder = dark ? QStringLiteral("rgba(63,140,242,110)")
-                                         : QStringLiteral("rgba(47,128,237,77)");
+                                         : QStringLiteral("rgba(47,126,235,72)");
 
     if (m_devices.isEmpty()) {
         auto *empty = new QLabel(QStringLiteral("未检测到设备\n连接手机并开启 USB 调试后自动刷新"),
@@ -278,9 +314,28 @@ void DevicePicker::rebuildList()
                  rgba(accent, dark ? 120 : 96)));
 
         auto *row = new QHBoxLayout(button);
-        row->setContentsMargins(9, 8, 9, 8);
-        row->setSpacing(9);
+        row->setContentsMargins(8, 7, 8, 7);
+        row->setSpacing(8);
 
+        QString avatarBg;
+        QString avatarBorder;
+        if (selected) {
+            avatarBg = dark
+                ? QStringLiteral("qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #274057, stop:1 #223a4d)")
+                : QStringLiteral("qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #F3F9FF, stop:1 #E2EFFD)");
+            avatarBorder = rgba(accent, dark ? 74 : 54);
+        } else if (unauthorized) {
+            avatarBg = dark
+                ? QStringLiteral("qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #353225, stop:1 #2e2f28)")
+                : QStringLiteral("qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #FDF8EF, stop:1 #FAF1E1)");
+            avatarBorder = rgba(kWarn, dark ? 58 : 46);
+        } else {
+            avatarBg = dark
+                ? QStringLiteral("qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #263541, stop:1 #222f3a)")
+                : QStringLiteral("qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #F9FBFC, stop:1 #EDF3F8)");
+            avatarBorder = dark ? QStringLiteral("rgba(146,166,181,36)")
+                                : QStringLiteral("rgba(107,144,168,32)");
+        }
         auto *avatar = new QLabel(button);
         avatar->setFixedSize(34, 34);
         avatar->setAlignment(Qt::AlignCenter);
@@ -288,11 +343,17 @@ void DevicePicker::rebuildList()
         const QColor avatarInk = selected ? accent : unauthorized ? kWarn : dim;
         avatar->setPixmap(UIHelper::menuIcon(QStringLiteral("smartphone"), avatarInk,
                                              devicePixelRatioF()).pixmap(16, 16));
-        avatar->setStyleSheet(QStringLiteral("background:%1; border-radius:10px;")
-            .arg(selected ? rgba(accent, dark ? 42 : 31)
-                          : unauthorized ? rgba(kWarn, 26)
-                          : dark ? QStringLiteral("rgba(255,255,255,14)")
-                                 : QStringLiteral("#EEF3F8")));
+        avatar->setStyleSheet(QStringLiteral(
+            "background:%1; border:1px solid %2; border-radius:10px;")
+            .arg(avatarBg, avatarBorder));
+        const QColor stateColor = operable ? kOk : unauthorized ? kWarn : kOff;
+        auto *presence = new QLabel(avatar);
+        presence->setFixedSize(7, 7);
+        presence->move(24, 24);
+        presence->setAttribute(Qt::WA_TransparentForMouseEvents);
+        presence->setStyleSheet(QStringLiteral(
+            "background:%1; border:1px solid %2; border-radius:3.5px;")
+            .arg(stateColor.name(), dark ? QStringLiteral("#182430") : QStringLiteral("#FFFFFF")));
         row->addWidget(avatar, 0, Qt::AlignVCenter);
 
         auto *copy = new QVBoxLayout;
@@ -305,20 +366,22 @@ void DevicePicker::rebuildList()
         auto *metaRow = new QHBoxLayout;
         metaRow->setSpacing(4);
         auto *dot = new QLabel(button);
-        dot->setFixedSize(5, 5);
+        dot->setFixedSize(6, 6);
         dot->setAttribute(Qt::WA_TransparentForMouseEvents);
-        const QColor stateColor = operable ? kOk : unauthorized ? kWarn : kOff;
-        dot->setStyleSheet(QStringLiteral("background:%1; border-radius:2.5px;")
+        dot->setStyleSheet(QStringLiteral("background:%1; border-radius:3px;")
                            .arg(stateColor.name()));
         auto *serialLabel = new ElidedLabel(button);
-        serialLabel->setText(QStringLiteral("%1 · %2").arg(
-            entry.serial, entry.state == QStringLiteral("fastboot")
-                              ? QStringLiteral("Fastboot") : QStringLiteral("USB")));
+        QStringList meta;
+        if (!entry.model.isEmpty() && entry.model != name) meta.append(entry.model);
+        meta.append(entry.serial);
+        meta.append(entry.state == QStringLiteral("fastboot")
+                        ? QStringLiteral("Fastboot") : QStringLiteral("USB"));
+        serialLabel->setText(meta.join(QStringLiteral(" · ")));
         serialLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
         QFont mono(QStringLiteral("Consolas"));
         mono.setPixelSize(9);
         serialLabel->setFont(mono);
-        serialLabel->setStyleSheet(QStringLiteral("color:%1;").arg(faint.name()));
+        serialLabel->setStyleSheet(QStringLiteral("font-size:8.5px; color:%1;").arg(faint.name()));
         metaRow->addWidget(dot, 0, Qt::AlignVCenter);
         metaRow->addWidget(serialLabel, 1);
         copy->addWidget(nameLabel);
@@ -381,7 +444,7 @@ void DevicePicker::rebuildList()
     }
 
     const int rows = qMin(int(m_devices.size()), 3);
-    m_scroll->setFixedHeight(rows * 52 + (rows - 1) * 3);
+    m_scroll->setFixedHeight(rows * 52 + (rows - 1) * 2);
 }
 
 void DevicePicker::setScanning(bool scanning)

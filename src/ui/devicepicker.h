@@ -7,6 +7,7 @@
 #include <QVector>
 
 class QLabel;
+class QPaintEvent;
 class QPushButton;
 class QScrollArea;
 class QTimer;
@@ -33,6 +34,9 @@ signals:
     void deviceSelected(const QString &serial);
     void refreshRequested();
     void closeRequested();
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
 
 private:
     void rebuildList();
