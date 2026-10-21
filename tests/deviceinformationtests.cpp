@@ -211,6 +211,46 @@ private slots:
         manager->checkDeviceStatus(); QTRY_VERIFY(!manager->m_isChecking);
         QCOMPARE(manager->currentMode(), DeviceManager::None); QVERIFY(manager->getDeviceInfo().isEmpty());
     }
+    void adbLongListingParsesModelsAndKeepsExplicitSelection() {
+        manager->m_adbOnly = true;
+        setting("adb.devices",
+                "List of devices attached\n"
+                "serial-a\tdevice product:alpha model:Phone_A device:alpha transport_id:1\n"
+                "serial-b\tdevice product:beta model:Phone_B device:beta transport_id:2\n");
+        manager->checkDeviceStatus();
+        QTRY_VERIFY(!manager->m_isChecking);
+        QCOMPARE(manager->deviceSerial(), QString("serial-a"));
+        QCOMPARE(manager->deviceDisplayName(), QString("Phone A"));
+        const auto entries = manager->deviceEntries();
+        QCOMPARE(entries.size(), 2);
+        QCOMPARE(entries.at(0).serial, QString("serial-a"));
+        QCOMPARE(entries.at(1).model, QString("Phone B"));
+        QVERIFY(entries.at(1).isOperable());
+
+        QVERIFY(manager->selectDevice("serial-b"));
+        QCOMPARE(manager->deviceSerial(), QString("serial-b"));
+        QCOMPARE(manager->deviceDisplayName(), QString("Phone B"));
+        QCOMPARE(manager->operableDeviceSerial(), QString("serial-b"));
+        QSignalSpy selectionSpy(manager, &DeviceManager::deviceSelectionChanged);
+        manager->checkDeviceStatus();
+        QTRY_VERIFY(!manager->m_isChecking);
+        QCOMPARE(manager->deviceSerial(), QString("serial-b"));
+        QCOMPARE(selectionSpy.size(), 0);
+
+        // 目标消失后回退到其余在线设备；离线设备只展示、不可选择。
+        setting("adb.devices",
+                "List of devices attached\n"
+                "serial-a\tdevice product:alpha model:Phone_A device:alpha transport_id:1\n"
+                "serial-b\toffline\n");
+        manager->checkDeviceStatus();
+        QTRY_VERIFY(!manager->m_isChecking);
+        QCOMPARE(manager->deviceSerial(), QString("serial-a"));
+        QCOMPARE(selectionSpy.size(), 1);
+        QString error;
+        QVERIFY(!manager->selectDevice("serial-b", &error));
+        QVERIFY(!error.isEmpty());
+        QCOMPARE(manager->deviceSerial(), QString("serial-a"));
+    }
     void timeoutAndFailedStartPublishUnknownThenRecover() {
         setting("ro.boot.slot_suffix.delay", 5000); manager->m_infoTimer->setInterval(300);
         select(); QTRY_COMPARE(manager->getDeviceInfo(), snapshot("alpha", QStringLiteral("未知")));

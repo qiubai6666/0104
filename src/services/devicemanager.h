@@ -7,6 +7,7 @@
 #include <QElapsedTimer>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <functional>
 
 // 共享设备监控：轮询 ADB/Fastboot，缓存信息，并以信号通知窗口。
@@ -26,6 +27,21 @@ public:
         Fastboot
     };
 
+    // 选择器展示项：在线设备可操作，未授权/离线设备仅展示并给出提示。
+    struct DeviceEntry {
+        QString serial;
+        QString model;
+        QString state;
+        bool isOperable() const
+        {
+            return state == QStringLiteral("device") || state == QStringLiteral("fastboot");
+        }
+        bool operator==(const DeviceEntry &other) const
+        {
+            return serial == other.serial && model == other.model && state == other.state;
+        }
+    };
+
     // 获取当前设备模式
     DeviceMode currentMode() const { return m_currentMode; }
 
@@ -36,8 +52,17 @@ public:
     QString getExtendedDeviceDetails() const { return m_extendedDeviceDetails; }
     QString deviceSerial() const { return m_deviceSerial; }
     QStringList deviceSerials() const { return m_deviceSerials; }
+    QVector<DeviceEntry> deviceEntries() const { return m_deviceEntries; }
+    // 目标设备的用户可见名称；优先取扩展信息，其次取 ADB 列表型号。
+    QString deviceDisplayName() const { return m_deviceDisplayName; }
     QString uniqueDeviceSerial(QString *error = nullptr) const;
     bool hasUniqueOperableDevice() const { return !uniqueDeviceSerial().isEmpty(); }
+    // 多设备场景下选择目标；仅接受当前列表中可操作的序列号。
+    bool selectDevice(const QString &serial, QString *error = nullptr);
+    // 返回当前选中的可操作设备，不要求全机唯一。
+    QString operableDeviceSerial(QString *error = nullptr) const;
+    // 立即重新枚举设备列表；暂停或未监控时为空操作。
+    void refreshDevices();
     // Monitoring is paused while a lease is held. Re-enumerate before each command.
     void verifyOperationTarget(DeviceMode mode, const QString &serial, QObject *context,
                                std::function<void(const QString &)> completed);
@@ -72,6 +97,9 @@ signals:
     void deviceInfoUpdated(const QString &info);
     void deviceDetailsUpdated(const QString &details);
     void extendedDeviceDetailsUpdated(const QString &details);
+    // 设备列表（含未授权/离线项）或当前目标发生变化，供选择器刷新。
+    void deviceListChanged();
+    void deviceSelectionChanged(const QString &serial);
 
 private slots:
     void checkDeviceStatus();
@@ -90,9 +118,11 @@ private:
     // 统一的探测启动入口：断开旧连接、重连信号、启动看门狗并执行 `xx devices`。
     void startProbe(QProcess *process, const QString &tool,
                     void (DeviceManager::*onFinished)(int, QProcess::ExitStatus),
-                    void (DeviceManager::*onError)(QProcess::ProcessError));
+                    void (DeviceManager::*onError)(QProcess::ProcessError),
+                    bool longListing = false);
     void setDetectedDevice(DeviceMode mode, const QString &serial);
     void setDetectedDevices(DeviceMode mode, const QStringList &serials);
+    void setDetectedEntries(DeviceMode mode, const QVector<DeviceEntry> &entries);
     void cancelInfoQuery();
     void updatePolledDeviceInfo();
     void startInfoStep(int step);
@@ -123,7 +153,11 @@ private:
     QString m_deviceDetails;
     QString m_extendedDeviceDetails;
     QString m_deviceSerial;
+    QString m_deviceDisplayName;
     QStringList m_deviceSerials;
+    QVector<DeviceEntry> m_deviceEntries;
+    // ADB 目标暂时缺席时先查 Fastboot，再决定回退到其余 ADB 设备。
+    QVector<DeviceEntry> m_pendingAdbEntries;
     QTimer *m_infoTimer;
     QElapsedTimer m_infoRefreshTimer;
     quint64 m_infoGeneration = 0;

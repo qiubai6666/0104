@@ -11,6 +11,7 @@ SOURCES += $$PWD/screencasttests.cpp \
     $$PWD/../src/services/devicemanager.cpp \
     $$PWD/../src/ui/devicecheckwindow.cpp \
     $$PWD/../src/ui/menuwidget.cpp \
+    $$PWD/../src/ui/devicepicker.cpp \
     $$PWD/../src/ui/screencastnavbar.cpp \
     $$PWD/../src/ui/repairwindow.cpp \
     $$PWD/../src/services/screencastcontroller.cpp \
@@ -22,6 +23,7 @@ HEADERS += $$PWD/../src/services/devicemanager.h \
     $$PWD/../src/services/shellcommand.h \
     $$PWD/../src/ui/devicecheckwindow.h \
     $$PWD/../src/ui/menuwidget.h \
+    $$PWD/../src/ui/devicepicker.h \
     $$PWD/../src/ui/screencastnavbar.h \
     $$PWD/../src/ui/repairwindow.h \
     $$PWD/../src/services/screencastcontroller.h \

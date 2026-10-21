@@ -92,8 +92,8 @@ public:
 private slots:
     void uniqueTargetReboot_data();
     void uniqueTargetReboot();
-    void multipleDevicesRejectOperations_data();
-    void multipleDevicesRejectOperations();
+    void multipleDevicesUseSelectedTarget_data();
+    void multipleDevicesUseSelectedTarget();
     void physicalTargetChangeStopsOperation_data();
     void physicalTargetChangeStopsOperation();
     void physicalDisconnectStopsFileBatch();
@@ -183,34 +183,70 @@ void DeviceOperationTests::uniqueTargetReboot()
     QVERIFY(!DeviceOperationLease::owner());
 }
 
-void DeviceOperationTests::multipleDevicesRejectOperations_data()
+void DeviceOperationTests::multipleDevicesUseSelectedTarget_data()
 {
     uniqueTargetReboot_data();
 }
 
-void DeviceOperationTests::multipleDevicesRejectOperations()
+void DeviceOperationTests::multipleDevicesUseSelectedTarget()
 {
     QFETCH(bool, adb);
     QVERIFY(putFile(fixturePath + "/mode.txt", adb ? "adb" : "fastboot"));
     QVERIFY(putFile(fixturePath + "/multiple.txt", "yes"));
+    QVERIFY(putFile(fixturePath + "/behavior.txt", "success"));
     DeviceCheckWindow window;
     QTRY_COMPARE(DeviceManager::instance()->deviceSerials().size(), 2);
+    QCOMPARE(DeviceManager::instance()->deviceSerial(), QString("mock-serial"));
     QVERIFY(!DeviceManager::instance()->hasUniqueOperableDevice());
+
     window.onRebootButtonClicked();
-    QVERIFY(!window.isOperationInProgress());
-    QVERIFY(lastMessage.contains("断开其他设备"));
-    window.flashPartition("boot");
-    QVERIFY(!window.isOperationInProgress());
-    QVERIFY(!window.transferFiles({fixturePath + "/dummy.txt"}));
+    QTRY_VERIFY(!window.isOperationInProgress());
+    const QByteArray reboot = QJsonDocument(QJsonArray{
+        adb ? "adb" : "fastboot", "-s", "mock-serial", "reboot"}).toJson(QJsonDocument::Compact);
+    QTRY_VERIFY(audit().contains(QString::fromUtf8(reboot)));
+    QVERIFY(!audit().contains("other-device"));
+    QVERIFY(!DeviceOperationLease::owner());
+
+    // ADB 目标刷写需要先重启到 bootloader；另一台手机仍在线时也必须等待
+    // 原目标进入 Fastboot，而不是把目标切换或放弃操作。
+    QTRY_COMPARE_WITH_TIMEOUT(DeviceManager::instance()->currentMode(),
+                              DeviceManager::ADB, 5000);
+    if (adb) {
+        QVERIFY(window.beginOperation());
+        window.pendingFlashPartition = "boot";
+        window.pendingFlashImage = "boot.img";
+        QProcess *process = window.createOperationProcess();
+        QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                         &window, [&window, process](int code, QProcess::ExitStatus status) {
+            window.releaseOperationProcess(process);
+            if (code == 0 && status == QProcess::NormalExit) window.waitForFastbootMode();
+            else window.finishOperation();
+        });
+        window.startDeviceCommand(process, DeviceManager::ADB, {"reboot", "bootloader"});
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isOperationInProgress(), 8000);
+        QTRY_VERIFY(audit().contains(
+            "[\"fastboot\",\"-s\",\"mock-serial\",\"flash\",\"boot\",\"boot.img\"]"));
+        QVERIFY(audit().contains("[\"fastboot\",\"-s\",\"mock-serial\",\"reboot\"]"));
+        QVERIFY(!audit().contains("other-device"));
+        QVERIFY(!DeviceOperationLease::owner());
+        QTRY_COMPARE(DeviceManager::instance()->currentMode(), DeviceManager::ADB);
+    }
+
+    QVERIFY(putFile(fixturePath + "/push-behavior.txt", "success"));
+    const QString path = fixturePath + "/multi-target.txt";
+    QVERIFY(putFile(path, "contents"));
+    QVERIFY(window.transferFiles({path}));
+    QTRY_VERIFY_WITH_TIMEOUT(!window.isOperationInProgress(), 5000);
+    QVERIFY(pushes().contains(QJsonArray{"adb", "-s", "mock-serial", "push", path,
+                                       "/sdcard/multi-target.txt"}));
+    QVERIFY(!DeviceOperationLease::owner());
+
+    // 维修工具仍要求唯一设备，避免其自身命令落到非预期手机。
     if (adb) {
         RepairWindow repair;
         QVERIFY(!repair.beginAdbOperation());
         QVERIFY(repair.operationSerial.isEmpty());
     }
-    QVERIFY(!DeviceOperationLease::owner());
-    QVERIFY(!audit().contains("\"reboot\""));
-    QVERIFY(!audit().contains("\"flash\""));
-    QVERIFY(!audit().contains("\"push\""));
 }
 
 void DeviceOperationTests::physicalTargetChangeStopsOperation_data()
@@ -227,6 +263,7 @@ void DeviceOperationTests::physicalTargetChangeStopsOperation()
 {
     QFETCH(bool, adb);
     QFETCH(QString, change);
+    const bool extraDevice = change == "multiple";
     DeviceCheckWindow window;
     if (adb) awaitAdb(window); else awaitFastboot(window);
     DeviceManager::instance()->pauseMonitoring();
@@ -237,6 +274,15 @@ void DeviceOperationTests::physicalTargetChangeStopsOperation()
     QCOMPARE(DeviceManager::instance()->uniqueDeviceSerial(), QString("mock-serial"));
     window.onRebootButtonClicked();
     QTRY_VERIFY(!window.isOperationInProgress());
+    const QByteArray reboot = QJsonDocument(QJsonArray{
+        adb ? "adb" : "fastboot", "-s", "mock-serial", "reboot"}).toJson(QJsonDocument::Compact);
+    if (extraDevice) {
+        // 新插入另一台设备不等于目标改变：复用原序列号继续本次操作。
+        QVERIFY(audit().contains(QString::fromUtf8(reboot)));
+        QVERIFY(!audit().contains("other-device"));
+        QVERIFY(!DeviceOperationLease::owner());
+        return;
+    }
     QVERIFY(!audit().contains("\"reboot\""));
     QVERIFY(!DeviceOperationLease::owner());
     QVERIFY(!lastMessage.isEmpty());

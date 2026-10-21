@@ -1,13 +1,22 @@
 # Read-only inspection and explicit finalization of task-owned Release artifacts.
 . (Join-Path $PSScriptRoot 'SingleExe.Common.ps1')
 
+function Get-ReleaseRelativePath([string]$Root, [string]$Path) {
+    # Windows PowerShell 5.1 (.NET Framework) has no Path.GetRelativePath.
+    $root = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        return $full.Substring($root.Length + 1)
+    }
+    return $full
+}
 function Get-ReleaseLeaks([string]$Root, [string[]]$Files) {
     Assert-NoLinks $Root
     if (-not $PSBoundParameters.ContainsKey('Files')) {
         $Files = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force | ForEach-Object FullName)
     }
     foreach ($file in $Files) {
-        $relative = [IO.Path]::GetRelativePath($Root, $file)
+        $relative = Get-ReleaseRelativePath $Root $file
         if ($relative.StartsWith('..') -or [IO.Path]::IsPathRooted($relative)) { throw "Audit member outside root: $file" }
         $extension = [IO.Path]::GetExtension($file).ToLowerInvariant()
         $name = [IO.Path]::GetFileName($file)

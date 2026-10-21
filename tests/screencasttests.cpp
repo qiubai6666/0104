@@ -25,6 +25,8 @@
 #include <QProxyStyle>
 #include <QStyleFactory>
 #include "devicecheckwindow.h"
+#include "devicepicker.h"
+#include "elidedlabel.h"
 #include "screencastcontroller.h"
 #include "screencastnavbar.h"
 #include "devicemanager.h"
@@ -184,6 +186,93 @@ private slots:
         qInfo() << "Idle panel update requests in 300 ms:" << counter.updates;
         QVERIFY2(counter.updates <= 2, "Idle panel continuously requests repaints");
         QVERIFY(!menu.screenCastSpinnerTimer->isActive());
+    }
+    void deviceTargetPickerSelectsAndCloses() {
+        QVERIFY(writeFile(fixturePath + "/download_config.txt", ""));
+        MenuWidget menu;
+        freeze(menu);
+        menu.setAttribute(Qt::WA_DontShowOnScreen);
+        menu.show();
+        menu.layout()->activate();
+        auto *manager = DeviceManager::instance();
+        manager->setDetectedEntries(DeviceManager::ADB, {
+            {QStringLiteral("serial-a"), QStringLiteral("Phone A"), QStringLiteral("device")},
+            {QStringLiteral("serial-b"), QStringLiteral("Phone B"), QStringLiteral("device")}});
+        QCOMPARE(manager->deviceSerial(), QStringLiteral("serial-a"));
+        QCOMPARE(menu.deviceSerialLabel->text(), QStringLiteral("serial-a"));
+        QCOMPARE(menu.deviceNameLabel->text(), QStringLiteral("Phone A"));
+        QCOMPARE(menu.devicePill->text(), QStringLiteral("2 台在线"));
+        QVERIFY(menu.devicePicker);
+        QCOMPARE(menu.devicePicker->onlineCount(), 2);
+        QCOMPARE(menu.deviceRowButton->height(), 48);
+        QVERIFY(menu.rect().contains(menu.deviceRowButton->geometry()));
+        QVERIFY(!menu.devicePicker->isVisible());
+
+        menu.deviceRowButton->click();
+        QVERIFY(menu.devicePicker->isVisible());
+        QCOMPARE(menu.devicePicker->x(), menu.deviceRowButton->x());
+        QVERIFY(menu.devicePicker->y() >= menu.deviceRowButton->geometry().bottom());
+        QVERIFY(menu.devicePicker->geometry().right() < menu.width());
+        QVERIFY(menu.devicePicker->geometry().bottom() < menu.height());
+
+        auto item = [&menu](const QString &serial) -> QPushButton * {
+            for (auto *button : menu.devicePicker->findChildren<QPushButton *>(
+                     QStringLiteral("devicePickerItem")))
+                if (button->property("deviceSerial").toString() == serial) return button;
+            return nullptr;
+        };
+        auto *second = item(QStringLiteral("serial-b"));
+        QVERIFY(second);
+        QCOMPARE(second->accessibleDescription(), QStringLiteral("serial-b，在线"));
+        QTest::mouseClick(second, Qt::LeftButton);
+        QTRY_COMPARE(manager->deviceSerial(), QStringLiteral("serial-b"));
+        QVERIFY(!menu.devicePicker->isVisible());
+        QCOMPARE(menu.deviceSerialLabel->text(), QStringLiteral("serial-b"));
+        QCOMPARE(menu.deviceNameLabel->text(), QStringLiteral("Phone B"));
+        QVERIFY(menu.screenCastSubtitle->text().contains(QStringLiteral("Phone B")));
+        QVERIFY(menu.deviceToast->isVisible());
+        QVERIFY(menu.deviceToast->text().contains(QStringLiteral("Phone B")));
+
+        // 操作通道被占用时只提示，不改变目标，也不关闭浮层。
+        manager->stopMonitoring();
+        QTRY_VERIFY(!ProcessManager::hasActiveDeviceProcesses());
+        QObject owner;
+        QString leaseError;
+        QVERIFY2(DeviceOperationLease::acquire(&owner, &leaseError), qPrintable(leaseError));
+        menu.deviceRowButton->click();
+        QVERIFY(menu.devicePicker->isVisible());
+        auto *first = item(QStringLiteral("serial-a"));
+        QVERIFY(first);
+        QTest::mouseClick(first, Qt::LeftButton);
+        QCOMPARE(manager->deviceSerial(), QStringLiteral("serial-b"));
+        QVERIFY(menu.devicePicker->isVisible());
+        auto *hint = menu.devicePicker->findChild<QLabel *>(QStringLiteral("devicePickerHint"));
+        QVERIFY(hint);
+        QVERIFY(hint->text().contains(QStringLiteral("操作进行中")));
+        DeviceOperationLease::release(&owner);
+        QTest::keyClick(&menu, Qt::Key_Escape);
+        QVERIFY(!menu.devicePicker->isVisible());
+        QVERIFY(menu.isVisible());
+    }
+    void castTargetsSelectedDeviceAmongMany() {
+        QVERIFY(writeFile(fixturePath + "/devices.txt",
+                          "PHONE_A\tdevice\nPHONE_B\tdevice\n"));
+        MenuWidget menu;
+        auto *manager = DeviceManager::instance();
+        QTRY_COMPARE(manager->deviceSerials().size(), 2);
+        QVERIFY(manager->selectDevice(QStringLiteral("PHONE_B")));
+        QCOMPARE(menu.deviceSerialLabel->text(), QStringLiteral("PHONE_B"));
+
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Streaming);
+        QTRY_COMPARE(scrcpyCommands().size(), 1);
+        QCOMPARE(scrcpyCommands().first(), QJsonArray({"scrcpy", "--max-size", "1024",
+            "--video-bit-rate", "4M", "--serial", "PHONE_B"}));
+
+        menu.buttons[MenuWidget::ScreenCast]->click();
+        QTRY_COMPARE(menu.screenCastController->state(), ScreenCastController::Idle);
+        QTest::qWait(250);
+        QCOMPARE(scrcpyCommands().size(), 1);
     }
     void compactMenuAndUniformDrawers() {
         // A local empty config prevents the constructor from downloading anything.

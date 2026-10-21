@@ -23,6 +23,7 @@ SOURCES += \
     src/app/main.cpp \
     src/ui/passworddialog.cpp \
     src/ui/menuwidget.cpp \
+    src/ui/devicepicker.cpp \
     src/services/screencastcontroller.cpp \
     src/ui/screencastnavbar.cpp \
     src/ui/repairwindow.cpp \
@@ -37,6 +38,8 @@ SOURCES += \
 
 HEADERS += \
     src/ui/menuwidget.h \
+    src/ui/devicepicker.h \
+    src/ui/elidedlabel.h \
     src/services/screencastcontroller.h \
     src/ui/screencastnavbar.h \
     src/ui/passworddialog.h \

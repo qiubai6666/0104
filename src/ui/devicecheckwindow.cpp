@@ -208,7 +208,7 @@ bool DeviceCheckWindow::beginOperation()
         return false;
     }
     QString error;
-    const QString serial = DeviceManager::instance()->uniqueDeviceSerial(&error);
+    const QString serial = DeviceManager::instance()->operableDeviceSerial(&error);
     if (serial.isEmpty()) {
         UIHelper::showCenteredMessageBox(QMessageBox::Warning, "无法操作设备", error, this);
         return false;
@@ -249,7 +249,7 @@ void DeviceCheckWindow::finishOperation()
 bool DeviceCheckWindow::validateOperation(DeviceManager::DeviceMode expectedMode, QString *error) const
 {
     const auto *manager = DeviceManager::instance();
-    const QString serial = manager->uniqueDeviceSerial(error);
+    const QString serial = manager->operableDeviceSerial(error);
     if (serial.isEmpty() || manager->currentMode() != expectedMode || serial != operationSerial) {
         if (error && error->isEmpty()) {
             *error = QStringLiteral("设备已断开、切换模式或目标序列号发生变化。");
@@ -328,8 +328,8 @@ bool DeviceCheckWindow::canAcceptFileTransfer() const
 {
     const auto *manager = DeviceManager::instance();
     const QObject *owner = DeviceOperationLease::owner();
-    return manager->currentMode() == DeviceManager::ADB && manager->deviceSerials().size() == 1
-           && !manager->deviceSerial().isEmpty()
+    return manager->currentMode() == DeviceManager::ADB
+           && !manager->operableDeviceSerial().isEmpty()
            && !operationInProgress && (!owner || owner == this);
 }
 
@@ -393,7 +393,7 @@ void DeviceCheckWindow::transferNextFile()
     }
     const auto *manager = DeviceManager::instance();
     if (manager->currentMode() != DeviceManager::ADB
-        || manager->deviceSerials().size() != 1
+        || !manager->deviceSerials().contains(fileTransfer.serial)
         || manager->deviceSerial() != fileTransfer.serial
         || operationSerial != fileTransfer.serial) {
         finishFileTransfer(QStringLiteral("原设备已断开或改变，未继续传输剩余文件。"));
@@ -816,8 +816,8 @@ void DeviceCheckWindow::onOpenCmdClicked()
 {
     if (operationInProgress) return;
     // 设备列表还没加载出来时也允许打开 CMD，供用户手动执行 adb devices；
-    // 只有唯一设备才注入 ANDROID_SERIAL，多设备/无设备交给命令自行指定。
-    const QString serial = DeviceManager::instance()->uniqueDeviceSerial();
+    // 有目标设备就注入 ANDROID_SERIAL，确保命令与面板所选设备一致。
+    const QString serial = DeviceManager::instance()->operableDeviceSerial();
     QString qiubaiPath = ResourceExtractor::getResourcePath();
     QString cmdBatPath = qiubaiPath + "/CMD.bat";
     
@@ -919,7 +919,7 @@ void DeviceCheckWindow::waitForFastbootMode()
     connect(waitTimer, &QTimer::timeout, this, [this]() {
         ++waitCounter;
         if (DeviceManager::instance()->currentMode() == DeviceManager::Fastboot
-            && DeviceManager::instance()->deviceSerials().size() == 1
+            && DeviceManager::instance()->deviceSerials().contains(operationSerial)
             && DeviceManager::instance()->deviceSerial() == operationSerial) {
             DeviceManager::instance()->pauseMonitoring();
             waitTimer->stop();
@@ -931,12 +931,6 @@ void DeviceCheckWindow::waitForFastbootMode()
             QTimer::singleShot(2000, this, [this, partition, image]() {
                 if (operationInProgress) performFlash(partition, image);
             });
-        } else if (DeviceManager::instance()->currentMode() != DeviceManager::None
-                   && (DeviceManager::instance()->deviceSerials().size() != 1
-                       || DeviceManager::instance()->deviceSerial() != operationSerial)) {
-            finishOperation();
-            UIHelper::showCenteredMessageBox(QMessageBox::Warning, "设备已变化",
-                "检测到其他设备或多台设备，已取消刷写，请断开其他设备后重试。", this);
         } else if (waitCounter >= 40) {
             finishOperation();
             UIHelper::showCenteredMessageBox(QMessageBox::Warning, "超时",

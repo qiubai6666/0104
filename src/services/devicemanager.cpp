@@ -22,6 +22,52 @@ const QRegularExpression &fieldSplitter()
     static const QRegularExpression re(QStringLiteral("\\s+"));
     return re;
 }
+const QStringList &adbStates()
+{
+    static const QStringList states = {
+        QStringLiteral("device"), QStringLiteral("unauthorized"), QStringLiteral("offline"),
+        QStringLiteral("authorizing"), QStringLiteral("connecting"), QStringLiteral("recovery"),
+        QStringLiteral("sideload"), QStringLiteral("bootloader"), QStringLiteral("rescue")};
+    return states;
+}
+QVector<DeviceManager::DeviceEntry> parseAdbEntries(const QString &output)
+{
+    QVector<DeviceManager::DeviceEntry> entries;
+    for (const QString &rawLine : output.split(lineSplitter(), Qt::SkipEmptyParts)) {
+        const QStringList fields = rawLine.trimmed().split(fieldSplitter(), Qt::SkipEmptyParts);
+        if (fields.size() < 2 || !adbStates().contains(fields.at(1))) continue;
+        DeviceManager::DeviceEntry entry;
+        entry.serial = fields.constFirst();
+        entry.state = fields.at(1);
+        for (int index = 2; index < fields.size(); ++index) {
+            if (!fields.at(index).startsWith(QStringLiteral("model:"))) continue;
+            entry.model = fields.at(index).mid(6);
+            entry.model.replace('_', ' ');
+            break;
+        }
+        if (!entry.serial.isEmpty() && entries.size() < 32) entries.append(entry);
+    }
+    return entries;
+}
+QVector<DeviceManager::DeviceEntry> parseFastbootEntries(const QString &output)
+{
+    QVector<DeviceManager::DeviceEntry> entries;
+    for (const QString &rawLine : output.split(lineSplitter(), Qt::SkipEmptyParts)) {
+        const QStringList fields = rawLine.trimmed().split(fieldSplitter(), Qt::SkipEmptyParts);
+        if (fields.size() >= 2 && fields.at(1) == QStringLiteral("fastboot")
+            && !fields.constFirst().isEmpty() && entries.size() < 32) {
+            entries.append({fields.constFirst(), QString(), QStringLiteral("fastboot")});
+        }
+    }
+    return entries;
+}
+QStringList operableSerials(const QVector<DeviceManager::DeviceEntry> &entries)
+{
+    QStringList serials;
+    for (const auto &entry : entries)
+        if (entry.isOperable() && !serials.contains(entry.serial)) serials.append(entry.serial);
+    return serials;
+}
 } // namespace
 
 DeviceManager* DeviceManager::instance()
@@ -152,6 +198,7 @@ void DeviceManager::stopMonitoring()
     m_checkTimer->stop();
     m_infoRefreshTimer.invalidate();
     cancelInfoQuery();
+    m_pendingAdbEntries.clear();
     m_probeWatchdog->stop();
     // 只断开并终止进程，不阻塞等待：kill 后的退出是毫秒级异步操作，
     // 阻塞等待会让 GUI 线程在停止监控时冻结最长 1 秒。
@@ -170,6 +217,7 @@ void DeviceManager::pauseMonitoring()
     m_isPaused = true;
     m_infoRefreshTimer.invalidate();
     cancelInfoQuery();
+    m_pendingAdbEntries.clear();
     m_probeWatchdog->stop();
     for (QProcess *process : {m_adbCheckProcess, m_fastbootCheckProcess}) {
         disconnect(process, nullptr, this, nullptr);
@@ -218,12 +266,13 @@ void DeviceManager::checkDeviceStatus()
 
     m_isChecking = true;
     startProbe(m_adbCheckProcess, ResourceExtractor::getAdbPath(),
-               &DeviceManager::onAdbCheckFinished, &DeviceManager::onAdbCheckError);
+               &DeviceManager::onAdbCheckFinished, &DeviceManager::onAdbCheckError, true);
 }
 
 void DeviceManager::startProbe(QProcess *process, const QString &tool,
                                void (DeviceManager::*onFinished)(int, QProcess::ExitStatus),
-                               void (DeviceManager::*onError)(QProcess::ProcessError))
+                               void (DeviceManager::*onError)(QProcess::ProcessError),
+                               bool longListing)
 {
     disconnect(process, nullptr, this, nullptr);
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -231,7 +280,10 @@ void DeviceManager::startProbe(QProcess *process, const QString &tool,
     connect(process, &QProcess::errorOccurred, this, onError);
     process->setWorkingDirectory(ResourceExtractor::getResourcePath());
     m_probeWatchdog->start(kProbeTimeoutMs);
-    process->start(tool, QStringList() << QStringLiteral("devices"));
+    QStringList arguments{QStringLiteral("devices")};
+    // -l 额外给出 model，用于多设备选择器；Fastboot 保持原有 devices 输出。
+    if (longListing) arguments << QStringLiteral("-l");
+    process->start(tool, arguments);
 }
 
 void DeviceManager::onProbeWatchdog()
@@ -247,6 +299,7 @@ void DeviceManager::onProbeWatchdog()
     // 无条件复位 m_isChecking：探测进程可能已自然退出但 finished 信号被
     // startProbe 断开（例如对收尾中的旧进程静默 start 失败），此时没有
     // 进程可 kill，若不复位，监控将从此永久停摆。
+    m_pendingAdbEntries.clear();
     m_isChecking = false;
     if (killed) {
         qWarning() << "DeviceManager 设备检测进程超时，已强制结束并恢复监控";
@@ -261,34 +314,32 @@ void DeviceManager::onAdbCheckFinished(int exitCode, QProcess::ExitStatus exitSt
         return;
     }
 
-    QStringList adbSerials;
-
+    QVector<DeviceEntry> adbEntries;
     if (exitStatus == QProcess::NormalExit && exitCode == 0) {
         const QString adbOutput = QString::fromLocal8Bit(m_adbCheckProcess->readAllStandardOutput());
-        const QStringList lines = adbOutput.split(lineSplitter(), Qt::SkipEmptyParts);
-        for (const QString &rawLine : lines) {
-            const QStringList fields = rawLine.trimmed().split(fieldSplitter(), Qt::SkipEmptyParts);
-            // ADB 输出的第二列必须是精确的 device，避免把序列号或其他文本中的
-            // "device" 当成在线设备。
-            if (fields.size() >= 2 && fields.at(1) == "device") {
-                adbSerials.append(fields.at(0));
-            }
-        }
+        adbEntries = parseAdbEntries(adbOutput);
     }
-
+    const QStringList adbSerials = operableSerials(adbEntries);
     const bool adbConnected = !adbSerials.isEmpty();
+    // 目标设备可能在重启期间短暂离开 ADB，而其他手机仍在线。此时额外查一次
+    // Fastboot，避免目标已进入 bootloader 却被“另一台 ADB 设备”挡住。
+    const bool targetMissing = adbConnected && !m_deviceSerial.isEmpty()
+        && !adbSerials.contains(m_deviceSerial);
+    const bool probeFastboot = !m_adbOnly && (!adbConnected || targetMissing);
 
-    // 如果没有 ADB 连接，且当前不是 ADB-only 模式，才检查 Fastboot
-    if (!adbConnected && !m_adbOnly) {
+    if (probeFastboot) {
+        m_pendingAdbEntries = adbEntries;
         startProbe(m_fastbootCheckProcess, ResourceExtractor::getFastbootPath(),
                    &DeviceManager::onFastbootCheckFinished, &DeviceManager::onFastbootCheckError);
-    } else {
-        // 有 ADB 连接或处于 ADB-only 模式：本轮探测结束，停掉看门狗。
-        m_probeWatchdog->stop();
-        setDetectedDevices(adbConnected ? ADB : None, adbSerials);
-        if (m_currentMode == ADB) updatePolledDeviceInfo();
-        m_isChecking = false;
+        return;
     }
+
+    // 有目标 ADB 连接或处于 ADB-only 模式：本轮探测结束，停掉看门狗。
+    m_probeWatchdog->stop();
+    m_pendingAdbEntries.clear();
+    setDetectedEntries(adbConnected ? ADB : None, adbEntries);
+    if (m_currentMode == ADB) updatePolledDeviceInfo();
+    m_isChecking = false;
 }
 
 void DeviceManager::onAdbCheckError(QProcess::ProcessError error)
@@ -304,13 +355,15 @@ void DeviceManager::onAdbCheckError(QProcess::ProcessError error)
 
     // ADB 启动失败时不能依赖 finished 信号恢复状态；全模式仍继续探测 Fastboot。
     if (!m_adbOnly) {
+        m_pendingAdbEntries.clear();
         startProbe(m_fastbootCheckProcess, ResourceExtractor::getFastbootPath(),
                    &DeviceManager::onFastbootCheckFinished, &DeviceManager::onFastbootCheckError);
         return;
     }
 
     m_probeWatchdog->stop();
-    setDetectedDevice(None, QString());
+    m_pendingAdbEntries.clear();
+    setDetectedEntries(None, {});
     m_isChecking = false;
 }
 void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus exitStatus)
@@ -321,23 +374,29 @@ void DeviceManager::onFastbootCheckFinished(int exitCode, QProcess::ExitStatus e
         return;
     }
 
-    QStringList fastbootSerials;
-
+    QVector<DeviceEntry> fastbootEntries;
     if (exitStatus == QProcess::NormalExit && exitCode == 0) {
         const QString fastbootOutput = QString::fromLocal8Bit(m_fastbootCheckProcess->readAllStandardOutput());
-        const QStringList lines = fastbootOutput.split(lineSplitter(), Qt::SkipEmptyParts);
-        for (const QString &rawLine : lines) {
-            const QStringList fields = rawLine.trimmed().split(fieldSplitter(), Qt::SkipEmptyParts);
-            // fastboot devices 的第二列必须精确为 fastboot。
-            if (fields.size() >= 2 && fields.at(1) == "fastboot") {
-                fastbootSerials.append(fields.at(0));
-            }
-        }
+        fastbootEntries = parseFastbootEntries(fastbootOutput);
     }
+    const QStringList fastbootSerials = operableSerials(fastbootEntries);
+    const bool targetInFastboot = !m_deviceSerial.isEmpty()
+        && fastbootSerials.contains(m_deviceSerial);
+    const QVector<DeviceEntry> pendingAdb = m_pendingAdbEntries;
+    const QStringList pendingSerials = operableSerials(pendingAdb);
+    m_pendingAdbEntries.clear();
 
     // fastboot 探测是本轮检测的最后一步，结束后停掉看门狗。
     m_probeWatchdog->stop();
-    setDetectedDevices(fastbootSerials.isEmpty() ? None : Fastboot, fastbootSerials);
+    if (targetInFastboot || (!fastbootSerials.isEmpty() && pendingSerials.isEmpty())) {
+        setDetectedEntries(Fastboot, fastbootEntries);
+    } else if (!pendingAdb.isEmpty()) {
+        // 目标已离开 ADB 但尚未出现在 Fastboot：保留其余 ADB 设备等待下一轮，
+        // 绝不把刷新结果当作可刷写的目标。
+        setDetectedEntries(pendingSerials.isEmpty() ? None : ADB, pendingAdb);
+    } else {
+        setDetectedEntries(None, {});
+    }
     if (m_currentMode != None) updatePolledDeviceInfo();
 
     m_isChecking = false;
@@ -355,9 +414,14 @@ void DeviceManager::onFastbootCheckError(QProcess::ProcessError error)
     }
 
     m_probeWatchdog->stop();
-    setDetectedDevice(None, QString());
+    const QVector<DeviceEntry> pendingAdb = m_pendingAdbEntries;
+    m_pendingAdbEntries.clear();
+    const QStringList pendingSerials = operableSerials(pendingAdb);
+    setDetectedEntries(pendingAdb.isEmpty() ? None : (pendingSerials.isEmpty() ? None : ADB),
+                       pendingAdb);
     m_isChecking = false;
 }
+
 void DeviceManager::setDetectedDevice(DeviceMode mode, const QString &serial)
 {
     setDetectedDevices(mode, serial.isEmpty() ? QStringList() : QStringList{serial});
@@ -365,31 +429,74 @@ void DeviceManager::setDetectedDevice(DeviceMode mode, const QString &serial)
 
 void DeviceManager::setDetectedDevices(DeviceMode mode, const QStringList &serials)
 {
-    QStringList normalized;
+    QVector<DeviceEntry> entries;
+    const QString state = mode == DeviceManager::Fastboot ? QStringLiteral("fastboot")
+                                                          : QStringLiteral("device");
     for (const QString &serial : serials) {
         const QString trimmed = serial.trimmed();
-        if (!trimmed.isEmpty() && !normalized.contains(trimmed)) {
-            normalized.append(trimmed);
+        bool duplicate = false;
+        for (const auto &entry : entries) duplicate |= entry.serial == trimmed;
+        if (!trimmed.isEmpty() && !duplicate)
+            entries.append({trimmed, QString(), state});
+    }
+    if (mode == None) entries.clear();
+    setDetectedEntries(mode, entries);
+}
+
+void DeviceManager::setDetectedEntries(DeviceMode mode, const QVector<DeviceEntry> &entries)
+{
+    QVector<DeviceEntry> normalized;
+    for (const DeviceEntry &raw : entries) {
+        const QString serial = raw.serial.trimmed();
+        if (serial.isEmpty()) continue;
+        bool duplicate = false;
+        for (const auto &entry : normalized) duplicate |= entry.serial == serial;
+        if (duplicate) continue;
+        DeviceEntry entry = raw;
+        entry.serial = serial;
+        normalized.append(entry);
+    }
+    const QStringList serials = operableSerials(normalized);
+    // 设备操作期间目标可能在重启中短暂消失；保持该序列号，避免把界面临时
+    // 切到另一台手机，也避免后续命令落到非用户选择的设备上。
+    const bool holdSelection = DeviceOperationLease::owner() != nullptr && !m_deviceSerial.isEmpty();
+    const QString preferredSerial = serials.contains(m_deviceSerial) || holdSelection
+        ? m_deviceSerial : serials.value(0);
+    const bool modeChanged = mode != m_currentMode;
+    const bool targetChanged = preferredSerial != m_deviceSerial;
+    const bool listChanged = normalized != m_deviceEntries;
+    if (!modeChanged && !targetChanged && !listChanged) return;
+
+    const bool dataChanged = modeChanged || targetChanged;
+    m_currentMode = mode;
+    m_deviceSerials = serials;
+    m_deviceSerial = preferredSerial;
+    m_deviceEntries = normalized;
+    if (preferredSerial.isEmpty()) {
+        m_deviceDisplayName.clear();
+    } else if (targetChanged) {
+        m_deviceDisplayName.clear();
+        for (const DeviceEntry &entry : normalized) {
+            if (entry.serial == preferredSerial && !entry.model.isEmpty()) {
+                m_deviceDisplayName = entry.model;
+                break;
+            }
         }
     }
-    if (mode == None) normalized.clear();
-    const QString preferredSerial = normalized.contains(m_deviceSerial)
-        ? m_deviceSerial : normalized.value(0);
-    if (mode == m_currentMode && preferredSerial == m_deviceSerial && normalized == m_deviceSerials) return;
-    m_infoRefreshTimer.invalidate();
-    cancelInfoQuery();
-    const bool modeChanged = mode != m_currentMode;
-    m_currentMode = mode;
-    m_deviceSerials = normalized;
-    m_deviceSerial = preferredSerial;
-    m_deviceInfo.clear();
-    m_deviceDetails.clear();
-    m_extendedDeviceDetails.clear();
-    // Invalidate cached UI data even when one ADB device replaces another.
-    emit deviceInfoUpdated(QString());
-    emit deviceDetailsUpdated(QString());
-    emit extendedDeviceDetailsUpdated(QString());
+    if (dataChanged) {
+        m_infoRefreshTimer.invalidate();
+        cancelInfoQuery();
+        m_deviceInfo.clear();
+        m_deviceDetails.clear();
+        m_extendedDeviceDetails.clear();
+        // Invalidate cached UI data even when one device replaces another.
+        emit deviceInfoUpdated(QString());
+        emit deviceDetailsUpdated(QString());
+        emit extendedDeviceDetailsUpdated(QString());
+    }
+    if (listChanged) emit deviceListChanged();
     if (modeChanged) emit deviceModeChanged(mode);
+    if (targetChanged) emit deviceSelectionChanged(preferredSerial);
 }
 
 QString DeviceManager::uniqueDeviceSerial(QString *error) const
@@ -407,6 +514,73 @@ QString DeviceManager::uniqueDeviceSerial(QString *error) const
         return QString();
     }
     return m_deviceSerials.constFirst();
+}
+
+QString DeviceManager::operableDeviceSerial(QString *error) const
+{
+    if (error) error->clear();
+    if (m_currentMode == None || m_deviceSerial.isEmpty()) {
+        if (m_deviceEntries.isEmpty()) {
+            if (error) *error = QStringLiteral("未检测到可操作设备，请检查设备连接与授权。");
+        } else if (error) {
+            *error = QStringLiteral("设备尚未授权或不在线，请在手机上允许 USB 调试后重试。");
+        }
+        return QString();
+    }
+    if (!m_deviceSerials.contains(m_deviceSerial)) {
+        if (error) *error = QStringLiteral("目标设备已断开，请刷新设备列表后重试。");
+        return QString();
+    }
+    return m_deviceSerial;
+}
+
+bool DeviceManager::selectDevice(const QString &serial, QString *error)
+{
+    if (error) error->clear();
+    const QString target = serial.trimmed();
+    const DeviceEntry *selected = nullptr;
+    for (const auto &entry : m_deviceEntries)
+        if (entry.serial == target) selected = &entry;
+    if (!selected) {
+        if (error) *error = QStringLiteral("该设备已断开，请刷新设备列表后重试。");
+        return false;
+    }
+    if (!selected->isOperable() || m_currentMode == None
+        || !m_deviceSerials.contains(target)) {
+        if (error) {
+            *error = selected->state == QStringLiteral("unauthorized")
+                ? QStringLiteral("该设备尚未授权，请在手机上允许 USB 调试后重试。")
+                : QStringLiteral("该设备当前不可操作，请重新连接后重试。");
+        }
+        return false;
+    }
+    if (target == m_deviceSerial) return true;
+    // 操作进行中切换目标会让已启动的命令与界面目标不一致，直接拒绝。
+    if (DeviceOperationLease::owner()) {
+        if (error) *error = QStringLiteral("设备操作进行中，暂时无法切换目标设备。");
+        return false;
+    }
+    m_infoRefreshTimer.invalidate();
+    cancelInfoQuery();
+    m_deviceSerial = target;
+    // 列表中的型号可立即显示，不必等待完整信息查询。
+    m_deviceDisplayName = selected->model;
+    m_deviceInfo.clear();
+    m_deviceDetails.clear();
+    m_extendedDeviceDetails.clear();
+    emit deviceInfoUpdated(QString());
+    emit deviceDetailsUpdated(QString());
+    emit extendedDeviceDetailsUpdated(QString());
+    emit deviceSelectionChanged(target);
+    if (!m_isPaused) updateDeviceInfo();
+    return true;
+}
+
+void DeviceManager::refreshDevices()
+{
+    if (m_isPaused || !m_checkTimer->isActive()) return;
+    m_infoRefreshTimer.invalidate();
+    if (!m_isChecking) checkDeviceStatus();
 }
 
 void DeviceManager::verifyOperationTarget(DeviceMode mode, const QString &serial,
@@ -447,9 +621,9 @@ void DeviceManager::verifyOperationTarget(DeviceMode mode, const QString &serial
                 serials.append(fields[0]);
         }
         serials.removeDuplicates();
-        if (serials.size() > 1) {
-            finish(QStringLiteral("检测到多台设备，请断开其他设备后重试。"));
-        } else if (serials.size() != 1 || serials.constFirst() != serial) {
+        // 多设备本身不是错误：只确认本次操作锁定的序列号仍在目标模式中，
+        // 其他设备是否在线不影响 -s 指定的命令。
+        if (!serials.contains(serial)) {
             finish(QStringLiteral("原设备已断开、切换模式或序列号发生变化，未执行后续命令。"));
         } else {
             finish(QString());
@@ -707,6 +881,7 @@ void DeviceManager::finishExtendedInfoQuery(bool success, const QString &output)
     // Finish the batch before notifying observers; a slot may start a new one.
     m_infoRefreshTimer.start();
     m_infoQueryActive = false;
+    if (model != QStringLiteral("未知")) m_deviceDisplayName = model;
     if (details != m_extendedDeviceDetails) {
         m_extendedDeviceDetails = details;
         emit extendedDeviceDetailsUpdated(details);

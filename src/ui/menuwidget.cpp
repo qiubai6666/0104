@@ -1,5 +1,7 @@
 #include "menuwidget.h"
 #include "deviceoperationlease.h"
+#include "devicepicker.h"
+#include "elidedlabel.h"
 #include "configwindow.h"
 #include "devicecheckwindow.h"
 #include "screencastcontroller.h"
@@ -86,6 +88,23 @@ protected:
         }
     }
 };
+
+QPixmap rotatedChevron(const QColor &color, qreal ratio, int angle)
+{
+    const qreal dpr = qMax<qreal>(1.0, ratio);
+    QPixmap pixmap(qRound(14 * dpr), qRound(14 * dpr));
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.translate(7, 7);
+    painter.rotate(angle);
+    painter.translate(-7, -7);
+    UIHelper::menuIcon(QStringLiteral("chevron-right"), color, dpr)
+        .paint(&painter, QRect(0, 0, 14, 14));
+    painter.end();
+    return pixmap;
+}
 
 // 功能 tile：把图标与文字合成为一张 DPI 感知位图，保持预览稿“图标在上、文字在下”的观感，
 // 同时按钮仍保留 tooltip/accessibleName 与原 objectName。
@@ -311,8 +330,17 @@ void MenuWidget::setupUI()
             screenCastNavBar, &ScreenCastNavBar::attachToSession);
     connect(screenCastController, &ScreenCastController::sessionEnded,
             screenCastNavBar, &ScreenCastNavBar::detach);
-    connect(DeviceManager::instance(), &DeviceManager::deviceModeChanged,
+    auto *deviceManager = DeviceManager::instance();
+    connect(deviceManager, &DeviceManager::deviceModeChanged,
             this, &MenuWidget::updateDeviceRow);
+    connect(deviceManager, &DeviceManager::deviceListChanged,
+            this, &MenuWidget::updateDeviceRow);
+    connect(deviceManager, &DeviceManager::deviceSelectionChanged,
+            this, [this](const QString &) { updateDeviceRow(); });
+    connect(deviceManager, &DeviceManager::extendedDeviceDetailsUpdated,
+            this, [this](const QString &) { updateDeviceRow(); });
+    connect(DeviceOperationLease::instance(), &DeviceOperationLease::changed,
+            this, [this](bool held) { if (held) closeDevicePicker(); });
     updateDeviceRow();
     updateScreenCastButton();
     // 主页不显示返回头部，仅进入子页时展示。
@@ -365,7 +393,7 @@ QWidget *MenuWidget::buildHomePage()
     castTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
     castTitle->setStyleSheet(QString("font-size:13px; font-weight:600; color:%1;")
                              .arg(dark ? "#e9edf3" : "#22364a"));
-    screenCastSubtitle = new QLabel(castButton);
+    screenCastSubtitle = new ElidedLabel(castButton);
     screenCastSubtitle->setAttribute(Qt::WA_TransparentForMouseEvents);
     screenCastSubtitle->setStyleSheet(QString("font-size:11px; color:%1;")
                                       .arg(dark ? "#93a7b6" : "#647585"));
@@ -391,49 +419,83 @@ QWidget *MenuWidget::buildHomePage()
     buttons.append(castButton);
     connect(castButton, &QPushButton::clicked, this, &MenuWidget::onButtonClicked);
 
-    // 设备行：按钮即整行（预览稿 devrow），悬停淡底覆盖整行外框，点击进入设备检测页。
-    auto *deviceRow = new QPushButton(page);
-    deviceRow->setObjectName("deviceRowButton");
-    deviceRow->setAccessibleName(QStringLiteral("设备检测"));
-    deviceRow->setCursor(Qt::PointingHandCursor);
-    deviceRow->setToolTip(QStringLiteral("打开设备检测"));
-    deviceRow->setFixedHeight(40);
-    deviceRow->setStyleSheet("QPushButton { background:transparent; border:none; border-radius:12px; }"
-                             "QPushButton:hover { background:rgba(146,166,181,60); }"
-                             "QPushButton:pressed { background:rgba(146,166,181,90); }");
-    auto *deviceGrid = new QGridLayout(deviceRow);
-    deviceGrid->setContentsMargins(12, 0, 12, 0);
-    deviceGrid->setSpacing(9);
+    // 设备行：显示投屏与设备检测的共同目标，点击展开选择器。
+    const QColor ink(dark ? "#e9edf3" : "#22364a");
     const QColor inkDim(dark ? "#93a7b6" : "#647585");
-    auto *deviceIcon = new QLabel(deviceRow);
+    const QColor inkFaint(dark ? "#7f95a6" : "#95a5b2");
+    deviceRowButton = new QPushButton(page);
+    deviceRowButton->setObjectName("deviceRowButton");
+    deviceRowButton->setAccessibleName(QStringLiteral("选择目标设备"));
+    deviceRowButton->setCursor(Qt::PointingHandCursor);
+    deviceRowButton->setToolTip(QStringLiteral("选择投屏与设备检测使用的设备"));
+    deviceRowButton->setFixedHeight(48);
+    deviceRowButton->setStyleSheet(
+        "QPushButton { background:transparent; border:1px solid transparent; border-radius:12px; }"
+        "QPushButton:hover { background:rgba(146,166,181,60); }"
+        "QPushButton:pressed { background:rgba(146,166,181,90); }");
+    auto *deviceRowLayout = new QHBoxLayout(deviceRowButton);
+    deviceRowLayout->setContentsMargins(10, 0, 10, 0);
+    deviceRowLayout->setSpacing(9);
+    auto *deviceIcon = new QLabel(deviceRowButton);
     deviceIcon->setPixmap(UIHelper::menuIcon(QStringLiteral("smartphone"), inkDim,
-                                            devicePixelRatioF()).pixmap(15, 15));
-    deviceIcon->setFixedSize(15, 15);
+                                            devicePixelRatioF()).pixmap(16, 16));
+    deviceIcon->setFixedSize(16, 16);
     deviceIcon->setScaledContents(true);
     deviceIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
-    auto *deviceTitle = new QLabel(QStringLiteral("设备"), deviceRow);
-    deviceTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
-    deviceTitle->setStyleSheet(QString("font-size:12px; color:%1;").arg(inkDim.name()));
-    devicePill = new QLabel(deviceRow);
+
+    auto *deviceTexts = new QVBoxLayout;
+    deviceTexts->setContentsMargins(0, 0, 0, 0);
+    deviceTexts->setSpacing(1);
+    auto *eyebrowRow = new QHBoxLayout;
+    eyebrowRow->setContentsMargins(0, 0, 0, 0);
+    eyebrowRow->setSpacing(4);
+    auto *eyebrow = new QLabel(QStringLiteral("目标设备"), deviceRowButton);
+    eyebrow->setAttribute(Qt::WA_TransparentForMouseEvents);
+    eyebrow->setStyleSheet(QString("font-size:8.5px; font-weight:600; color:%1;")
+                           .arg(inkFaint.name()));
+    auto *eyebrowDot = new QLabel(QStringLiteral("·"), deviceRowButton);
+    eyebrowDot->setAttribute(Qt::WA_TransparentForMouseEvents);
+    eyebrowDot->setStyleSheet(QString("font-size:8.5px; color:%1;")
+                              .arg(dark ? "#5d7181" : "#c3ced6"));
+    deviceSerialLabel = new ElidedLabel(deviceRowButton);
+    deviceSerialLabel->setText(QStringLiteral("未连接"));
+    deviceSerialLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    deviceSerialLabel->setStyleSheet(QString(
+        "font-family:'Consolas'; font-size:7.5px; color:%1;").arg(inkFaint.name()));
+    eyebrowRow->addWidget(eyebrow);
+    eyebrowRow->addWidget(eyebrowDot);
+    eyebrowRow->addWidget(deviceSerialLabel, 1);
+    deviceNameLabel = new ElidedLabel(deviceRowButton);
+    deviceNameLabel->setText(QStringLiteral("未检测到设备"));
+    deviceNameLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    deviceNameLabel->setStyleSheet(QString("font-size:12.5px; font-weight:600; color:%1;")
+                                   .arg(ink.name()));
+    deviceTexts->addLayout(eyebrowRow);
+    deviceTexts->addWidget(deviceNameLabel);
+
+    devicePill = new QLabel(deviceRowButton);
     devicePill->setObjectName("statusPill");
     devicePill->setAttribute(Qt::WA_TransparentForMouseEvents);
     devicePill->setProperty("state", "off");
-    devicePill->setStyleSheet(screenCastPill->styleSheet());
-    auto *deviceChevron = new QLabel(deviceRow);
-    deviceChevron->setPixmap(UIHelper::menuIcon(QStringLiteral("chevron-right"), inkDim,
-                                                devicePixelRatioF()).pixmap(14, 14));
-    deviceChevron->setFixedSize(14, 14);
-    deviceChevron->setScaledContents(true);
+    devicePill->setStyleSheet(QString(
+        "QLabel#statusPill { border-radius:9px; padding:2px 8px; font-size:10px; font-weight:600; }"
+        "QLabel#statusPill[state=\"ok\"] { color:%1; background:%2; }"
+        "QLabel#statusPill[state=\"loading\"] { color:%3; background:%4; }"
+        "QLabel#statusPill[state=\"off\"] { color:%5; background:%6; }")
+        .arg(dark ? "#7ee2a8" : "#187a4d", dark ? "rgba(34,163,90,36)" : "#e9f7f0",
+             dark ? "#f4c66a" : "#9a6a0d", dark ? "rgba(226,154,45,34)" : "#fff4de",
+             dark ? "#93a7b6" : "#71818f", dark ? "rgba(154,168,181,28)" : "rgba(154,168,181,33)"));
+    deviceChevron = new QLabel(deviceRowButton);
     deviceChevron->setAttribute(Qt::WA_TransparentForMouseEvents);
-    deviceGrid->addWidget(deviceIcon, 0, 0, Qt::AlignVCenter);
-    deviceGrid->addWidget(deviceTitle, 0, 1, Qt::AlignVCenter);
-    deviceGrid->setColumnStretch(1, 1);
-    deviceGrid->addWidget(devicePill, 0, 2, Qt::AlignVCenter | Qt::AlignRight);
-    deviceGrid->addWidget(deviceChevron, 0, 3, Qt::AlignVCenter | Qt::AlignRight);
-    layout->addWidget(deviceRow);
-    connect(deviceRow, &QPushButton::clicked, this, [this] {
-        showSubmenu(DeviceCheck, ensureDeviceCheckWindow());
-    });
+    deviceChevron->setFixedSize(14, 14);
+    deviceChevron->setPixmap(rotatedChevron(inkFaint, devicePixelRatioF(), 90));
+
+    deviceRowLayout->addWidget(deviceIcon, 0, Qt::AlignVCenter);
+    deviceRowLayout->addLayout(deviceTexts, 1);
+    deviceRowLayout->addWidget(devicePill, 0, Qt::AlignVCenter);
+    deviceRowLayout->addWidget(deviceChevron, 0, Qt::AlignVCenter);
+    layout->addWidget(deviceRowButton);
+    connect(deviceRowButton, &QPushButton::clicked, this, &MenuWidget::toggleDevicePicker);
 
     // 功能 tile 2×3（buttons[RepairTools..ContactAuthor]）。
     auto *tileGrid = new QGridLayout;
@@ -513,6 +575,42 @@ QWidget *MenuWidget::buildHomePage()
     buttons.append(footerButtons[1]);
     buttons.append(footerButtons[0]);
     layout->addLayout(footerRow);
+
+    // 目标设备浮层与切换提示：浮层不参与布局，覆盖在设备行下方。
+    devicePicker = new DevicePicker(page);
+    devicePicker->hide();
+    connect(devicePicker, &DevicePicker::deviceSelected, this, [this](const QString &serial) {
+        closeDevicePicker();
+        QString name = targetDisplayName();
+        if (name.isEmpty()) name = serial;
+        showDeviceToast(QStringLiteral("已切换：%1").arg(name));
+    });
+    connect(devicePicker, &DevicePicker::closeRequested, this, &MenuWidget::closeDevicePicker);
+    connect(devicePicker, &DevicePicker::refreshRequested, this, [this] {
+        devicePicker->setScanning(true);
+        devicePicker->showHint(QStringLiteral("正在扫描已连接的设备…"));
+        DeviceManager::instance()->refreshDevices();
+        QTimer::singleShot(900, this, [this] {
+            if (!devicePicker) return;
+            devicePicker->setScanning(false);
+            devicePicker->showHint(QStringLiteral("刚刚刷新 · %1 台设备在线")
+                                   .arg(devicePicker->onlineCount()));
+        });
+    });
+
+    deviceToast = new QLabel(page);
+    deviceToast->setObjectName("deviceTargetToast");
+    deviceToast->setAlignment(Qt::AlignCenter);
+    deviceToast->setFixedHeight(28);
+    deviceToast->setStyleSheet(QString(
+        "QLabel#deviceTargetToast { background:%1; color:#FFFFFF; border-radius:10px;"
+        " padding:0 12px; font-size:10.5px; }")
+        .arg(dark ? "#0f1a24" : "#1f3447"));
+    deviceToast->hide();
+    deviceToastTimer = new QTimer(this);
+    deviceToastTimer->setSingleShot(true);
+    deviceToastTimer->setInterval(1900);
+    connect(deviceToastTimer, &QTimer::timeout, deviceToast, &QWidget::hide);
     return page;
 }
 
@@ -528,6 +626,7 @@ void MenuWidget::showSubmenu(MenuAction action, QWidget *window)
         showHome();
         return;
     }
+    closeDevicePicker();
     pages->setCurrentWidget(window);
     pageTitle->setText(pageTitles.value(window));
     header->setVisible(true);
@@ -560,6 +659,7 @@ void MenuWidget::toggleSubmenu(MenuAction action, QWidget *window)
 
 void MenuWidget::showHome()
 {
+    closeDevicePicker();
     pages->setCurrentWidget(homePage);
     header->setVisible(false);
     updateMenuSelection();
@@ -710,6 +810,12 @@ bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
         // 面板可见时，点击面板与悬浮球之外的区域收起面板。
         auto *widget = qobject_cast<QWidget *>(watched);
         if (widget && isVisible()) {
+            // 选择器展开时，面板内其他位置的点击先收起浮层，不吞掉本次点击。
+            if (devicePicker && devicePicker->isVisible()) {
+                const bool insidePicker = widget == devicePicker || devicePicker->isAncestorOf(widget);
+                const bool insideRow = widget == deviceRowButton || deviceRowButton->isAncestorOf(widget);
+                if (!insidePicker && !insideRow && isAncestorOf(widget)) closeDevicePicker();
+            }
             const bool insidePanel = widget == this || isAncestorOf(widget);
             const bool insideBall = ball && (widget == ball || ball->isAncestorOf(widget));
             // 下拉列表、对话框等独立顶层窗口不在 isAncestorOf 判定链内，
@@ -733,7 +839,8 @@ bool MenuWidget::eventFilter(QObject *watched, QEvent *event)
         auto *widget = qobject_cast<QWidget *>(watched);
         if (widget && isVisible() && widget->window() == this &&
             static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
-            collapsePanel();
+            if (devicePicker && devicePicker->isVisible()) closeDevicePicker();
+            else collapsePanel();
             return true;
         }
         return QWidget::eventFilter(watched, event);
@@ -777,6 +884,11 @@ void MenuWidget::changeEvent(QEvent *event)
 
 void MenuWidget::setVisible(bool visible)
 {
+    if (!visible) {
+        closeDevicePicker();
+        if (deviceToast) deviceToast->hide();
+        if (deviceToastTimer) deviceToastTimer->stop();
+    }
     QWidget::setVisible(visible);
     updateMenuSelection();
 }
@@ -795,7 +907,13 @@ void MenuWidget::updateScreenCastButton()
     button->setEnabled(true);
     button->setAccessibleName(QStringLiteral("投屏"));
     button->setAccessibleDescription(screenCastController->statusText());
-    screenCastSubtitle->setText(screenCastController->statusText());
+    QString castSubtitle = screenCastController->statusText();
+    if (state == ScreenCastController::Idle) {
+        const QString target = targetDisplayName();
+        if (!target.isEmpty())
+            castSubtitle = QStringLiteral("%1 · %2").arg(target, castSubtitle);
+    }
+    screenCastSubtitle->setText(castSubtitle);
     const bool streaming = state == ScreenCastController::Streaming || state == ScreenCastController::Stopping;
     screenCastPill->setText(loading ? QStringLiteral("启动中")
                           : streaming ? QStringLiteral("流式中") : QStringLiteral("未连接"));
@@ -820,14 +938,159 @@ void MenuWidget::updateScreenCastButton()
     }
 }
 
+QString MenuWidget::targetDisplayName() const
+{
+    auto *manager = DeviceManager::instance();
+    const QString serial = manager->deviceSerial();
+    if (serial.isEmpty()) return QString();
+    const QString display = manager->deviceDisplayName();
+    if (!display.isEmpty()) return display;
+    for (const auto &entry : manager->deviceEntries())
+        if (entry.serial == serial && !entry.model.isEmpty()) return entry.model;
+    return QString();
+}
+
 void MenuWidget::updateDeviceRow()
 {
-    const auto mode = DeviceManager::instance()->currentMode();
-    const bool adb = mode == DeviceManager::ADB;
-    const bool fastboot = mode == DeviceManager::Fastboot;
-    devicePill->setText(adb ? QStringLiteral("已连接 · ADB")
-                      : fastboot ? QStringLiteral("已连接 · Fastboot") : QStringLiteral("未连接"));
-    devicePill->setProperty("state", adb ? "ok" : fastboot ? "loading" : "off");
+    auto *manager = DeviceManager::instance();
+    const QVector<DeviceManager::DeviceEntry> entries = manager->deviceEntries();
+    const QString serial = manager->deviceSerial();
+    const DeviceManager::DeviceEntry *target = nullptr;
+    for (const auto &entry : entries)
+        if (!serial.isEmpty() && entry.serial == serial) target = &entry;
+
+    int operable = 0;
+    bool hasUnauthorized = false;
+    bool hasOtherUnavailable = false;
+    for (const auto &entry : entries) {
+        if (entry.isOperable()) {
+            ++operable;
+        } else if (entry.state == QStringLiteral("unauthorized")) {
+            hasUnauthorized = true;
+        } else {
+            hasOtherUnavailable = true;
+        }
+    }
+    // 仅有未授权设备时也在行内展示它，点击即可看到具体原因。
+    if (!target && operable == 0 && !entries.isEmpty()) target = &entries.constFirst();
+
+    QString name;
+    if (target) {
+        if (!serial.isEmpty() && target->serial == serial) name = manager->deviceDisplayName();
+        if (name.isEmpty()) name = target->model;
+        if (name.isEmpty()) {
+            name = target->state == QStringLiteral("fastboot")
+                ? QStringLiteral("Fastboot 设备") : QStringLiteral("Android 设备");
+        }
+    }
+
+    deviceSerialLabel->setText(target ? target->serial : QStringLiteral("未连接"));
+    deviceSerialLabel->setToolTip(target ? target->serial : QString());
+    deviceNameLabel->setText(target ? name : QStringLiteral("未检测到设备"));
+    deviceNameLabel->setToolTip(target ? name : QString());
+    deviceNameLabel->update();
+
+    if (operable > 1) {
+        devicePill->setText(QStringLiteral("%1 台在线").arg(operable));
+        devicePill->setProperty("state", "ok");
+    } else if (operable == 1) {
+        devicePill->setText(QStringLiteral("已连接"));
+        devicePill->setProperty("state", "ok");
+    } else if (!entries.isEmpty()) {
+        devicePill->setText(hasUnauthorized && !hasOtherUnavailable
+                                ? QStringLiteral("待授权") : QStringLiteral("不可用"));
+        devicePill->setProperty("state", "loading");
+    } else {
+        devicePill->setText(QStringLiteral("未连接"));
+        devicePill->setProperty("state", "off");
+    }
+
+    deviceRowButton->setAccessibleDescription(
+        target ? QStringLiteral("目标设备 %1，序列号 %2").arg(name, target->serial)
+               : QStringLiteral("未检测到可操作设备"));
+    deviceRowButton->setToolTip(target
+        ? QStringLiteral("当前目标：%1\n点击选择其他设备").arg(name)
+        : QStringLiteral("选择投屏与设备检测使用的设备"));
+
+    if (devicePicker) {
+        const QString selectedDisplay = (!serial.isEmpty() && target && target->serial == serial)
+            ? name : QString();
+        devicePicker->setDevices(entries, serial, selectedDisplay);
+        if (devicePicker->isVisible()) positionDevicePicker();
+    }
+    updateScreenCastButton();
+}
+
+void MenuWidget::toggleDevicePicker()
+{
+    if (!devicePicker) return;
+    if (devicePicker->isVisible()) {
+        closeDevicePicker();
+        return;
+    }
+    updateDeviceRow();
+    devicePicker->resetHint();
+    setDeviceRowOpen(true);
+    positionDevicePicker();
+    devicePicker->show();
+    devicePicker->raise();
+}
+
+void MenuWidget::closeDevicePicker()
+{
+    if (!devicePicker) return;
+    if (devicePicker->isVisible()) devicePicker->hide();
+    devicePicker->setScanning(false);
+    setDeviceRowOpen(false);
+}
+
+void MenuWidget::positionDevicePicker()
+{
+    if (!devicePicker || !homePage || !deviceRowButton) return;
+    devicePicker->adjustSize();
+    const int x = deviceRowButton->x();
+    int y = deviceRowButton->y() + deviceRowButton->height() + 4;
+    const int maxBottom = homePage->height() - 6;
+    if (y + devicePicker->height() > maxBottom)
+        y = qMax(6, maxBottom - devicePicker->height());
+    devicePicker->move(x, y);
+}
+
+void MenuWidget::setDeviceRowOpen(bool open)
+{
+    if (!deviceRowButton) return;
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    const QColor faint(dark ? "#7f95a6" : "#95a5b2");
+    QString style = QStringLiteral(
+        "QPushButton { background:transparent; border:1px solid transparent; border-radius:12px; }"
+        "QPushButton:hover { background:rgba(146,166,181,60); }"
+        "QPushButton:pressed { background:rgba(146,166,181,90); }");
+    if (open) {
+        style += QStringLiteral(
+            "QPushButton { background:%1; border:1px solid %2; }"
+            "QPushButton:hover { background:%3; }")
+            .arg(dark ? QStringLiteral("rgba(63,140,242,26)") : QStringLiteral("rgba(47,128,237,14)"),
+                 dark ? QStringLiteral("rgba(63,140,242,90)") : QStringLiteral("rgba(47,128,237,66)"),
+                 dark ? QStringLiteral("rgba(63,140,242,38)") : QStringLiteral("rgba(47,128,237,24)"));
+    }
+    deviceRowButton->setStyleSheet(style);
+    if (deviceChevron)
+        deviceChevron->setPixmap(rotatedChevron(faint, devicePixelRatioF(), open ? 270 : 90));
+}
+
+void MenuWidget::showDeviceToast(const QString &text)
+{
+    if (!deviceToast || !homePage) return;
+    deviceToast->setText(text);
+    deviceToast->setToolTip(text);
+    deviceToast->adjustSize();
+    const int width = qMin(deviceToast->width(), 240);
+    deviceToast->setFixedWidth(width);
+    deviceToast->move((homePage->width() - width) / 2,
+                      homePage->height() - 58 - deviceToast->height());
+    deviceToast->raise();
+    deviceToast->show();
+    if (deviceToastTimer) deviceToastTimer->start();
 }
 
 void MenuWidget::paintScreenCastSpinner()
