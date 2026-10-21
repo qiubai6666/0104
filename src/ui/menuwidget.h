@@ -112,7 +112,7 @@ private:
     FloatingBall *ball = nullptr;
     QVector<QPushButton*> buttons;
     ScreenCastController *screenCastController;
-    // 投屏导航条（返回/主页/多任务），生命周期跟随 screenCastController 会话。
+    // 投屏导航条（返回/主页/多任务/亮屏·息屏），生命周期跟随 screenCastController 会话。
     ScreenCastNavBar *screenCastNavBar = nullptr;
     QTimer *screenCastSpinnerTimer;
     int screenCastSpinnerAngle = 0;

@@ -507,25 +507,26 @@ private slots:
         QCOMPARE(ScreenCastNavBar::androidKeyCode(ScreenCastNavBar::NavAction::Back), 4);
         QCOMPARE(ScreenCastNavBar::androidKeyCode(ScreenCastNavBar::NavAction::Home), 3);
         QCOMPARE(ScreenCastNavBar::androidKeyCode(ScreenCastNavBar::NavAction::Recents), 187);
+        QCOMPARE(ScreenCastNavBar::androidKeyCode(ScreenCastNavBar::NavAction::Power), 26);
     }
     void navigationBarPlacementMath() {
         const QSize nav = ScreenCastNavBar::preferredSize();
-        QCOMPARE(nav, QSize(48, 128));
+        QCOMPARE(nav, QSize(48, 168));
         // 右侧有空间：贴右侧、相对投屏窗口垂直居中。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, 100, 400, 300), QRect(0, 0, 800, 600), nav),
-                 QRect(508, 186, 48, 128));
+                 QRect(508, 166, 48, 168));
         // 右侧越界、左侧有空间：回退到左侧。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(500, 100, 280, 400), QRect(0, 0, 800, 600), nav),
-                 QRect(444, 236, 48, 128));
+                 QRect(444, 216, 48, 168));
         // 两侧都放不下（全屏）：贴工作区右缘。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(0, 0, 800, 600), QRect(0, 0, 800, 600), nav),
-                 QRect(752, 236, 48, 128));
+                 QRect(752, 216, 48, 168));
         // 垂直越出工作区下方：钳制在工作区内。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, 400, 400, 500), QRect(0, 0, 800, 600), nav),
-                 QRect(508, 472, 48, 128));
+                 QRect(508, 432, 48, 168));
         // 垂直越出工作区上方：钳制在工作区内。
         QCOMPARE(ScreenCastNavBar::computePlacement(QRect(100, -300, 400, 300), QRect(0, 0, 800, 600), nav),
-                 QRect(508, 0, 48, 128));
+                 QRect(508, 0, 48, 168));
     }
     void navigationBarWindowCandidateFilter() {
         const QRect regular(100, 100, 400, 700);
@@ -594,12 +595,14 @@ private slots:
         QVERIFY(!navbar->isVisible());
         // 点击导航条按钮：通过 adb input keyevent 发送对应按键。
         QPushButton *back = nullptr; QPushButton *home = nullptr; QPushButton *recents = nullptr;
+        QPushButton *power = nullptr;
         for (QPushButton *button : navbar->findChildren<QPushButton *>()) {
             if (button->accessibleName() == QStringLiteral("返回")) back = button;
             if (button->accessibleName() == QStringLiteral("主页")) home = button;
             if (button->accessibleName() == QStringLiteral("多任务")) recents = button;
+            if (button->accessibleName() == QStringLiteral("亮屏/息屏")) power = button;
         }
-        QVERIFY(back && home && recents);
+        QVERIFY(back && home && recents && power);
         back->click();
         QTRY_COMPARE(adbKeyCommands().size(), 1);
         QCOMPARE(adbKeyCommands().first(), QJsonArray({"adb", "-s", "PHONE_A",
@@ -611,6 +614,10 @@ private slots:
             "shell", "input", "keyevent", "3"})));
         QVERIFY(adbKeyCommands().contains(QJsonArray({"adb", "-s", "PHONE_A",
             "shell", "input", "keyevent", "187"})));
+        power->click();
+        QTRY_COMPARE(adbKeyCommands().size(), 4);
+        QVERIFY(adbKeyCommands().contains(QJsonArray({"adb", "-s", "PHONE_A",
+            "shell", "input", "keyevent", "26"})));
         // 会话结束：停止跟踪，按键不再发送。
         menu.buttons[MenuWidget::ScreenCast]->click();
         QTRY_COMPARE(controller->state(), ScreenCastController::Idle);
@@ -618,7 +625,7 @@ private slots:
         QVERIFY(!navbar->hasCastWindow());
         back->click();
         QTest::qWait(200);
-        QCOMPARE(adbKeyCommands().size(), 3);
+        QCOMPARE(adbKeyCommands().size(), 4);
     }
     void failedStartKeepsAutoCastAndRetries() {
         QVERIFY(QFile::rename(fixturePath + "/scrcpy.exe", fixturePath + "/missing-scrcpy.exe"));

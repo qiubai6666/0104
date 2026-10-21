@@ -4,15 +4,15 @@
 #include <QWidget>
 #include <QTimer>
 
-// 投屏导航条：贴在 scrcpy 窗口右侧的竖排「返回 / 主页 / 多任务」按钮，
-// 通过 adb input keyevent 驱动手机。窗口自身不抢焦点（WS_EX_NOACTIVATE），
+// 投屏导航条：贴在 scrcpy 窗口右侧的竖排「返回 / 主页 / 多任务 / 亮屏·息屏」
+// 按钮，通过 adb input keyevent 驱动手机。窗口自身不抢焦点（WS_EX_NOACTIVATE），
 // 生命周期完全跟随投屏会话：attachToSession 等待 scrcpy 窗口出现后跟随定位，
 // detach 停止跟踪并隐藏，不独立存活。
 class ScreenCastNavBar : public QWidget
 {
     Q_OBJECT
 public:
-    enum class NavAction { Back, Home, Recents };
+    enum class NavAction { Back, Home, Recents, Power };
     Q_ENUM(NavAction)
 
     explicit ScreenCastNavBar(QWidget *parent = nullptr);

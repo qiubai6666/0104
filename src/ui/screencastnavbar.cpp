@@ -15,7 +15,7 @@
 #endif
 
 namespace {
-// 紧凑竖条布局：容器 6px 边距、36px 图标按钮、间距 4，整体 48×128。
+// 紧凑竖条布局：容器 6px 边距、36px 图标按钮、间距 4，整体 48×168。
 constexpr int kMargin = 6;
 constexpr int kSpacing = 4;
 constexpr int kButtonSize = 36;
@@ -33,6 +33,7 @@ int actionKeyCode(ScreenCastNavBar::NavAction action)
     case ScreenCastNavBar::NavAction::Back: return 4;    // KEYCODE_BACK
     case ScreenCastNavBar::NavAction::Home: return 3;    // KEYCODE_HOME
     case ScreenCastNavBar::NavAction::Recents: return 187; // KEYCODE_APP_SWITCH
+    case ScreenCastNavBar::NavAction::Power: return 26;  // KEYCODE_POWER（亮屏/息屏）
     }
     return 0;
 }
@@ -159,6 +160,7 @@ void ScreenCastNavBar::buildButtons()
         {"corner-up-left", QStringLiteral("返回"), NavAction::Back},
         {"home", QStringLiteral("主页"), NavAction::Home},
         {"recents", QStringLiteral("多任务"), NavAction::Recents},
+        {"power", QStringLiteral("亮屏/息屏"), NavAction::Power},
     };
     for (const Entry &entry : entries) {
         auto *button = new QPushButton(this);
@@ -184,7 +186,7 @@ int ScreenCastNavBar::androidKeyCode(NavAction action)
 QSize ScreenCastNavBar::preferredSize()
 {
     return QSize(kButtonSize + kMargin * 2,
-                 kButtonSize * 3 + kSpacing * 2 + kMargin * 2);
+                 kButtonSize * 4 + kSpacing * 3 + kMargin * 2);
 }
 
 QRect ScreenCastNavBar::computePlacement(const QRect &castRect, const QRect &workArea, const QSize &navSize)
