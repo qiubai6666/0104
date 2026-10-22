@@ -9,7 +9,7 @@
 在 PowerShell 7 中运行：
 
 ```powershell
-& 'D:\Users\Administrator\Desktop\新版本\build-protected-release.ps1' `
+& 'D:\Users\Administrator\Desktop\orangetools\build-protected-release.ps1' `
   -QtBinPath 'D:\Qt\6.11.2\mingw_64\bin' `
   -CompilerBinPath 'D:\Qt\Tools\mingw1310_64\bin' `
   -Jobs 4
